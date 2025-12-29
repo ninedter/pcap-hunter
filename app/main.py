@@ -30,11 +30,13 @@ from app.ui.layout import (
     make_results_panel,
     make_tabs,
     render_carved,
+    render_dns_analysis,
     render_flows,
     render_ja3,
     render_osint,
     render_overview,
     render_report,
+    render_tls_certificates,
     render_zeek,
 )
 from app.utils.common import ensure_dir, is_public_ipv4, make_slug, uniq_sorted
@@ -106,6 +108,8 @@ for k, v in [
     ("__total_pkts", None),
     ("runtime_logs", []),
     ("map_reset_counter", 0),
+    ("dns_analysis", None),
+    ("tls_analysis", None),
 ]:
     if k not in st.session_state:
         st.session_state[k] = v
@@ -140,6 +144,8 @@ with tab_upload:
         ("Packet counting (tshark)", pre_count and do_pyshark),
         ("Parsing Packets", do_pyshark),
         ("Zeek processing", do_zeek),
+        ("DNS Analysis", do_zeek),  # Requires Zeek dns.log
+        ("TLS Certificate Analysis", do_zeek),  # Requires Zeek ssl.log
         ("Beaconing ranking", True),
         ("HTTP carving (tshark)", do_carve),
         ("OSINT enrichment", True),
@@ -162,6 +168,8 @@ with tab_upload:
                 "carved": [],
                 "__total_pkts": None,
                 "__pcap_path": pcap_path,
+                "dns_analysis": None,
+                "tls_analysis": None,
             }
         )
         st.success("Analysis started. Switch to the **Progress** tab to monitor.")
@@ -197,6 +205,8 @@ with tab_progress:
             ("Packet counting (tshark)", pre_count and do_pyshark),
             ("Parsing Packets", do_pyshark),
             ("Zeek processing", do_zeek),
+            ("DNS Analysis", do_zeek),  # Requires Zeek dns.log
+            ("TLS Certificate Analysis", do_zeek),  # Requires Zeek ssl.log
             ("Beaconing ranking", True),
             ("HTTP carving (tshark)", do_carve),
             ("OSINT enrichment", True),
@@ -281,15 +291,49 @@ with tab_progress:
 
             # Merge Zeek DNS queries into artifacts
             from app.pipeline.zeek import merge_zeek_dns
+
             features = merge_zeek_dns(zeek_tables, features)
             st.session_state["features"] = features
 
             # Extract JA3 fingerprints from ssl.log
             from app.pipeline.zeek import extract_ja3_from_zeek_tables
+
             zeek_log_paths = {name: str(C.ZEEK_DIR / name) for name in zeek_tables.keys()}
             ja3_df, ja3_analysis = extract_ja3_from_zeek_tables(zeek_log_paths)
             st.session_state["ja3_df"] = ja3_df
             st.session_state["ja3_analysis"] = ja3_analysis
+
+        # DNS Analysis
+        if dict(phases).get("DNS Analysis", False):
+            p = tracker.next_phase("DNS Analysis")
+            if not st.session_state.get(f"done_{make_slug('DNS Analysis')}", False):
+                if not st.session_state.get(f"skip_{make_slug('DNS Analysis')}", False):
+                    from app.pipeline.dns_analysis import analyze_dns
+
+                    with st.spinner("Analyzing DNS traffic..."):
+                        dns_result = analyze_dns(zeek_tables, features, phase=p)
+                        st.session_state["dns_analysis"] = dns_result
+                else:
+                    p.done("DNS analysis skipped.")
+                    st.session_state["dns_analysis"] = {"skipped": True}
+
+        # TLS Certificate Analysis
+        if dict(phases).get("TLS Certificate Analysis", False):
+            p = tracker.next_phase("TLS Certificate Analysis")
+            if not st.session_state.get(f"done_{make_slug('TLS Certificate Analysis')}", False):
+                if not st.session_state.get(f"skip_{make_slug('TLS Certificate Analysis')}", False):
+                    from app.pipeline.tls_certs import analyze_certificates
+
+                    with st.spinner("Extracting TLS certificates..."):
+                        tls_result = analyze_certificates(
+                            pcap_path=pcap_path,
+                            zeek_tables=zeek_tables,
+                            phase=p,
+                        )
+                        st.session_state["tls_analysis"] = tls_result
+                else:
+                    p.done("TLS analysis skipped.")
+                    st.session_state["tls_analysis"] = {"skipped": True}
 
         # Beaconing
         p = tracker.next_phase("Beaconing ranking")
@@ -523,7 +567,7 @@ with tab_dashboard:
                 width="stretch",
                 on_select="rerun",
                 selection_mode="points",
-                key="pie_select"
+                key="pie_select",
             )
 
             # Handle Pie Selection
@@ -560,7 +604,7 @@ with tab_dashboard:
                 width="stretch",
                 on_select="rerun",
                 selection_mode=["box", "lasso"],
-                key="timeline_select"
+                key="timeline_select",
             )
 
             # Handle Timeline Selection
@@ -605,6 +649,8 @@ with tab_results:
         render_overview(results_panel, st.session_state.get("features"))
         feats = st.session_state.get("features") or {}
         render_flows(results_panel, feats.get("flows"))
+        render_dns_analysis(results_panel, st.session_state.get("dns_analysis"))
+        render_tls_certificates(results_panel, st.session_state.get("tls_analysis"))
         render_ja3(
             results_panel,
             st.session_state.get("ja3_df"),

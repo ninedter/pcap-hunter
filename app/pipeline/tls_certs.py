@@ -310,8 +310,14 @@ def _parse_cert_with_cryptography(cert_der: bytes) -> dict[str, Any]:
         except x509.ExtensionNotFound:
             result["sans"] = []
 
+    except ValueError as e:
+        logger.debug(f"Invalid certificate format: {e}, falling back to openssl")
+        return _parse_cert_with_openssl_fallback(cert_der)
+    except TypeError as e:
+        logger.debug(f"Certificate data type error: {e}, falling back to openssl")
+        return _parse_cert_with_openssl_fallback(cert_der)
     except Exception as e:
-        logger.debug(f"Cryptography parsing failed: {e}, falling back to openssl")
+        logger.warning(f"Unexpected certificate parsing error: {e}")
         return _parse_cert_with_openssl_fallback(cert_der)
 
     return result

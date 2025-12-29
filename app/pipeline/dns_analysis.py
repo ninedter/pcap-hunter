@@ -21,6 +21,41 @@ from app.pipeline.state import PhaseHandle
 
 logger = logging.getLogger(__name__)
 
+# --- Domain Validation Constants ---
+MAX_DOMAIN_LENGTH = 253  # RFC 1035
+MAX_LABEL_LENGTH = 63  # RFC 1035
+VALID_DOMAIN_PATTERN = re.compile(r"^[a-z0-9]([a-z0-9\-_.]*[a-z0-9])?$", re.IGNORECASE)
+
+
+def validate_domain(domain: str) -> bool:
+    """
+    Validate domain name to prevent ReDoS and injection attacks.
+
+    Args:
+        domain: Domain name to validate
+
+    Returns:
+        True if domain is valid, False otherwise
+    """
+    if not domain or not isinstance(domain, str):
+        return False
+
+    # Check total length (RFC 1035)
+    if len(domain) > MAX_DOMAIN_LENGTH:
+        return False
+
+    # Check each label length
+    labels = domain.split(".")
+    if not all(0 < len(label) <= MAX_LABEL_LENGTH for label in labels):
+        return False
+
+    # Check for valid characters (alphanumeric, hyphen, dot, underscore for DNS)
+    if not VALID_DOMAIN_PATTERN.match(domain):
+        return False
+
+    return True
+
+
 # Known legitimate TLDs that often have high entropy subdomains
 ENTROPY_WHITELIST_TLDS = {
     "cloudfront.net",
@@ -567,8 +602,8 @@ def analyze_dns(
     if phase:
         phase.set(20, f"Analyzing {len(records)} DNS records...")
 
-    # Extract unique domains
-    all_domains = list({r.query for r in records})
+    # Extract unique domains (with validation)
+    all_domains = list({r.query for r in records if validate_domain(r.query)})
 
     # Group by base domain
     domain_groups: dict[str, list[str]] = defaultdict(list)

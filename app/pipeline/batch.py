@@ -27,6 +27,41 @@ MAX_TUNNELING_RESULTS = 20
 MAX_FAST_FLUX_RESULTS = 20
 MAX_CERTIFICATES = 100
 
+# --- Resource Limits (to prevent OOM) ---
+MAX_FILE_SIZE_BYTES = 1024 * 1024 * 1024  # 1GB per file
+MAX_CONCURRENT_FILES = 50  # Maximum files in a batch
+MAX_TOTAL_SIZE_BYTES = 5 * 1024 * 1024 * 1024  # 5GB total
+
+
+def validate_pcap_file(path: Path) -> tuple[bool, str]:
+    """
+    Validate a PCAP file before processing.
+
+    Args:
+        path: Path to PCAP file
+
+    Returns:
+        (is_valid, error_message)
+    """
+    if not path.exists():
+        return False, f"File not found: {path}"
+
+    if not path.is_file():
+        return False, f"Not a file: {path}"
+
+    try:
+        file_size = path.stat().st_size
+        if file_size > MAX_FILE_SIZE_BYTES:
+            size_gb = file_size / (1024**3)
+            max_gb = MAX_FILE_SIZE_BYTES / (1024**3)
+            return False, f"File too large: {size_gb:.2f}GB (max: {max_gb:.0f}GB)"
+        if file_size == 0:
+            return False, "File is empty"
+    except OSError as e:
+        return False, f"Cannot access file: {e}"
+
+    return True, ""
+
 
 @dataclass
 class PCAPResult:
@@ -440,13 +475,56 @@ class BatchProcessor:
 
     def __init__(self, pcap_paths: list[str | Path]):
         """
-        Initialize batch processor.
+        Initialize batch processor with resource limit validation.
 
         Args:
             pcap_paths: List of paths to PCAP files
+
+        Raises:
+            ValueError: If too many files or total size exceeds limits
         """
-        self.pcap_paths = [Path(p) for p in pcap_paths]
+        # Convert to Path objects
+        paths = [Path(p) for p in pcap_paths]
+
+        # Enforce file count limit
+        if len(paths) > MAX_CONCURRENT_FILES:
+            logger.warning(
+                f"Too many files ({len(paths)}), limiting to {MAX_CONCURRENT_FILES}"
+            )
+            paths = paths[:MAX_CONCURRENT_FILES]
+
+        # Validate files and enforce size limits
+        validated_paths = []
+        total_size = 0
+        skipped_files = []
+
+        for path in paths:
+            is_valid, error = validate_pcap_file(path)
+            if not is_valid:
+                logger.warning(f"Skipping invalid file: {error}")
+                skipped_files.append((path.name, error))
+                continue
+
+            file_size = path.stat().st_size
+            if total_size + file_size > MAX_TOTAL_SIZE_BYTES:
+                logger.warning(
+                    f"Total size limit reached ({MAX_TOTAL_SIZE_BYTES / (1024**3):.0f}GB), "
+                    f"skipping remaining files"
+                )
+                break
+
+            total_size += file_size
+            validated_paths.append(path)
+
+        self.pcap_paths = validated_paths
+        self.skipped_files = skipped_files
+        self.total_size = total_size
         self.results: list[PCAPResult] = []
+
+        logger.info(
+            f"BatchProcessor initialized with {len(validated_paths)} files "
+            f"({total_size / (1024**2):.1f}MB total)"
+        )
 
     def add_result(self, result: PCAPResult) -> None:
         """Add a single PCAP result to the batch."""
@@ -474,11 +552,22 @@ class BatchProcessor:
         successful = sum(1 for r in self.results if not r.error)
         failed = len(self.results) - successful
 
+        # Collect error details
+        failed_files = [
+            {"filename": r.filename, "error": r.error}
+            for r in self.results
+            if r.error
+        ]
+
         summary = {
             "total_files": len(self.results),
             "successful": successful,
             "failed": failed,
+            "skipped": len(getattr(self, "skipped_files", [])),
             "filenames": [r.filename for r in self.results],
+            "failed_files": failed_files,
+            "skipped_files": getattr(self, "skipped_files", []),
+            "total_size_mb": getattr(self, "total_size", 0) / (1024 * 1024),
             "total_packets": correlation.total_packets,
             "total_flows": correlation.total_flows,
             "total_unique_ips": correlation.total_unique_ips,

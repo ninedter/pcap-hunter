@@ -8,6 +8,10 @@ from dataclasses import dataclass
 from datetime import datetime
 from io import BytesIO
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    import pandas as pd
 
 from app.utils.logger import get_logger
 
@@ -98,6 +102,8 @@ class PDFReportGenerator:
         dns_analysis: dict | None = None,
         tls_analysis: dict | None = None,
         case_info: dict | None = None,
+        beacon_df: "pd.DataFrame | None" = None,
+        correlations: list | None = None,
     ) -> PDFReport | None:
         """
         Generate a complete PDF report.
@@ -110,6 +116,8 @@ class PDFReportGenerator:
             dns_analysis: DNS analysis results.
             tls_analysis: TLS certificate analysis results.
             case_info: Optional case information.
+            beacon_df: Optional beacon scoring DataFrame.
+            correlations: Optional list of correlation results.
 
         Returns:
             PDFReport object or None if generation fails.
@@ -128,6 +136,8 @@ class PDFReportGenerator:
                 dns_analysis=dns_analysis,
                 tls_analysis=tls_analysis,
                 case_info=case_info,
+                beacon_df=beacon_df,
+                correlations=correlations,
             )
 
             # Generate PDF with accurate page count
@@ -167,6 +177,8 @@ class PDFReportGenerator:
         dns_analysis: dict | None,
         tls_analysis: dict | None,
         case_info: dict | None,
+        beacon_df: "pd.DataFrame | None" = None,
+        correlations: list | None = None,
     ) -> str:
         """Build the complete HTML document."""
         sections = []
@@ -175,10 +187,14 @@ class PDFReportGenerator:
         sections.append(self._render_cover_page(case_info))
 
         # Table of Contents
-        sections.append(self._render_toc())
+        sections.append(self._render_toc(beacon_df=beacon_df, correlations=correlations))
 
         # Executive Summary (from LLM report)
         sections.append(self._render_executive_summary(report_md))
+
+        # Threat Correlation Summary
+        if correlations:
+            sections.append(self._render_correlation_section(correlations))
 
         # Key Findings / IOC Summary
         sections.append(self._render_ioc_table(features, osint))
@@ -200,6 +216,10 @@ class PDFReportGenerator:
             has_results = yara_results.get("yara_available") or yara_results.get("scanned", 0) > 0
             if has_results:
                 sections.append(self._render_yara_section(yara_results))
+
+        # Beacon Analysis
+        if beacon_df is not None:
+            sections.append(self._render_beacon_section(beacon_df))
 
         # Flow Analysis
         if self.config.include_raw_data and features.get("flows"):
@@ -248,20 +268,30 @@ class PDFReportGenerator:
 <div class="page-break"></div>
 """
 
-    def _render_toc(self) -> str:
+    def _render_toc(
+        self,
+        beacon_df: "pd.DataFrame | None" = None,
+        correlations: list | None = None,
+    ) -> str:
         """Render table of contents."""
-        return """
+        items = ['<li><a href="#summary">Executive Summary</a></li>']
+        if correlations:
+            items.append('<li><a href="#correlations">Threat Correlation Summary</a></li>')
+        items.append('<li><a href="#iocs">Indicators of Compromise</a></li>')
+        items.append('<li><a href="#osint">OSINT Analysis</a></li>')
+        items.append('<li><a href="#dns">DNS Analysis</a></li>')
+        items.append('<li><a href="#tls">TLS Certificate Analysis</a></li>')
+        items.append('<li><a href="#yara">YARA Scan Results</a></li>')
+        if beacon_df is not None:
+            items.append('<li><a href="#beacons">C2 Beacon Analysis</a></li>')
+        items.append('<li><a href="#flows">Network Flow Analysis</a></li>')
+        items.append('<li><a href="#appendix">Appendix</a></li>')
+
+        return f"""
 <div class="toc">
     <h2>Table of Contents</h2>
     <ol>
-        <li><a href="#summary">Executive Summary</a></li>
-        <li><a href="#iocs">Indicators of Compromise</a></li>
-        <li><a href="#osint">OSINT Analysis</a></li>
-        <li><a href="#dns">DNS Analysis</a></li>
-        <li><a href="#tls">TLS Certificate Analysis</a></li>
-        <li><a href="#yara">YARA Scan Results</a></li>
-        <li><a href="#flows">Network Flow Analysis</a></li>
-        <li><a href="#appendix">Appendix</a></li>
+        {"".join(items)}
     </ol>
 </div>
 <div class="page-break"></div>
@@ -576,6 +606,132 @@ class PDFReportGenerator:
 </section>
 <div class="page-break"></div>
 """
+
+    def _render_correlation_section(self, correlations: list) -> str:
+        """Render threat correlation summary section."""
+        # Count by verdict level
+        verdicts: dict[str, int] = {}
+        for c in correlations:
+            verdict = "unknown"
+            if hasattr(c, "verdict"):
+                verdict = c.verdict
+            elif isinstance(c, dict):
+                verdict = c.get("verdict", "unknown")
+            verdicts[verdict] = verdicts.get(verdict, 0) + 1
+
+        verdict_rows = []
+        verdict_order = ["critical", "high", "medium", "low", "info"]
+        for v in verdict_order:
+            cnt = verdicts.get(v, 0)
+            if cnt > 0:
+                css_cls = f"severity-{v}" if v in ("critical", "high", "medium") else ""
+                verdict_rows.append(f"<tr class='{css_cls}'><td>{self._escape(v.upper())}</td><td>{cnt}</td></tr>")
+
+        # Detail rows (top 20)
+        detail_rows = []
+        for c in correlations[:20]:
+            if hasattr(c, "indicator"):
+                detail_rows.append(
+                    f"<tr><td>{self._escape(c.indicator)}</td>"
+                    f"<td>{self._escape(c.verdict)}</td>"
+                    f"<td>{self._escape(', '.join(c.signals) if hasattr(c, 'signals') else '')}</td></tr>"
+                )
+            elif isinstance(c, dict):
+                detail_rows.append(
+                    f"<tr><td>{self._escape(str(c.get('indicator', '')))}</td>"
+                    f"<td>{self._escape(str(c.get('verdict', '')))}</td>"
+                    f"<td>{self._escape(str(c.get('signals', '')))}</td></tr>"
+                )
+
+        verdict_table = "\n".join(verdict_rows) if verdict_rows else "<tr><td colspan='2'>No correlations</td></tr>"
+        detail_table = "\n".join(detail_rows) if detail_rows else ""
+
+        detail_section = ""
+        if detail_table:
+            detail_section = f"""
+        <h3>Correlated Indicators</h3>
+        <table class="data-table">
+            <thead><tr><th>Indicator</th><th>Verdict</th><th>Signals</th></tr></thead>
+            <tbody>{detail_table}</tbody>
+        </table>
+        """
+
+        return f"""
+<section id="correlations">
+    <h2>Threat Correlation Summary</h2>
+    <table class="data-table">
+        <thead><tr><th>Verdict</th><th>Count</th></tr></thead>
+        <tbody>{verdict_table}</tbody>
+    </table>
+    {detail_section}
+</section>
+<div class="page-break"></div>
+"""
+
+    def _render_beacon_section(self, beacon_df: "pd.DataFrame") -> str:
+        """Render C2 beacon analysis section."""
+        try:
+            if beacon_df.empty:
+                return """
+<section id="beacons">
+    <h2>C2 Beacon Analysis</h2>
+    <p>No beaconing activity detected.</p>
+</section>
+<div class="page-break"></div>
+"""
+            high_beacons = beacon_df[beacon_df["score"] >= 0.5] if "score" in beacon_df.columns else beacon_df.head(0)
+            total = len(beacon_df)
+            high_count = len(high_beacons)
+
+            stats = f"""
+        <div class="stats-grid">
+            <div class="stat-box">
+                <span class="stat-value">{total}</span>
+                <span class="stat-label">Flows Analyzed</span>
+            </div>
+            <div class="stat-box {"alert-box" if high_count > 0 else ""}">
+                <span class="stat-value">{high_count}</span>
+                <span class="stat-label">High-Score Beacons</span>
+            </div>
+        </div>
+        """
+
+            # Top beacon candidates table
+            top = beacon_df.head(15)
+            rows = []
+            for _, row in top.iterrows():
+                score = row.get("score", 0)
+                risk_cls = "risk-high" if score >= 0.5 else ""
+                rows.append(
+                    f"<tr class='{risk_cls}'>"
+                    f"<td>{self._escape(str(row.get('src', '')))}</td>"
+                    f"<td>{self._escape(str(row.get('dst', '')))}</td>"
+                    f"<td>{self._escape(str(row.get('dport', '')))}</td>"
+                    f"<td>{score:.2f}</td>"
+                    f"<td>{row.get('count', '')}</td>"
+                    f"</tr>"
+                )
+
+            table_html = f"""
+        <h3>Top Beacon Candidates</h3>
+        <table class="data-table">
+            <thead><tr><th>Source</th><th>Destination</th><th>Port</th>
+            <th>Score</th><th>Packets</th></tr></thead>
+            <tbody>{"".join(rows)}</tbody>
+        </table>
+        """
+
+            return f"""
+<section id="beacons">
+    <h2>C2 Beacon Analysis</h2>
+    {stats}
+    {table_html}
+</section>
+<div class="page-break"></div>
+"""
+        except Exception as e:
+            logger.warning("Beacon section render failed: %s", e)
+            return ""
 
     def _render_flow_section(self, features: dict) -> str:
         """Render network flow analysis section."""
@@ -910,6 +1066,8 @@ def generate_pdf_report(
     dns_analysis: dict | None = None,
     tls_analysis: dict | None = None,
     config: ReportConfig | None = None,
+    beacon_df: "pd.DataFrame | None" = None,
+    correlations: list | None = None,
 ) -> PDFReport | None:
     """
     Convenience function to generate a PDF report.
@@ -922,6 +1080,8 @@ def generate_pdf_report(
         dns_analysis: DNS analysis results.
         tls_analysis: TLS certificate analysis results.
         config: Optional report configuration.
+        beacon_df: Optional beacon scoring DataFrame.
+        correlations: Optional list of correlation results.
 
     Returns:
         PDFReport object or None.
@@ -934,4 +1094,6 @@ def generate_pdf_report(
         yara_results=yara_results,
         dns_analysis=dns_analysis,
         tls_analysis=tls_analysis,
+        beacon_df=beacon_df,
+        correlations=correlations,
     )

@@ -120,6 +120,46 @@ class TestOSINTCacheInvalidation:
         assert cache.get("1.1.1.1", "vt") is None
 
 
+class TestOSINTCacheKeyInvalidation:
+    """Test API key change detection and cache invalidation."""
+
+    def test_first_run_stores_hash(self, cache):
+        """First call stores the key hash without invalidating."""
+        cache.set("8.8.8.8", "greynoise", {"test": True})
+        cache.invalidate_on_key_change("hash_v1")
+        # Entry should still be present (no prior hash to compare against)
+        assert cache.get("8.8.8.8", "greynoise") is not None
+
+    def test_same_hash_no_invalidation(self, cache):
+        """Same hash on subsequent calls does not invalidate."""
+        cache.set("8.8.8.8", "greynoise", {"test": True})
+        cache.invalidate_on_key_change("hash_v1")
+        cache.invalidate_on_key_change("hash_v1")  # Same hash
+        assert cache.get("8.8.8.8", "greynoise") is not None
+
+    def test_different_hash_invalidates(self, cache):
+        """Changed hash invalidates all cached entries."""
+        cache.set("8.8.8.8", "greynoise", {"test": True})
+        cache.set("1.1.1.1", "vt", {"other": True})
+        cache.invalidate_on_key_change("hash_v1")
+
+        # Change the hash → should invalidate
+        cache.invalidate_on_key_change("hash_v2")
+        assert cache.get("8.8.8.8", "greynoise") is None
+        assert cache.get("1.1.1.1", "vt") is None
+
+    def test_invalidation_allows_fresh_writes(self, cache):
+        """After invalidation, new entries can be written and read."""
+        cache.invalidate_on_key_change("old_hash")
+        cache.set("1.1.1.1", "vt", {"fresh": True})
+        cache.invalidate_on_key_change("new_hash")  # Invalidate
+        # Old entry gone
+        assert cache.get("1.1.1.1", "vt") is None
+        # Write new entry with new key
+        cache.set("2.2.2.2", "vt", {"new": True})
+        assert cache.get("2.2.2.2", "vt") is not None
+
+
 class TestOSINTCacheStats:
     def test_get_stats(self, cache):
         """Get cache statistics."""

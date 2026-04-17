@@ -1,7 +1,7 @@
 import json
 import logging
 import re
-from typing import Any, Dict, List
+from typing import Any
 
 from openai import OpenAI
 
@@ -591,7 +591,7 @@ def _build_section_prompts(
 
 
 def generate_report(
-    base_url: str, api_key: str, model: str, context: Dict[str, Any], language: str = "US English"
+    base_url: str, api_key: str, model: str, context: dict[str, Any], language: str = "US English"
 ) -> str:
     """
     Generate a multi-section LLM threat report from PCAP analysis results.
@@ -1105,7 +1105,7 @@ def test_connection(base_url: str, api_key: str, model: str) -> str:
         return str(e)
 
 
-def fetch_models(base_url: str, api_key: str) -> List[str]:
+def fetch_models(base_url: str, api_key: str) -> list[str]:
     """
     Fetch available models from the LLM endpoint.
     Returns a list of model IDs. Returns an empty list on failure.

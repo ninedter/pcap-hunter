@@ -165,7 +165,7 @@ class PDFReportGenerator:
             )
 
         except Exception as e:
-            logger.error(f"PDF generation failed: {e}")
+            logger.error("PDF generation failed: %s", e)
             return None
 
     def _build_html(

@@ -214,11 +214,11 @@ def calculate_ja3(
             ]
         )
 
-        logger.debug(f"JA3 string: {ja3_string}")
+        logger.debug("JA3 string: %s", ja3_string)
         return hashlib.md5(ja3_string.encode()).hexdigest()
 
     except Exception as e:
-        logger.error(f"Error calculating JA3 hash: {e}")
+        logger.error("Error calculating JA3 hash: %s", e)
         raise ValueError(f"Failed to calculate JA3: {e}") from e
 
 

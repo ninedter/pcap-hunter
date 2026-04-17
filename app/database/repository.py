@@ -157,7 +157,7 @@ class CaseRepository:
                 self._add_tag_internal(conn, case.id, tag)
 
             conn.commit()
-            logger.info(f"Created case: {case.id}")
+            logger.info("Created case: %s", case.id)
             return case.id
         finally:
             conn.close()
@@ -286,7 +286,7 @@ class CaseRepository:
                 self._add_tag_internal(conn, case.id, tag)
 
             conn.commit()
-            logger.info(f"Updated case: {case.id}")
+            logger.info("Updated case: %s", case.id)
         finally:
             conn.close()
 
@@ -304,10 +304,10 @@ class CaseRepository:
         try:
             conn.execute("DELETE FROM cases WHERE id = ?", (case_id,))
             conn.commit()
-            logger.info(f"Deleted case: {case_id}")
+            logger.info("Deleted case: %s", case_id)
             return True
         except Exception as e:
-            logger.error(f"Failed to delete case {case_id}: {e}")
+            logger.error("Failed to delete case %s: %s", case_id, e)
             return False
         finally:
             conn.close()
@@ -331,7 +331,7 @@ class CaseRepository:
             logger.info("Cleared all case data from database")
             return True
         except Exception as e:
-            logger.error(f"Failed to clear all data: {e}")
+            logger.error("Failed to clear all data: %s", e)
             return False
         finally:
             conn.close()
@@ -388,7 +388,7 @@ class CaseRepository:
                 self._save_ioc(conn, analysis.id, ioc)
 
             conn.commit()
-            logger.info(f"Saved analysis: {analysis.id}")
+            logger.info("Saved analysis: %s", analysis.id)
             return analysis.id
         finally:
             conn.close()

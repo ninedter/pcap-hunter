@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import math
 from collections import defaultdict
-from typing import Any, Dict, List
+from typing import Any
 
 import pandas as pd
 import plotly.express as px
@@ -10,10 +10,10 @@ import plotly.graph_objects as go
 
 
 def plot_world_map(
-    ip_data: List[Dict[str, Any]],
-    flows: List[Dict[str, Any]] = None,
+    ip_data: list[dict[str, Any]],
+    flows: list[dict[str, Any]] = None,
     home_loc: tuple[float, float] = (0.0, 0.0),
-    threat_scores: Dict[str, float] | None = None,
+    threat_scores: dict[str, float] | None = None,
 ) -> go.Figure:
     """
     Plots a world map with markers for IP locations and connectivity lines.
@@ -156,7 +156,7 @@ def plot_world_map(
     return fig
 
 
-def plot_protocol_distribution(protocol_counts: Dict[str, int]) -> go.Figure:
+def plot_protocol_distribution(protocol_counts: dict[str, int]) -> go.Figure:
     """
     Plots a donut chart of protocol distribution.
     """
@@ -182,7 +182,7 @@ def plot_protocol_distribution(protocol_counts: Dict[str, int]) -> go.Figure:
     return fig
 
 
-def plot_flow_timeline(flows: List[Dict[str, Any]]) -> go.Figure:
+def plot_flow_timeline(flows: list[dict[str, Any]]) -> go.Figure:
     """
     Plots a dual-axis chart:
     - Primary Y (Scatter): Flow duration over time.
@@ -296,7 +296,7 @@ def plot_flow_timeline(flows: List[Dict[str, Any]]) -> go.Figure:
     return fig
 
 
-def plot_top_n_charts(data: Dict[str, Dict[str, int]], title: str) -> go.Figure:
+def plot_top_n_charts(data: dict[str, dict[str, int]], title: str) -> go.Figure:
     """
     Plots horizontal bar charts for TopN analysis.
     data: { "category": { "label": count, ... }, ... }
@@ -338,7 +338,7 @@ def plot_top_n_charts(data: Dict[str, Dict[str, int]], title: str) -> go.Figure:
     return fig
 
 
-def plot_attack_timeline(timeline_events: List[Dict[str, Any]]) -> go.Figure:
+def plot_attack_timeline(timeline_events: list[dict[str, Any]]) -> go.Figure:
     """
     Plots an attack timeline scatter chart.
     X-axis: timestamp, Y-axis: severity level.
@@ -435,8 +435,8 @@ def plot_attack_timeline(timeline_events: List[Dict[str, Any]]) -> go.Figure:
 
 
 def plot_network_graph(
-    flows: List[Dict[str, Any]],
-    threat_scores: Dict[str, float] | None = None,
+    flows: list[dict[str, Any]],
+    threat_scores: dict[str, float] | None = None,
     max_nodes: int = 50,
 ) -> go.Figure:
     """
@@ -450,8 +450,8 @@ def plot_network_graph(
     threat_scores = threat_scores or {}
 
     # Aggregate connections
-    edge_counts: Dict[tuple, int] = defaultdict(int)
-    node_conns: Dict[str, int] = defaultdict(int)
+    edge_counts: dict[tuple, int] = defaultdict(int)
+    node_conns: dict[str, int] = defaultdict(int)
 
     for f in flows:
         src, dst = f.get("src", ""), f.get("dst", "")
@@ -553,7 +553,7 @@ def plot_network_graph(
     return fig
 
 
-_WELL_KNOWN_PORTS: Dict[str, str] = {
+_WELL_KNOWN_PORTS: dict[str, str] = {
     "20": "FTP-Data",
     "21": "FTP",
     "22": "SSH",
@@ -599,7 +599,7 @@ def _port_label(dport: str, proto: str) -> str:
 
 
 def build_sankey_html(
-    flows: List[Dict[str, Any]],
+    flows: list[dict[str, Any]],
     max_services: int = 10,
     max_clients: int = 8,
     max_servers: int = 12,
@@ -621,7 +621,7 @@ def build_sankey_html(
         return None
 
     # --- Step 1: normalise every flow and aggregate ---
-    agg: Dict[tuple, int] = defaultdict(int)
+    agg: dict[tuple, int] = defaultdict(int)
 
     for f in flows:
         src = f.get("src", "")
@@ -663,9 +663,9 @@ def build_sankey_html(
         return None
 
     # --- Step 2: rank and pick top nodes ---
-    cli_totals: Dict[str, int] = defaultdict(int)
-    svc_totals: Dict[str, int] = defaultdict(int)
-    srv_totals: Dict[str, int] = defaultdict(int)
+    cli_totals: dict[str, int] = defaultdict(int)
+    svc_totals: dict[str, int] = defaultdict(int)
+    srv_totals: dict[str, int] = defaultdict(int)
     for (c, s, d), cnt in agg.items():
         cli_totals[c] += cnt
         svc_totals[s] += cnt

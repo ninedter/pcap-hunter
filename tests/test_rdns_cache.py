@@ -16,7 +16,9 @@ def temp_db(tmp_path):
 
 @pytest.fixture
 def cache(temp_db):
-    return RDNSCache(temp_db, ttl_hours=24)
+    c = RDNSCache(temp_db, ttl_hours=24)
+    yield c
+    c.close()
 
 
 class TestRDNSCacheBasic:
@@ -63,38 +65,38 @@ class TestRDNSCacheBatch:
 
 class TestRDNSCacheExpiry:
     def test_ttl_expiration(self, temp_db):
-        cache = RDNSCache(temp_db, ttl_hours=0)
-        cache.ttl_seconds = 1
-        cache.set("8.8.8.8", "dns.google")
-        assert cache.get("8.8.8.8") is not None
-        time.sleep(1.5)
-        assert cache.get("8.8.8.8") is None
+        with RDNSCache(temp_db, ttl_hours=0) as cache:
+            cache.ttl_seconds = 1
+            cache.set("8.8.8.8", "dns.google")
+            assert cache.get("8.8.8.8") is not None
+            time.sleep(1.5)
+            assert cache.get("8.8.8.8") is None
 
     def test_cleanup_expired(self, temp_db):
-        cache = RDNSCache(temp_db, ttl_hours=0)
-        cache.ttl_seconds = 1
-        cache.set("1.1.1.1", "one.one")
-        cache.set("8.8.8.8", "dns.google")
-        time.sleep(1.5)
-        removed = cache.cleanup_expired()
-        assert removed == 2
+        with RDNSCache(temp_db, ttl_hours=0) as cache:
+            cache.ttl_seconds = 1
+            cache.set("1.1.1.1", "one.one")
+            cache.set("8.8.8.8", "dns.google")
+            time.sleep(1.5)
+            removed = cache.cleanup_expired()
+            assert removed == 2
 
 
 class TestRDNSCacheEdgeCases:
     def test_close_and_reopen(self, temp_db):
-        cache = RDNSCache(temp_db)
-        cache.set("1.1.1.1", "one.one")
-        cache.close()
-        # Operations after close should work (reconnects)
-        assert cache.get("1.1.1.1") == "one.one"
+        with RDNSCache(temp_db) as cache:
+            cache.set("1.1.1.1", "one.one")
+            cache.close()
+            # Operations after close should work (reconnects)
+            assert cache.get("1.1.1.1") == "one.one"
 
     def test_corruption_recovery(self, temp_db):
         """Cache recovers from a corrupted database file."""
         temp_db.write_bytes(b"not a database")
-        cache = RDNSCache(temp_db)
-        # After recovery, cache should be usable
-        cache.set("1.1.1.1", "one.one")
-        assert cache.get("1.1.1.1") == "one.one"
+        with RDNSCache(temp_db) as cache:
+            # After recovery, cache should be usable
+            cache.set("1.1.1.1", "one.one")
+            assert cache.get("1.1.1.1") == "one.one"
 
 
 class TestRDNSCacheSingleton:
@@ -109,4 +111,6 @@ class TestRDNSCacheSingleton:
             c2 = get_rdns_cache()
             assert c2 is c
         finally:
+            if mod._cache is not None:
+                mod._cache.close()
             mod._cache = old

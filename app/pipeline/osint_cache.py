@@ -70,7 +70,7 @@ class OSINTCache:
                 """)
                 conn.commit()
         except sqlite3.DatabaseError as e:
-            logger.warning(f"Database corrupted, recreating: {e}")
+            logger.warning("Database corrupted, recreating: %s", e)
             self._recreate_db()
 
     def _recreate_db(self) -> None:
@@ -104,7 +104,7 @@ class OSINTCache:
         try:
             yield self._local.conn
         except sqlite3.Error as e:
-            logger.error(f"SQLite error: {e}")
+            logger.error("SQLite error: %s", e)
             # Reset connection on error
             try:
                 self._local.conn.close()
@@ -122,10 +122,19 @@ class OSINTCache:
                 pass
             self._local.conn = None
 
+    def __del__(self) -> None:
+        self.close()
+
+    def __enter__(self) -> "OSINTCache":
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        self.close()
+
     def set_enabled(self, enabled: bool) -> None:
         """Enable or disable caching at runtime."""
         self.enabled = enabled
-        logger.info(f"OSINT cache {'enabled' if enabled else 'disabled'}")
+        logger.info("OSINT cache %s", "enabled" if enabled else "disabled")
 
     def invalidate_on_key_change(self, keys_hash: str) -> None:
         """Invalidate cache if API keys have changed since last run.

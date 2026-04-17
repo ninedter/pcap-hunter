@@ -98,6 +98,15 @@ class RDNSCache:
                 pass
             self._local.conn = None
 
+    def __del__(self) -> None:
+        self.close()
+
+    def __enter__(self) -> "RDNSCache":
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        self.close()
+
     # ------------------------------------------------------------------
     # Read
     # ------------------------------------------------------------------

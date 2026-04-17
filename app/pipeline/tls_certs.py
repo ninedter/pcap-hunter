@@ -102,7 +102,7 @@ def parse_datetime(dt_str: str) -> datetime | None:
         except ValueError:
             continue
 
-    logger.debug(f"Failed to parse datetime: {dt_str}")
+    logger.debug("Failed to parse datetime: %s", dt_str)
     return None
 
 
@@ -124,7 +124,7 @@ def extract_certificates_tshark(pcap_path: str | Path, phase: PhaseHandle | None
 
     pcap_path = Path(pcap_path)
     if not pcap_path.exists():
-        logger.error(f"PCAP file not found: {pcap_path}")
+        logger.error("PCAP file not found: %s", pcap_path)
         return []
 
     if phase:
@@ -171,13 +171,13 @@ def extract_certificates_tshark(pcap_path: str | Path, phase: PhaseHandle | None
     try:
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
         if result.returncode != 0:
-            logger.warning(f"tshark returned {result.returncode}: {result.stderr}")
+            logger.warning("tshark returned %s: %s", result.returncode, result.stderr)
             return []
     except subprocess.TimeoutExpired:
         logger.error("tshark timed out during certificate extraction")
         return []
     except Exception as e:
-        logger.error(f"Failed to run tshark: {e}")
+        logger.error("Failed to run tshark: %s", e)
         return []
 
     certificates = []
@@ -241,7 +241,7 @@ def extract_certificates_tshark(pcap_path: str | Path, phase: PhaseHandle | None
             certificates.append(cert)
 
         except Exception as e:
-            logger.debug(f"Failed to parse certificate line: {e}")
+            logger.debug("Failed to parse certificate line: %s", e)
             continue
 
     if phase:
@@ -311,13 +311,13 @@ def _parse_cert_with_cryptography(cert_der: bytes) -> dict[str, Any]:
             result["sans"] = []
 
     except ValueError as e:
-        logger.debug(f"Invalid certificate format: {e}, falling back to openssl")
+        logger.debug("Invalid certificate format: %s, falling back to openssl", e)
         return _parse_cert_with_openssl_fallback(cert_der)
     except TypeError as e:
-        logger.debug(f"Certificate data type error: {e}, falling back to openssl")
+        logger.debug("Certificate data type error: %s, falling back to openssl", e)
         return _parse_cert_with_openssl_fallback(cert_der)
     except Exception as e:
-        logger.warning(f"Unexpected certificate parsing error: {e}")
+        logger.warning("Unexpected certificate parsing error: %s", e)
         return _parse_cert_with_openssl_fallback(cert_der)
 
     return result
@@ -401,7 +401,7 @@ def _parse_cert_with_openssl_fallback(cert_der: bytes) -> dict[str, Any]:
             result["sans"] = dns_names
 
     except Exception as e:
-        logger.debug(f"OpenSSL parsing failed: {e}")
+        logger.debug("OpenSSL parsing failed: %s", e)
 
     return result
 
@@ -540,7 +540,7 @@ def extract_from_zeek_ssl(zeek_tables: dict[str, pd.DataFrame]) -> list[dict[str
                 certs.append(cert)
 
         except Exception as e:
-            logger.debug(f"Failed to parse SSL log row: {e}")
+            logger.debug("Failed to parse SSL log row: %s", e)
             continue
 
     return certs

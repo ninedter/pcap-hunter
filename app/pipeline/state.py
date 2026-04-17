@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 import pathlib
 import time
-from typing import Any, Optional
+from typing import Any
 
 import streamlit as st
 
@@ -114,7 +114,7 @@ def end_run():
 
 
 class PhaseTracker:
-    def __init__(self, total_phases: int, progress_container: Optional[st.delta_generator.DeltaGenerator] = None):
+    def __init__(self, total_phases: int, progress_container: st.delta_generator.DeltaGenerator | None = None):
         self.total_phases = max(total_phases, 1)
         self.done_phases = 0
         self._pc = progress_container or st

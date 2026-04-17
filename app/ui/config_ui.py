@@ -402,9 +402,9 @@ def render_config_tab():
             if st.button("Confirm Delete", type="primary", use_container_width=True, key="confirm_clear_pcap"):
                 try:
                     for item in C.DATA_DIR.iterdir():
-                        if item.is_dir():
+                        if item.is_dir() and not item.is_symlink():
                             shutil.rmtree(item)
-                        elif item.is_file() and item.suffix != ".db":
+                        elif item.is_file() and not item.is_symlink() and item.suffix != ".db":
                             item.unlink()
                     C.CARVE_DIR.mkdir(parents=True, exist_ok=True)
                     C.ZEEK_DIR.mkdir(parents=True, exist_ok=True)

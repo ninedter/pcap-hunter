@@ -16,7 +16,9 @@ def temp_db(tmp_path):
 @pytest.fixture
 def cache(temp_db):
     """Create an OSINTCache instance with temp database."""
-    return OSINTCache(temp_db, ttl_hours=24)
+    c = OSINTCache(temp_db, ttl_hours=24)
+    yield c
+    c.close()
 
 
 class TestOSINTCacheBasic:

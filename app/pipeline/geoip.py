@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from functools import lru_cache
-from typing import Any, Dict, Optional, Tuple
+from typing import Any
 
 from geolite2 import geolite2
 
@@ -17,7 +17,7 @@ class GeoIP:
 
     @staticmethod
     @lru_cache(maxsize=4096)
-    def _lookup_cached(ip: str) -> Optional[Tuple]:
+    def _lookup_cached(ip: str) -> tuple | None:
         """Internal cached lookup returning a tuple (hashable for lru_cache)."""
         try:
             reader = GeoIP.get_reader()
@@ -39,7 +39,7 @@ class GeoIP:
             return None
 
     @classmethod
-    def lookup(cls, ip: str) -> Optional[Dict[str, Any]]:
+    def lookup(cls, ip: str) -> dict[str, Any] | None:
         result = cls._lookup_cached(ip)
         if result is None:
             return None

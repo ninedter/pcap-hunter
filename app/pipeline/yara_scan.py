@@ -29,14 +29,14 @@ def _is_safe_path(base_path: str | Path, target_path: str | Path) -> bool:
     try:
         # Check for null bytes (path injection attack)
         if isinstance(target_path, str) and "\x00" in target_path:
-            logger.warning(f"Null byte detected in path: {target_path}")
+            logger.warning("Null byte detected in path: %s", target_path)
             return False
 
         target = Path(target_path)
 
         # Check if path is a symlink (before resolving)
         if target.is_symlink():
-            logger.warning(f"Symlink detected, rejecting: {target_path}")
+            logger.warning("Symlink detected, rejecting: %s", target_path)
             return False
 
         # Resolve to absolute path and check containment
@@ -218,13 +218,13 @@ class YARAScanner:
             self._rules = yara.compile(filepaths=rule_files)
             # Count rules (approximate by namespace count)
             self._rule_count = len(rule_files)
-            logger.info(f"Loaded {self._rule_count} YARA rule files")
+            logger.info("Loaded %d YARA rule files", self._rule_count)
             return self._rule_count
         except yara.SyntaxError as e:
-            logger.error(f"YARA syntax error: {e}")
+            logger.error("YARA syntax error: %s", e)
             return 0
         except yara.Error as e:
-            logger.error(f"YARA error loading rules: {e}")
+            logger.error("YARA error loading rules: %s", e)
             return 0
 
     def add_custom_rules(self, rules_path: str) -> bool:
@@ -239,7 +239,7 @@ class YARAScanner:
         """
         path = Path(rules_path)
         if not path.exists():
-            logger.error(f"Rules path not found: {rules_path}")
+            logger.error("Rules path not found: %s", rules_path)
             return False
 
         if path.is_dir():
@@ -248,7 +248,7 @@ class YARAScanner:
             # Add parent directory
             self._rules_dirs.append(path.parent)
         else:
-            logger.error(f"Invalid rules path: {rules_path}")
+            logger.error("Invalid rules path: %s", rules_path)
             return False
 
         # Reload all rules
@@ -283,10 +283,10 @@ class YARAScanner:
                     result.append((s[0], s[1], s[2]))
                 else:
                     # Fallback for unknown formats
-                    logger.debug(f"Unknown YARA string format: {type(s)}")
+                    logger.debug("Unknown YARA string format: %s", type(s))
                     result.append((0, str(s), b""))
             except (AttributeError, TypeError, IndexError) as e:
-                logger.warning(f"Error extracting YARA string match: {e}")
+                logger.warning("Error extracting YARA string match: %s", e)
                 continue
         return result
 
@@ -310,7 +310,7 @@ class YARAScanner:
         # Validate path is within allowed base if set
         if self._allowed_base and not _is_safe_path(self._allowed_base, file_path):
             result.error = f"Path outside allowed directory: {file_path}"
-            logger.warning(f"Attempted to scan path outside allowed base: {file_path}")
+            logger.warning("Attempted to scan path outside allowed base: %s", file_path)
             return result
 
         # Validate file

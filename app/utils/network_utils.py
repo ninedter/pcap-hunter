@@ -122,15 +122,16 @@ def get_whois_info(target: str) -> dict | str:
     For IPs, uses RDAP (Registration Data Access Protocol).
     For domains, uses whois library.
     """
-    import requests
     import whois
+
+    from app.security.opsec import hardened_session
 
     try:
         if is_public_ipv4(target):
             # RDAP Lookup for IPs — URL-encode the target to prevent injection
             safe_target = urllib.parse.quote(target, safe="")
             url = f"https://rdap.arin.net/registry/ip/{safe_target}"
-            r = requests.get(url, timeout=10)
+            r = hardened_session(timeout=10).get(url)
             if r.status_code == 200:
                 data = r.json()
                 # Map RDAP fields to common schema

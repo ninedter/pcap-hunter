@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import os
 import subprocess
-from typing import Any, Dict, Tuple
+from typing import Any
 
 from app import config as C
 from app.pipeline.state import PhaseHandle
@@ -16,7 +16,7 @@ def parse_pcap_pyshark(
     phase: PhaseHandle | None,
     total_packets: int | None,
     progress_every: int = 2000,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     # Input validation
     if not os.path.exists(pcap_path):
         log_runtime_error(f"PCAP file not found: {pcap_path}")
@@ -60,7 +60,7 @@ def parse_pcap_pyshark(
         "flows": [],
         "artifacts": {"ips": set(), "domains": set(), "urls": set(), "hashes": set(), "ja3": set(), "macs": set()},
     }
-    flow_index: Dict[Tuple[str, str, str, str, str], int] = {}
+    flow_index: dict[tuple[str, str, str, str, str], int] = {}
     n = 0
 
     try:
@@ -165,7 +165,7 @@ def parse_pcap_pyshark(
                     out["artifacts"]["macs"].add(eth_dst)
 
             # Check for errors after loop
-            if proc.poll() and proc.returncode != 0:
+            if proc.poll() is not None and proc.returncode != 0:
                 # If we terminated early, returncode might be non-zero (SIGTERM)
                 # But if we didn't terminate and it failed:
                 if not (limit_packets and n >= limit_packets) and not (phase and phase.should_skip()):

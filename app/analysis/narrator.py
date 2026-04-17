@@ -234,7 +234,7 @@ class AttackNarrator:
 
         # Limit total events to prevent unbounded memory usage
         if len(events) > MAX_TIMELINE_EVENTS:
-            logger.warning(f"Limiting timeline to {MAX_TIMELINE_EVENTS} events (from {len(events)})")
+            logger.warning("Limiting timeline to %d events (from %d)", MAX_TIMELINE_EVENTS, len(events))
             events = events[:MAX_TIMELINE_EVENTS]
 
         return events
@@ -364,7 +364,7 @@ class AttackNarrator:
             )
             return narrative
         except Exception as e:
-            logger.error(f"Error generating narrative: {e}")
+            logger.error("Error generating narrative: %s", e)
             return self._generate_basic_narrative(timeline, attack_mapping, features)
 
     def _generate_basic_narrative(

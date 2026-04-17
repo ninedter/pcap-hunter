@@ -51,7 +51,7 @@ def sanitize_question(question: str) -> str:
     # Check for injection patterns
     for pattern in INJECTION_PATTERNS:
         if re.search(pattern, question):
-            logger.warning(f"Potential prompt injection detected in question: {question[:50]}...")
+            logger.warning("Potential prompt injection detected in question: %s...", question[:50])
             # Remove the suspicious pattern instead of rejecting
             question = re.sub(pattern, "", question).strip()
 
@@ -295,7 +295,7 @@ class AnalysisQA:
         try:
             question = sanitize_question(question)
         except ValueError as e:
-            logger.warning(f"Invalid question rejected: {e}")
+            logger.warning("Invalid question rejected: %s", e)
             return f"Invalid question: {e}"
 
         # Build context on first question or if conversation is empty
@@ -327,14 +327,14 @@ class AnalysisQA:
             return answer
 
         except APIConnectionError as e:
-            logger.error(f"API connection error in Q&A: {e}")
+            logger.error("API connection error in Q&A: %s", e)
             return "Unable to connect to the LLM service. Please check your configuration."
         except APIStatusError as e:
-            logger.error(f"API status error in Q&A: {e.status_code} - {e.message}")
+            logger.error("API status error in Q&A: %s - %s", e.status_code, e.message)
             return f"LLM service error (status {e.status_code}): {e.message}"
         except Exception as e:
             # Catch-all for unexpected errors (e.g., response parsing issues)
-            logger.error(f"Unexpected error in Q&A: {type(e).__name__}: {e}")
+            logger.error("Unexpected error in Q&A: %s: %s", type(e).__name__, e)
             return f"Error processing question: {type(e).__name__}"
 
     def get_suggested_questions(self) -> list[str]:

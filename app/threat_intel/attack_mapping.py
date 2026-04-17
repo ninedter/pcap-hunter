@@ -277,7 +277,7 @@ class ATTACKMapper:
         if beacon_results:
             limited_beacons = beacon_results[:MAX_BEACON_RESULTS]
             if len(beacon_results) > MAX_BEACON_RESULTS:
-                logger.warning(f"Limiting beacon analysis to {MAX_BEACON_RESULTS} results")
+                logger.warning("Limiting beacon analysis to %d results", MAX_BEACON_RESULTS)
             techniques.extend(self._check_beaconing(limited_beacons))
 
         # Check DNS analysis

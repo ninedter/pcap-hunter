@@ -152,7 +152,7 @@ class STIXExporter:
             # Determine confidence (1-100)
             confidence = min(int(ioc.priority_score * 100), 100)
         except (ValueError, TypeError, KeyError) as e:
-            logger.warning(f"Failed to create indicator for IOC {ioc.value}: {e}")
+            logger.warning("Failed to create indicator for IOC %s: %s", ioc.value, e)
             return None
 
         # Build description
@@ -186,7 +186,7 @@ class STIXExporter:
                 )
                 return json.loads(indicator.serialize())
             except Exception as e:
-                logger.warning(f"Failed to create STIX indicator with stix2: {e}")
+                logger.warning("Failed to create STIX indicator with stix2: %s", e)
                 # Fall through to basic format
 
         # Basic format fallback
@@ -304,7 +304,7 @@ class STIXExporter:
                 bundle = stix2.Bundle(id=bundle_id, objects=objects)
                 return bundle.serialize(pretty=True).encode("utf-8")
             except Exception as e:
-                logger.warning(f"Failed to create STIX bundle with stix2: {e}")
+                logger.warning("Failed to create STIX bundle with stix2: %s", e)
                 # Fall through to basic format
 
         # Basic format fallback
@@ -402,7 +402,7 @@ class STIXExporter:
 
 def generate_stix_filename() -> str:
     """Generate timestamped filename for STIX export."""
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    timestamp = datetime.now(tz=timezone.utc).strftime("%Y%m%d_%H%M%S")
     return f"stix_bundle_{timestamp}.json"
 
 

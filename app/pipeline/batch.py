@@ -488,7 +488,7 @@ class BatchProcessor:
 
         # Enforce file count limit
         if len(paths) > MAX_CONCURRENT_FILES:
-            logger.warning(f"Too many files ({len(paths)}), limiting to {MAX_CONCURRENT_FILES}")
+            logger.warning("Too many files (%d), limiting to %d", len(paths), MAX_CONCURRENT_FILES)
             paths = paths[:MAX_CONCURRENT_FILES]
 
         # Validate files and enforce size limits
@@ -499,14 +499,15 @@ class BatchProcessor:
         for path in paths:
             is_valid, error = validate_pcap_file(path)
             if not is_valid:
-                logger.warning(f"Skipping invalid file: {error}")
+                logger.warning("Skipping invalid file: %s", error)
                 skipped_files.append((path.name, error))
                 continue
 
             file_size = path.stat().st_size
             if total_size + file_size > MAX_TOTAL_SIZE_BYTES:
                 logger.warning(
-                    f"Total size limit reached ({MAX_TOTAL_SIZE_BYTES / (1024**3):.0f}GB), skipping remaining files"
+                    "Total size limit reached (%.0fGB), skipping remaining files",
+                    MAX_TOTAL_SIZE_BYTES / (1024**3),
                 )
                 break
 

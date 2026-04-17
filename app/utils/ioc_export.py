@@ -8,7 +8,7 @@ import json
 import logging
 import uuid
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 
 from app.utils.export import _sanitize_csv_value
 
@@ -273,7 +273,7 @@ class IOCExporter:
         iocs = self.filter_iocs(iocs, ioc_types, min_score)
 
         data = {
-            "exported_at": datetime.now().isoformat(),
+            "exported_at": datetime.now(tz=timezone.utc).isoformat(),
             "total_count": len(iocs),
             "iocs": [ioc.to_dict() for ioc in iocs],
         }
@@ -351,7 +351,7 @@ class IOCExporter:
                     "name": f"{ioc.ioc_type.upper()}: {ioc.value}",
                     "pattern": pattern,
                     "pattern_type": "stix",
-                    "valid_from": datetime.now().isoformat() + "Z",
+                    "valid_from": datetime.now(tz=timezone.utc).isoformat().replace("+00:00", "Z"),
                     "labels": ioc.tags or ["network-activity"],
                     "confidence": int(ioc.priority_score * 100),
                     "created_by_ref": identity["id"],
@@ -360,7 +360,7 @@ class IOCExporter:
 
         bundle = {
             "type": "bundle",
-            "id": f"bundle--{datetime.now().strftime('%Y%m%d%H%M%S')}",
+            "id": f"bundle--{uuid.uuid4()}",
             "objects": objects,
         }
 

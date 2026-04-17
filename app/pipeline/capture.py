@@ -4,7 +4,6 @@ import os
 import signal
 import subprocess
 import time
-from typing import Optional
 
 from app.utils.common import find_bin
 from app.utils.logger import log_runtime_error
@@ -16,7 +15,7 @@ class LiveCapture:
     def __init__(self, interface: str, output_path: str):
         self.interface = interface
         self.output_path = output_path
-        self.process: Optional[subprocess.Popen] = None
+        self.process: subprocess.Popen | None = None
         self.start_time: float = 0
 
     @staticmethod

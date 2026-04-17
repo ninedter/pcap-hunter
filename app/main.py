@@ -839,6 +839,9 @@ with tab_progress:
                         "carved": st.session_state.get("carved") or [],
                         "packet_count": st.session_state.get("__total_pkts"),
                         "correlations": st.session_state.get("correlations") or [],
+                        "dns_analysis": st.session_state.get("dns_analysis"),
+                        "tls_analysis": st.session_state.get("tls_analysis"),
+                        "yara_results": st.session_state.get("yara_results"),
                         "config": {
                             "limit_packets": limit_packets,
                             "do_pyshark": do_pyshark,

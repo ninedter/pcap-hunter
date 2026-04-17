@@ -60,14 +60,14 @@ class TestLLMClient(unittest.TestCase):
         context = {"features": {}, "osint": {}, "zeek": {}, "packet_count": 100}
         report = generate_report("http://test", "key", "model-x", context, language="US English")
 
-        # Verify calls - Should be called 7 times (once per section)
-        self.assertEqual(mock_client_instance.chat.completions.create.call_count, 7)
+        # Verify calls - Should be called 8 times (once per section)
+        self.assertEqual(mock_client_instance.chat.completions.create.call_count, 8)
 
         # Verify output concatenation
         # Logic appends "## Title\n\nContent" for each section
         self.assertIn("## Executive Summary", report)
         self.assertIn("Section Content", report)
-        # Should have 7 sections * (Header + Content)
+        # Should have 8 sections * (Header + Content)
         # Just checking basic structure
         self.assertTrue(report.startswith("## Executive Summary"))
 

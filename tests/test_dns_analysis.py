@@ -308,8 +308,7 @@ class TestNXDOMAINAnalysis:
 
     def test_no_nxdomain(self):
         records = [
-            DNSRecord(ts=1.0, src="10.0.0.1", dst="8.8.8.8",
-                      query="example.com", qtype="A", rcode="NOERROR"),
+            DNSRecord(ts=1.0, src="10.0.0.1", dst="8.8.8.8", query="example.com", qtype="A", rcode="NOERROR"),
         ]
         result = analyze_nxdomain(records)
         assert result["nxdomain_count"] == 0
@@ -319,15 +318,27 @@ class TestNXDOMAINAnalysis:
     def test_high_nxdomain(self):
         records = []
         for i in range(70):
-            records.append(DNSRecord(
-                ts=float(i), src="10.0.0.1", dst="8.8.8.8",
-                query=f"random{i}.com", qtype="A", rcode="NXDOMAIN",
-            ))
+            records.append(
+                DNSRecord(
+                    ts=float(i),
+                    src="10.0.0.1",
+                    dst="8.8.8.8",
+                    query=f"random{i}.com",
+                    qtype="A",
+                    rcode="NXDOMAIN",
+                )
+            )
         for i in range(30):
-            records.append(DNSRecord(
-                ts=float(i + 70), src="10.0.0.1", dst="8.8.8.8",
-                query="google.com", qtype="A", rcode="NOERROR",
-            ))
+            records.append(
+                DNSRecord(
+                    ts=float(i + 70),
+                    src="10.0.0.1",
+                    dst="8.8.8.8",
+                    query="google.com",
+                    qtype="A",
+                    rcode="NOERROR",
+                )
+            )
         result = analyze_nxdomain(records)
         assert result["nxdomain_count"] == 70
         assert result["nxdomain_ratio"] == 0.7
@@ -340,12 +351,9 @@ class TestNXDOMAINAnalysis:
 
     def test_per_source_breakdown(self):
         records = [
-            DNSRecord(ts=1.0, src="10.0.0.1", dst="8.8.8.8",
-                      query="bad.com", qtype="A", rcode="NXDOMAIN"),
-            DNSRecord(ts=2.0, src="10.0.0.1", dst="8.8.8.8",
-                      query="ok.com", qtype="A", rcode="NOERROR"),
-            DNSRecord(ts=3.0, src="10.0.0.2", dst="8.8.8.8",
-                      query="fine.com", qtype="A", rcode="NOERROR"),
+            DNSRecord(ts=1.0, src="10.0.0.1", dst="8.8.8.8", query="bad.com", qtype="A", rcode="NXDOMAIN"),
+            DNSRecord(ts=2.0, src="10.0.0.1", dst="8.8.8.8", query="ok.com", qtype="A", rcode="NOERROR"),
+            DNSRecord(ts=3.0, src="10.0.0.2", dst="8.8.8.8", query="fine.com", qtype="A", rcode="NOERROR"),
         ]
         result = analyze_nxdomain(records)
         # 10.0.0.1 has 50% NXDOMAIN - should appear in sources
@@ -362,8 +370,7 @@ class TestQueryVelocity:
     def test_low_velocity(self):
         # 10 queries over 100 seconds = 0.1 qps
         records = [
-            DNSRecord(ts=float(i * 10), src="10.0.0.1", dst="8.8.8.8",
-                      query="example.com", qtype="A")
+            DNSRecord(ts=float(i * 10), src="10.0.0.1", dst="8.8.8.8", query="example.com", qtype="A")
             for i in range(10)
         ]
         result = analyze_query_velocity(records)
@@ -372,8 +379,7 @@ class TestQueryVelocity:
     def test_high_velocity(self):
         # 200 queries over 2 seconds = 100 qps
         records = [
-            DNSRecord(ts=i * 0.01, src="10.0.0.1", dst="8.8.8.8",
-                      query=f"q{i}.example.com", qtype="A")
+            DNSRecord(ts=i * 0.01, src="10.0.0.1", dst="8.8.8.8", query=f"q{i}.example.com", qtype="A")
             for i in range(200)
         ]
         result = analyze_query_velocity(records)

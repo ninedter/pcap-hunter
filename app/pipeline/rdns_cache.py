@@ -73,7 +73,9 @@ class RDNSCache:
     def _get_conn(self) -> Generator[sqlite3.Connection, None, None]:
         if not hasattr(self._local, "conn") or self._local.conn is None:
             self._local.conn = sqlite3.connect(
-                str(self.db_path), timeout=30.0, check_same_thread=False,
+                str(self.db_path),
+                timeout=30.0,
+                check_same_thread=False,
             )
             self._local.conn.execute("PRAGMA journal_mode=WAL")
             self._local.conn.execute("PRAGMA busy_timeout=30000")

@@ -1,43 +1,43 @@
 # Core app dependencies
-streamlit>=1.36
-pandas>=2.2
-numpy>=1.26
-matplotlib>=3.9
+streamlit>=1.36,<2.0
+pandas>=2.2,<3.0
+numpy>=1.26,<3.0
+matplotlib>=3.9,<4.0
 
 # PCAP parsing and network tools
-pyshark>=0.6
-scapy>=2.5.0
+pyshark>=0.6,<1.0
+scapy>=2.5.0,<3.0
 
 # OpenAI / LM Studio client
-openai>=1.30.0
+openai>=1.30.0,<3.0
 
 # HTTP / API requests
-requests>=2.32
-httpx>=0.27
+requests>=2.32,<3.0
+httpx>=0.27,<1.0
 
 # Data handling
-tqdm>=4.66
-python-dateutil>=2.9
+tqdm>=4.66,<5.0
+python-dateutil>=2.9,<3.0
 
 # Optional: for safer YAML/JSON parsing
-pyyaml>=6.0
-ujson>=5.9
+pyyaml>=6.0,<7.0
+ujson>=5.9,<6.0
 
 # Security / hashing utils
-cryptography>=42.0
+cryptography>=42.0,<44.0
 
 # Dev / Test
-pytest>=8.0
-pytest-cov>=4.1
-plotly>=5.18.0
-maxminddb-geolite2>=4.1
-ruff>=0.3.0
-python-whois>=0.9
+pytest>=8.0,<9.0
+pytest-cov>=4.1,<6.0
+plotly>=5.18.0,<6.0
+maxminddb-geolite2>=4.1,<5.0
+ruff>=0.3.0,<1.0
+python-whois>=0.9,<1.0
 
-# Phase 3: YARA Scanning (optional)
-yara-python>=4.3.0
+# Phase 3: YARA Scanning (optional — requires system yara library)
+yara-python>=4.3.0,<5.0
 
-# Phase 3: PDF Generation (optional)
-weasyprint>=60.0
-Jinja2>=3.1.0
-markdown>=3.5.0
+# Phase 3: PDF Generation (optional — requires system libcairo/pango)
+weasyprint>=60.0,<63.0
+Jinja2>=3.1.0,<4.0
+markdown>=3.5.0,<4.0

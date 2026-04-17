@@ -106,8 +106,14 @@ def render_export_buttons(data, prefix: str, key_suffix: str = "", is_dataframe:
 def make_tabs():
     """Top tabs: Upload • Progress • Dashboard • LLM Analysis • OSINT • Results • Cases • Config."""
     tab_names = [
-        "📤 Upload", "📈 Progress", "📊 Dashboard", "🤖 LLM Analysis",
-        "🕵️ OSINT", "📋 Raw Data", "📁 Cases", "⚙️ Config",
+        "📤 Upload",
+        "📈 Progress",
+        "📊 Dashboard",
+        "🤖 LLM Analysis",
+        "🕵️ OSINT",
+        "📋 Raw Data",
+        "📁 Cases",
+        "⚙️ Config",
     ]
     tabs = st.tabs(tab_names)
     return tabs[0], tabs[1], tabs[2], tabs[3], tabs[4], tabs[5], tabs[6], tabs[7]
@@ -177,13 +183,15 @@ def render_threat_summary(
         # Require corroborating evidence (OSINT high, YARA hits, or multiple
         # beacon candidates with high scores) before escalating.
         # Corroboration count — how many distinct signal categories fired
-        corroboration = sum([
-            beacon_count > 0,
-            yara_count > 0,
-            tls_issues > 0,
-            dns_alerts > 0,
-            high > 0 or critical > 0,
-        ])
+        corroboration = sum(
+            [
+                beacon_count > 0,
+                yara_count > 0,
+                tls_issues > 0,
+                dns_alerts > 0,
+                high > 0 or critical > 0,
+            ]
+        )
 
         if critical > 0:
             risk, color = "CRITICAL", "#ff6b6b"
@@ -363,7 +371,7 @@ def _verdict_badge(verdict: str) -> str:
     bg, fg = colors.get(verdict.lower(), colors["unknown"])
     return (
         f'<span style="display:inline-block;padding:2px 10px;border-radius:12px;'
-        f'background:{bg};color:{fg};font-weight:600;font-size:0.8rem;'
+        f"background:{bg};color:{fg};font-weight:600;font-size:0.8rem;"
         f'text-transform:uppercase;">{verdict}</span>'
     )
 
@@ -381,7 +389,7 @@ def _provider_pill(name: str, status: str) -> str:
     return (
         f'<span style="display:inline-block;padding:2px 8px;margin:2px;'
         f'border-radius:10px;background:{bg};font-size:0.75rem;">'
-        f'{icon} {name}</span>'
+        f"{icon} {name}</span>"
     )
 
 
@@ -550,8 +558,10 @@ def _render_ip_detail_card(ip: str, obj: dict, vt: dict, abuse: dict, gn: dict, 
         # Provider status pills
         providers_html = ""
         ip_providers_map = [
-            ("VT", "vt"), ("AbuseIPDB", "abuseipdb"),
-            ("GreyNoise", "greynoise"), ("Shodan", "shodan"),
+            ("VT", "vt"),
+            ("AbuseIPDB", "abuseipdb"),
+            ("GreyNoise", "greynoise"),
+            ("Shodan", "shodan"),
         ]
         for name, data_key in ip_providers_map:
             raw = obj.get(data_key)
@@ -724,7 +734,7 @@ def _render_osint_coverage_heatmap(osint_data: dict):
             f'<div style="width:{pct_full}%;background:#51cf66;"></div>'
             f'<div style="width:{pct_partial}%;background:#ffd43b;"></div>'
             f'<div style="width:{pct_none}%;background:#adb5bd;"></div>'
-            f'</div>',
+            f"</div>",
             unsafe_allow_html=True,
         )
 
@@ -754,11 +764,13 @@ def _render_asn_grouping(osint_data: dict):
 
     rows = []
     for asn_label, ips in sorted_groups:
-        rows.append({
-            "ASN / Organization": asn_label,
-            "IP Count": len(ips),
-            "IPs": ", ".join(ips[:10]) + ("..." if len(ips) > 10 else ""),
-        })
+        rows.append(
+            {
+                "ASN / Organization": asn_label,
+                "IP Count": len(ips),
+                "IPs": ", ".join(ips[:10]) + ("..." if len(ips) > 10 else ""),
+            }
+        )
 
     if rows:
         st.markdown("#### ASN / Organization Grouping")
@@ -793,11 +805,13 @@ def _render_related_iocs(osint_data: dict):
 
     rows = []
     for subnet, ips in sorted(shared_subnets.items(), key=lambda x: len(x[1]), reverse=True):
-        rows.append({
-            "Subnet": subnet,
-            "Count": len(ips),
-            "IPs": ", ".join(ips),
-        })
+        rows.append(
+            {
+                "Subnet": subnet,
+                "Count": len(ips),
+                "IPs": ", ".join(ips),
+            }
+        )
 
     st.dataframe(pd.DataFrame(rows), width="stretch", hide_index=True)
 
@@ -820,41 +834,56 @@ def _render_ioc_export_panel(osint_data: dict):
         abuse = _extract_abuseipdb_stats(obj)
         gn = _extract_greynoise_stats(obj)
         verdict = _determine_ip_verdict(vt, abuse, gn, _extract_shodan_stats(obj))
-        all_iocs.append({
-            "type": "ip",
-            "value": ip,
-            "verdict": verdict,
-            "vt_detections": vt.get("detections", ""),
-            "abuse_score": abuse.get("score", ""),
-            "greynoise": gn.get("classification", ""),
-            "country": obj.get("country", ""),
-            "ptr": obj.get("ptr", ""),
-        })
+        all_iocs.append(
+            {
+                "type": "ip",
+                "value": ip,
+                "verdict": verdict,
+                "vt_detections": vt.get("detections", ""),
+                "abuse_score": abuse.get("score", ""),
+                "greynoise": gn.get("classification", ""),
+                "country": obj.get("country", ""),
+                "ptr": obj.get("ptr", ""),
+            }
+        )
 
     for dom, obj in doms_data.items():
         verdict = _determine_domain_verdict(obj)
         vt_attr = (obj.get("vt") or {}).get("data", {}).get("attributes", {})
         stats = vt_attr.get("last_analysis_stats", {})
-        all_iocs.append({
-            "type": "domain",
-            "value": dom,
-            "verdict": verdict,
-            "vt_detections": f"{stats.get('malicious', 0)}/{sum(stats.values()) if stats else 0}",
-        })
+        all_iocs.append(
+            {
+                "type": "domain",
+                "value": dom,
+                "verdict": verdict,
+                "vt_detections": f"{stats.get('malicious', 0)}/{sum(stats.values()) if stats else 0}",
+            }
+        )
 
     if fmt == "CSV":
         csv_bytes = export_to_csv(all_iocs)
-        st.download_button("📥 Download CSV", csv_bytes, generate_export_filename("iocs", "csv"),
-                           "text/csv", key="ioc_dl_csv")
+        st.download_button(
+            "📥 Download CSV", csv_bytes, generate_export_filename("iocs", "csv"), "text/csv", key="ioc_dl_csv"
+        )
     elif fmt == "JSON":
         json_bytes = export_to_json(all_iocs)
-        st.download_button("📥 Download JSON", json_bytes, generate_export_filename("iocs", "json"),
-                           "application/json", key="ioc_dl_json")
+        st.download_button(
+            "📥 Download JSON",
+            json_bytes,
+            generate_export_filename("iocs", "json"),
+            "application/json",
+            key="ioc_dl_json",
+        )
     elif fmt == "STIX 2.1":
         stix_bundle = _build_stix_bundle(all_iocs)
         stix_bytes = _json.dumps(stix_bundle, indent=2).encode("utf-8")
-        st.download_button("📥 Download STIX 2.1", stix_bytes, generate_export_filename("iocs", "stix.json"),
-                           "application/json", key="ioc_dl_stix")
+        st.download_button(
+            "📥 Download STIX 2.1",
+            stix_bytes,
+            generate_export_filename("iocs", "stix.json"),
+            "application/json",
+            key="ioc_dl_stix",
+        )
     elif fmt == "Clipboard-ready":
         lines = [ioc["value"] for ioc in all_iocs]
         st.code("\n".join(lines), language="text")
@@ -925,13 +954,15 @@ def _render_geo_map(osint_data: dict):
             abuse = _extract_abuseipdb_stats(obj)
             gn = _extract_greynoise_stats(obj)
             verdict = _determine_ip_verdict(vt, abuse, gn, _extract_shodan_stats(obj))
-            geo_rows.append({
-                "IP": ip,
-                "Country": country,
-                "City": city or "",
-                "Verdict": verdict,
-                "VT Detections": vt.get("detections", "n/a"),
-            })
+            geo_rows.append(
+                {
+                    "IP": ip,
+                    "Country": country,
+                    "City": city or "",
+                    "Verdict": verdict,
+                    "VT Detections": vt.get("detections", "n/a"),
+                }
+            )
 
     if not geo_rows:
         return
@@ -1021,16 +1052,18 @@ def render_osint(result_col, osint_data, *, correlations=None, features=None, be
         st.markdown("---")
 
         # Main tabs
-        tab_ips, tab_doms, tab_details, tab_geo, tab_infra, tab_export, tab_devices, tab_notes = st.tabs([
-            "🎯 IP Triage",
-            "🌐 Domains",
-            "🔍 Detail Cards",
-            "🗺️ Geo Map",
-            "🏗️ Infrastructure",
-            "📦 Export",
-            "💻 Devices",
-            "📝 Notes",
-        ])
+        tab_ips, tab_doms, tab_details, tab_geo, tab_infra, tab_export, tab_devices, tab_notes = st.tabs(
+            [
+                "🎯 IP Triage",
+                "🌐 Domains",
+                "🔍 Detail Cards",
+                "🗺️ Geo Map",
+                "🏗️ Infrastructure",
+                "📦 Export",
+                "💻 Devices",
+                "📝 Notes",
+            ]
+        )
 
         # ==================== IP TRIAGE TAB ====================
         with tab_ips:
@@ -1049,22 +1082,23 @@ def render_osint(result_col, osint_data, *, correlations=None, features=None, be
                     flow_ips = features.get("artifacts", {}).get("ips", [])
                     in_flows = ip in flow_ips
 
-                ip_rows.append({
-                    "Verdict": verdict.upper(),
-                    "IP": ip,
-                    "ASN/Org": f"{vt.get('as_owner', '') or shodan.get('org', '')}",
-                    "Country": obj.get("country", "n/a"),
-                    "AbuseIPDB": f"{abuse.get('score', 'n/a')}% ({abuse.get('total_reports', 0)} rpts)",
-                    "VT": vt.get("detections", "n/a"),
-                    "GreyNoise": gn.get("classification", "n/a"),
-                    "Shodan Ports": ", ".join(str(p) for p in shodan.get("ports", [])[:8]) or "n/a",
-                    "PTR": obj.get("ptr", "n/a"),
-                    "In Flows": "✅" if in_flows else "",
-                    "_sort_score": (
-                        {"critical": 4, "high": 3, "medium": 2, "low": 1, "clean": 0, "unknown": 0}
-                        .get(verdict, 0)
-                    ),
-                })
+                ip_rows.append(
+                    {
+                        "Verdict": verdict.upper(),
+                        "IP": ip,
+                        "ASN/Org": f"{vt.get('as_owner', '') or shodan.get('org', '')}",
+                        "Country": obj.get("country", "n/a"),
+                        "AbuseIPDB": f"{abuse.get('score', 'n/a')}% ({abuse.get('total_reports', 0)} rpts)",
+                        "VT": vt.get("detections", "n/a"),
+                        "GreyNoise": gn.get("classification", "n/a"),
+                        "Shodan Ports": ", ".join(str(p) for p in shodan.get("ports", [])[:8]) or "n/a",
+                        "PTR": obj.get("ptr", "n/a"),
+                        "In Flows": "✅" if in_flows else "",
+                        "_sort_score": (
+                            {"critical": 4, "high": 3, "medium": 2, "low": 1, "clean": 0, "unknown": 0}.get(verdict, 0)
+                        ),
+                    }
+                )
 
             if ip_rows:
                 # Sort by verdict severity
@@ -1113,6 +1147,7 @@ def render_osint(result_col, osint_data, *, correlations=None, features=None, be
 
                 # Verdict summary
                 from collections import Counter
+
                 verdict_counts = Counter(r["Verdict"] for r in ip_rows if "Verdict" in r)
                 # Use the original ip_rows which still has Verdict
                 parts = []
@@ -1122,6 +1157,15 @@ def render_osint(result_col, osint_data, *, correlations=None, features=None, be
                         parts.append(f"{_verdict_badge(v)} ×{cnt}")
                 if parts:
                     st.markdown(" ".join(parts), unsafe_allow_html=True)
+
+                # Quick-copy IOC list
+                with st.expander("📋 Copy IOCs to clipboard", expanded=False):
+                    all_ips_text = "\n".join(r["IP"] for r in ip_rows)
+                    st.code(all_ips_text, language="text")
+                    threat_ips = [r["IP"] for r in ip_rows if r.get("Verdict") in ("CRITICAL", "HIGH")]
+                    if threat_ips:
+                        st.markdown("**High-risk IPs only:**")
+                        st.code("\n".join(threat_ips), language="text")
             else:
                 st.info("No public IP findings.")
 
@@ -1155,6 +1199,7 @@ def render_osint(result_col, osint_data, *, correlations=None, features=None, be
                 if creation_date:
                     try:
                         import datetime
+
                         if isinstance(creation_date, (int, float)):
                             created = datetime.datetime.fromtimestamp(creation_date, tz=datetime.timezone.utc)
                         else:
@@ -1169,17 +1214,19 @@ def render_osint(result_col, osint_data, *, correlations=None, features=None, be
                     except Exception:
                         age_str = "n/a"
 
-                dom_rows.append({
-                    "Verdict": verdict.upper(),
-                    "Domain": dom,
-                    "Category": category,
-                    "VT Detections": f"{malicious}/{total}" if total > 0 else "n/a",
-                    "OTX Pulses": pulse_count,
-                    "VT Categories": cat_str,
-                    "Registrar": registrar or "n/a",
-                    "Age": age_str,
-                    "_sort": {"critical": 4, "high": 3, "medium": 2, "low": 1, "clean": 0}.get(verdict, 0),
-                })
+                dom_rows.append(
+                    {
+                        "Verdict": verdict.upper(),
+                        "Domain": dom,
+                        "Category": category,
+                        "VT Detections": f"{malicious}/{total}" if total > 0 else "n/a",
+                        "OTX Pulses": pulse_count,
+                        "VT Categories": cat_str,
+                        "Registrar": registrar or "n/a",
+                        "Age": age_str,
+                        "_sort": {"critical": 4, "high": 3, "medium": 2, "low": 1, "clean": 0}.get(verdict, 0),
+                    }
+                )
 
             if dom_rows:
                 dom_rows.sort(key=lambda r: r["_sort"], reverse=True)
@@ -1222,6 +1269,7 @@ def render_osint(result_col, osint_data, *, correlations=None, features=None, be
 
                 # Verdict summary
                 from collections import Counter
+
                 dom_verdict_counts = Counter(r["Verdict"] for r in dom_rows if "Verdict" in r)
                 parts = []
                 for v in ["CRITICAL", "HIGH", "MEDIUM", "LOW", "CLEAN"]:
@@ -1243,26 +1291,30 @@ def render_osint(result_col, osint_data, *, correlations=None, features=None, be
                     last_dns = vt_attr.get("last_dns_records", [])
                     if isinstance(last_dns, list):
                         for rec in last_dns[:5]:
-                            pdns_rows.append({
-                                "Domain": dom,
-                                "Type": rec.get("type", ""),
-                                "Value": rec.get("value", ""),
-                                "TTL": rec.get("ttl", ""),
-                                "Source": "VirusTotal",
-                            })
+                            pdns_rows.append(
+                                {
+                                    "Domain": dom,
+                                    "Type": rec.get("type", ""),
+                                    "Value": rec.get("value", ""),
+                                    "TTL": rec.get("ttl", ""),
+                                    "Source": "VirusTotal",
+                                }
+                            )
 
                     # OTX passive DNS
                     otx = obj.get("otx") or {}
                     pdns = otx.get("passive_dns", [])
                     if isinstance(pdns, list):
                         for rec in pdns[:5]:
-                            pdns_rows.append({
-                                "Domain": dom,
-                                "Type": "A",
-                                "Value": rec.get("address", rec.get("hostname", "")),
-                                "TTL": "",
-                                "Source": "OTX",
-                            })
+                            pdns_rows.append(
+                                {
+                                    "Domain": dom,
+                                    "Type": "A",
+                                    "Value": rec.get("address", rec.get("hostname", "")),
+                                    "TTL": "",
+                                    "Source": "OTX",
+                                }
+                            )
 
                 if pdns_rows:
                     st.dataframe(pd.DataFrame(pdns_rows), width="stretch", hide_index=True)
@@ -1316,14 +1368,16 @@ def render_osint(result_col, osint_data, *, correlations=None, features=None, be
                 if isinstance(pulse_info, dict):
                     for pulse in pulse_info.get("pulses", [])[:10]:
                         tags = pulse.get("tags", [])
-                        pulse_rows.append({
-                            "IOC": dom,
-                            "Pulse": pulse.get("name", ""),
-                            "Author": pulse.get("author_name", ""),
-                            "Created": str(pulse.get("created", ""))[:10],
-                            "Tags": ", ".join(tags[:5]) if isinstance(tags, list) else "",
-                            "TLP": pulse.get("TLP", ""),
-                        })
+                        pulse_rows.append(
+                            {
+                                "IOC": dom,
+                                "Pulse": pulse.get("name", ""),
+                                "Author": pulse.get("author_name", ""),
+                                "Created": str(pulse.get("created", ""))[:10],
+                                "Tags": ", ".join(tags[:5]) if isinstance(tags, list) else "",
+                                "TLP": pulse.get("TLP", ""),
+                            }
+                        )
 
             if pulse_rows:
                 df_pulses = pd.DataFrame(pulse_rows)
@@ -2146,8 +2200,7 @@ def render_active_filters(**filters):
         return
 
     badges = " ".join(
-        f'<span class="filter-badge">{k.replace("_", " ").title()}: {v}</span>'
-        for k, v in active.items()
+        f'<span class="filter-badge">{k.replace("_", " ").title()}: {v}</span>' for k, v in active.items()
     )
     st.markdown(f"**Active Filters:** {badges}", unsafe_allow_html=True)
 
@@ -2182,13 +2235,9 @@ def render_ioc_search(
                 with st.expander(f"IPs ({len(matched_ips)} matches)", expanded=True):
                     for ip in matched_ips[:10]:
                         osint_ip = (osint or {}).get("ips", {}).get(ip, {})
-                        gn = osint_ip.get("greynoise", {}).get(
-                            "classification", "n/a"
-                        )
+                        gn = osint_ip.get("greynoise", {}).get("classification", "n/a")
                         ptr = osint_ip.get("ptr", "n/a")
-                        st.markdown(
-                            f"**{ip}** — PTR: {ptr}, GreyNoise: {gn}"
-                        )
+                        st.markdown(f"**{ip}** — PTR: {ptr}, GreyNoise: {gn}")
 
         # Search domains
         if features:
@@ -2196,9 +2245,7 @@ def render_ioc_search(
             matched_doms = [d for d in domains if query_lower in d.lower()]
             if matched_doms:
                 results_found = True
-                with st.expander(
-                    f"Domains ({len(matched_doms)} matches)", expanded=True
-                ):
+                with st.expander(f"Domains ({len(matched_doms)} matches)", expanded=True):
                     for dom in matched_doms[:10]:
                         # Check DNS analysis
                         dga_hit = ""
@@ -2213,24 +2260,17 @@ def render_ioc_search(
         if features:
             ja3s = features.get("artifacts", {}).get("ja3", [])
             if isinstance(ja3s, list):
-                matched_ja3 = [
-                    j for j in ja3s
-                    if isinstance(j, str) and query_lower in j.lower()
-                ]
+                matched_ja3 = [j for j in ja3s if isinstance(j, str) and query_lower in j.lower()]
                 if matched_ja3:
                     results_found = True
-                    with st.expander(
-                        f"JA3 ({len(matched_ja3)} matches)", expanded=True
-                    ):
+                    with st.expander(f"JA3 ({len(matched_ja3)} matches)", expanded=True):
                         for j in matched_ja3[:10]:
                             st.code(j)
 
         # Search beacon destinations
         if beacon_df is not None and not beacon_df.empty:
             try:
-                mask = beacon_df["dst"].str.contains(
-                    query_lower, case=False, na=False
-                )
+                mask = beacon_df["dst"].str.contains(query_lower, case=False, na=False)
                 matched = beacon_df[mask]
                 if not matched.empty:
                     results_found = True
@@ -2266,56 +2306,69 @@ def render_hunting_checklist(
         if beacon_df is not None and not beacon_df.empty:
             high_beacons = beacon_df[beacon_df["score"] >= 0.5]
             if not high_beacons.empty:
-                items.append((
-                    f"Review {len(high_beacons)} beacon candidates "
-                    f"(score >= 0.5)",
-                    "beacon",
-                ))
+                items.append(
+                    (
+                        f"Review {len(high_beacons)} beacon candidates (score >= 0.5)",
+                        "beacon",
+                    )
+                )
 
         # DGA domains
         if dns_analysis:
             alerts = dns_analysis.get("alerts", {})
             dga_count = alerts.get("dga_count", 0)
             if dga_count:
-                items.append((
-                    f"Investigate {dga_count} potential DGA domains",
-                    "dns",
-                ))
+                items.append(
+                    (
+                        f"Investigate {dga_count} potential DGA domains",
+                        "dns",
+                    )
+                )
             tunnel_count = alerts.get("tunneling_count", 0)
             if tunnel_count:
-                items.append((
-                    f"Check {tunnel_count} DNS tunneling indicators",
-                    "dns",
-                ))
+                items.append(
+                    (
+                        f"Check {tunnel_count} DNS tunneling indicators",
+                        "dns",
+                    )
+                )
             if alerts.get("nxdomain_suspicious"):
                 ratio = alerts.get("nxdomain_ratio", 0)
-                items.append((
-                    f"High NXDOMAIN ratio ({ratio:.0%}) — possible DGA/C2",
-                    "dns",
-                ))
+                items.append(
+                    (
+                        f"High NXDOMAIN ratio ({ratio:.0%}) — possible DGA/C2",
+                        "dns",
+                    )
+                )
 
         # TLS alerts
         if tls_analysis:
             self_signed = tls_analysis.get("self_signed", 0)
             expired = tls_analysis.get("expired", 0)
             if self_signed:
-                items.append((
-                    f"Examine {self_signed} self-signed certificates",
-                    "tls",
-                ))
+                items.append(
+                    (
+                        f"Examine {self_signed} self-signed certificates",
+                        "tls",
+                    )
+                )
             if expired:
-                items.append((
-                    f"Check {expired} expired certificates",
-                    "tls",
-                ))
+                items.append(
+                    (
+                        f"Check {expired} expired certificates",
+                        "tls",
+                    )
+                )
 
         # YARA matches
         if yara_results and yara_results.get("matched", 0) > 0:
             matched = yara_results["matched"]
-            items.append((
-                f"Analyse {matched} YARA match(es) in carved payloads",
-                "yara",
-            ))
+            items.append(
+                (
+                    f"Analyse {matched} YARA match(es) in carved payloads",
+                    "yara",
+                )
+            )
 
         # OSINT high-risk
         if osint:
@@ -2325,11 +2378,12 @@ def render_hunting_checklist(
                 if gn == "malicious":
                     malicious_ips += 1
             if malicious_ips:
-                items.append((
-                    f"Block/investigate {malicious_ips} malicious IPs "
-                    f"(GreyNoise)",
-                    "osint",
-                ))
+                items.append(
+                    (
+                        f"Block/investigate {malicious_ips} malicious IPs (GreyNoise)",
+                        "osint",
+                    )
+                )
 
         if not items:
             return
@@ -2359,13 +2413,15 @@ def render_correlation_results(result_col, correlations: list | None):
                     d = c.to_dict()
                 else:
                     d = c
-                rows.append({
-                    "Indicator": d.get("indicator", ""),
-                    "Type": d.get("type", ""),
-                    "Score": f"{d.get('composite_score', 0):.1%}",
-                    "Verdict": d.get("verdict", "").upper(),
-                    "Signals": d.get("signal_count", 0),
-                })
+                rows.append(
+                    {
+                        "Indicator": d.get("indicator", ""),
+                        "Type": d.get("type", ""),
+                        "Score": f"{d.get('composite_score', 0):.1%}",
+                        "Verdict": d.get("verdict", "").upper(),
+                        "Signals": d.get("signal_count", 0),
+                    }
+                )
 
             if rows:
                 df = pd.DataFrame(rows)
@@ -2381,9 +2437,7 @@ def render_correlation_results(result_col, correlations: list | None):
                     return [""] * len(row)
 
                 styled_df = df.style.apply(highlight_verdict, axis=1)
-                st.dataframe(
-                    styled_df, width="stretch", hide_index=True
-                )
+                st.dataframe(styled_df, width="stretch", hide_index=True)
 
 
 def render_flow_asymmetry(result_col, asymmetry_results: list | None):
@@ -2393,42 +2447,41 @@ def render_flow_asymmetry(result_col, asymmetry_results: list | None):
             return
 
         suspicious = [
-            r for r in asymmetry_results
-            if (hasattr(r, "is_suspicious") and r.is_suspicious)
-            or (isinstance(r, dict) and r.get("is_suspicious"))
+            r
+            for r in asymmetry_results
+            if (hasattr(r, "is_suspicious") and r.is_suspicious) or (isinstance(r, dict) and r.get("is_suspicious"))
         ]
         if not suspicious:
             return
 
         expanded = len(suspicious) > 0
-        with st.expander(
-            f"Flow Asymmetry ({len(suspicious)} suspicious)", expanded=expanded
-        ):
-            st.warning(
-                f"**Data Exfiltration Risk:** {len(suspicious)} flow pairs "
-                f"show asymmetric traffic patterns."
-            )
+        with st.expander(f"Flow Asymmetry ({len(suspicious)} suspicious)", expanded=expanded):
+            st.warning(f"**Data Exfiltration Risk:** {len(suspicious)} flow pairs show asymmetric traffic patterns.")
 
             rows = []
             for r in suspicious[:20]:
                 d = r.to_dict() if hasattr(r, "to_dict") else r
                 out_mb = d.get("outbound_bytes", 0) / 1_000_000
                 in_mb = d.get("inbound_bytes", 0) / 1_000_000
-                rows.append({
-                    "Source": d.get("src", ""),
-                    "Destination": d.get("dst", ""),
-                    "Outbound": f"{out_mb:.1f} MB",
-                    "Inbound": f"{in_mb:.1f} MB",
-                    "Ratio": f"{d.get('ratio', 0):.1f}:1",
-                    "Score": f"{d.get('score', 0):.1%}",
-                    "Reason": d.get("reason", ""),
-                })
+                rows.append(
+                    {
+                        "Source": d.get("src", ""),
+                        "Destination": d.get("dst", ""),
+                        "Outbound": f"{out_mb:.1f} MB",
+                        "Inbound": f"{in_mb:.1f} MB",
+                        "Ratio": f"{d.get('ratio', 0):.1f}:1",
+                        "Score": f"{d.get('score', 0):.1%}",
+                        "Reason": d.get("reason", ""),
+                    }
+                )
 
             if rows:
                 df = pd.DataFrame(rows)
                 render_export_buttons(
-                    df, "flow_asymmetry",
-                    key_suffix="asymm", is_dataframe=True,
+                    df,
+                    "flow_asymmetry",
+                    key_suffix="asymm",
+                    is_dataframe=True,
                 )
                 st.dataframe(df, width="stretch", hide_index=True)
 
@@ -2439,27 +2492,29 @@ def render_port_anomalies(result_col, anomaly_results: list | None):
         if not anomaly_results:
             return
 
-        with st.expander(
-            f"Port Anomalies ({len(anomaly_results)})", expanded=bool(anomaly_results)
-        ):
+        with st.expander(f"Port Anomalies ({len(anomaly_results)})", expanded=bool(anomaly_results)):
             rows = []
             for r in anomaly_results[:30]:
                 d = r.to_dict() if hasattr(r, "to_dict") else r
-                rows.append({
-                    "Source": d.get("src", ""),
-                    "Destination": d.get("dst", ""),
-                    "Port": d.get("port", ""),
-                    "Proto": d.get("proto", ""),
-                    "Type": d.get("anomaly_type", "").replace("_", " ").title(),
-                    "Score": f"{d.get('score', 0):.1%}",
-                    "Reason": d.get("reason", ""),
-                })
+                rows.append(
+                    {
+                        "Source": d.get("src", ""),
+                        "Destination": d.get("dst", ""),
+                        "Port": d.get("port", ""),
+                        "Proto": d.get("proto", ""),
+                        "Type": d.get("anomaly_type", "").replace("_", " ").title(),
+                        "Score": f"{d.get('score', 0):.1%}",
+                        "Reason": d.get("reason", ""),
+                    }
+                )
 
             if rows:
                 df = pd.DataFrame(rows)
                 render_export_buttons(
-                    df, "port_anomalies",
-                    key_suffix="port", is_dataframe=True,
+                    df,
+                    "port_anomalies",
+                    key_suffix="port",
+                    is_dataframe=True,
                 )
                 st.dataframe(df, width="stretch", hide_index=True)
 
@@ -2483,22 +2538,20 @@ def render_nxdomain_analysis(result_col, dns_analysis: dict | None):
                 ratio = nxd.get("nxdomain_ratio", 0)
                 if nxd.get("is_suspicious"):
                     st.metric(
-                        "NXDOMAIN Ratio", f"{ratio:.1%}",
-                        delta="Suspicious", delta_color="inverse",
+                        "NXDOMAIN Ratio",
+                        f"{ratio:.1%}",
+                        delta="Suspicious",
+                        delta_color="inverse",
                     )
                 else:
                     st.metric("NXDOMAIN Ratio", f"{ratio:.1%}")
             with col3:
-                suspicious_src = sum(
-                    1 for s in nxd.get("sources", [])
-                    if s.get("is_suspicious")
-                )
+                suspicious_src = sum(1 for s in nxd.get("sources", []) if s.get("is_suspicious"))
                 st.metric("Suspicious Sources", suspicious_src)
 
             if nxd.get("is_suspicious"):
                 st.warning(
-                    "High NXDOMAIN ratio may indicate DGA activity, "
-                    "domain enumeration, or C2 communication attempts."
+                    "High NXDOMAIN ratio may indicate DGA activity, domain enumeration, or C2 communication attempts."
                 )
 
             sources = nxd.get("sources", [])
@@ -2526,9 +2579,6 @@ def render_query_velocity(result_col, dns_analysis: dict | None):
             f"DNS Query Velocity ({len(suspicious)} high-rate sources)",
             expanded=True,
         ):
-            st.warning(
-                "Sustained high DNS query rates may indicate "
-                "DNS tunneling or data exfiltration."
-            )
+            st.warning("Sustained high DNS query rates may indicate DNS tunneling or data exfiltration.")
             df = pd.DataFrame(suspicious)
             st.dataframe(df, width="stretch", hide_index=True)

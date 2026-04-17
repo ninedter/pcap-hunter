@@ -64,8 +64,7 @@ class CorrelationResult:
             "verdict": self.verdict,
             "signal_count": len(self.signals),
             "signals": [
-                {"name": s.name, "value": s.value, "score": round(s.score, 3), "source": s.source}
-                for s in self.signals
+                {"name": s.name, "value": s.value, "score": round(s.score, 3), "source": s.source} for s in self.signals
             ],
         }
 
@@ -180,7 +179,7 @@ _TIER3_CONTEXTUAL = {"abuseipdb", "self_signed_cert", "expired_cert", "yara_matc
 # Strong-signal floors — a single definitive signal sets a minimum score
 # regardless of the rest of the formula.
 _STRONG_SIGNAL_FLOORS = {
-    "vt_detections": 0.55,       # VT detection → at least "high"
+    "vt_detections": 0.55,  # VT detection → at least "high"
     "greynoise_malicious": 0.40,  # GreyNoise malicious → at least "medium"
 }
 

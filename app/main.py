@@ -35,9 +35,12 @@ from app.ui.charts import (
     build_sankey_html,
     plot_attack_timeline,
     plot_flow_timeline,
+    plot_inter_arrival_histogram,
     plot_network_graph,
+    plot_packet_size_histogram,
     plot_protocol_distribution,
     plot_top_n_charts,
+    plot_traffic_timeline_heatmap,
     plot_world_map,
 )
 from app.ui.config_ui import init_config_defaults, render_config_tab
@@ -224,8 +227,11 @@ def _run_single_pcap_pipeline(
             if pyshark_needed:
                 p = tracker.next_phase("Parsing Packets")
                 features = parse_pcap_pyshark(
-                    pcap_path, limit_packets=limit_packets, phase=p,
-                    total_packets=total_pkts, progress_every=250,
+                    pcap_path,
+                    limit_packets=limit_packets,
+                    phase=p,
+                    total_packets=total_pkts,
+                    progress_every=250,
                 )
                 p.done("Packet parsing complete.")
 
@@ -317,9 +323,14 @@ def _run_single_pcap_pipeline(
 
         # Stage 9: OSINT enrichment
         p = tracker.next_phase("OSINT enrichment")
-        feats = features if isinstance(features, dict) else {
-            "flows": [], "artifacts": {"ips": [], "domains": [], "urls": [], "hashes": [], "ja3": []},
-        }
+        feats = (
+            features
+            if isinstance(features, dict)
+            else {
+                "flows": [],
+                "artifacts": {"ips": [], "domains": [], "urls": [], "hashes": [], "ja3": []},
+            }
+        )
         arts = dict(feats.get("artifacts", {}))
         arts["ips"] = [ip for ip in arts.get("ips", []) if is_public_ipv4(ip)]
         if osint_top_n > 0:
@@ -499,8 +510,7 @@ with tab_upload:
                 for name, err in processor.skipped_files:
                     st.warning(f"Skipped {name}: {err}")
             st.caption(
-                f"Batch: {len(processor.pcap_paths)} valid file(s), "
-                f"{processor.total_size / (1024 * 1024):.1f} MB total"
+                f"Batch: {len(processor.pcap_paths)} valid file(s), {processor.total_size / (1024 * 1024):.1f} MB total"
             )
 
     do_pyshark = bool(st.session_state.get("cfg_do_pyshark", True))
@@ -843,9 +853,7 @@ with tab_progress:
                     if batch_mode and st.session_state.get("__batch_result"):
                         br = st.session_state["__batch_result"]
                         context["batch_summary"] = br.summary
-                        context["cross_file_indicators"] = [
-                            ind for ind in br.correlation.common_indicators[:20]
-                        ]
+                        context["cross_file_indicators"] = [ind for ind in br.correlation.common_indicators[:20]]
 
                     try:
                         current_lang = st.session_state.get("cfg_lm_language", "US English")
@@ -898,7 +906,9 @@ with tab_dashboard:
 
     # IOC search bar at the top
     render_ioc_search(
-        st.container(), feats, st.session_state.get("osint"),
+        st.container(),
+        feats,
+        st.session_state.get("osint"),
         st.session_state.get("dns_analysis"),
         get_df_state("beacon_df") if not get_df_state("beacon_df").empty else None,
     )
@@ -961,7 +971,7 @@ with tab_dashboard:
         "Exclude Private IPs from Analysis",
         value=False,
         key="dashboard_exclude_private",
-        help="Ignore RFC1918 (local) addresses in Top 10 charts and map visualization."
+        help="Ignore RFC1918 (local) addresses in Top 10 charts and map visualization.",
     )
 
     # 1. World Map
@@ -988,7 +998,7 @@ with tab_dashboard:
 
         # Build threat scores lookup from correlations
         _threat_scores: dict[str, float] = {}
-        for c in (st.session_state.get("correlations") or []):
+        for c in st.session_state.get("correlations") or []:
             if hasattr(c, "indicator") and hasattr(c, "composite_score"):
                 _threat_scores[c.indicator] = c.composite_score
             elif isinstance(c, dict):
@@ -997,7 +1007,8 @@ with tab_dashboard:
         # Render map with selection enabled
         map_event = st.plotly_chart(
             plot_world_map(
-                ip_locs, flows=filtered_flows,
+                ip_locs,
+                flows=filtered_flows,
                 home_loc=(home_lat, home_lon),
                 threat_scores=_threat_scores,
             ),
@@ -1178,44 +1189,28 @@ with tab_dashboard:
             if top10_view == "IP":
                 # --- IP-centric view ---
                 with tcol1:
-                    st.plotly_chart(
-                        plot_top_n_charts(top_src_ips, "Top 10 Source IPs"), width="stretch"
-                    )
+                    st.plotly_chart(plot_top_n_charts(top_src_ips, "Top 10 Source IPs"), width="stretch")
                     with st.expander("Source IP Table"):
                         df_src = pd.DataFrame(list(top_src_ips.items()), columns=["IP", "Count"])
                         df_src["Hostname"] = df_src["IP"].map(lambda ip: rdns.get(ip, ""))
-                        st.dataframe(
-                            df_src.sort_values("Count", ascending=False).head(10), hide_index=True
-                        )
+                        st.dataframe(df_src.sort_values("Count", ascending=False).head(10), hide_index=True)
 
-                    st.plotly_chart(
-                        plot_top_n_charts(top_dst_ports, "Top 10 Destination Ports"), width="stretch"
-                    )
+                    st.plotly_chart(plot_top_n_charts(top_dst_ports, "Top 10 Destination Ports"), width="stretch")
                     with st.expander("Destination Port Table"):
                         df_ports = pd.DataFrame(list(top_dst_ports.items()), columns=["Port", "Count"])
-                        st.dataframe(
-                            df_ports.sort_values("Count", ascending=False).head(10), hide_index=True
-                        )
+                        st.dataframe(df_ports.sort_values("Count", ascending=False).head(10), hide_index=True)
 
                 with tcol2:
-                    st.plotly_chart(
-                        plot_top_n_charts(top_dst_ips, "Top 10 Destination IPs"), width="stretch"
-                    )
+                    st.plotly_chart(plot_top_n_charts(top_dst_ips, "Top 10 Destination IPs"), width="stretch")
                     with st.expander("Destination IP Table"):
                         df_dst = pd.DataFrame(list(top_dst_ips.items()), columns=["IP", "Count"])
                         df_dst["Hostname"] = df_dst["IP"].map(lambda ip: rdns.get(ip, ""))
-                        st.dataframe(
-                            df_dst.sort_values("Count", ascending=False).head(10), hide_index=True
-                        )
+                        st.dataframe(df_dst.sort_values("Count", ascending=False).head(10), hide_index=True)
 
-                    st.plotly_chart(
-                        plot_top_n_charts(top_protos, "Top 10 Protocols"), width="stretch"
-                    )
+                    st.plotly_chart(plot_top_n_charts(top_protos, "Top 10 Protocols"), width="stretch")
                     with st.expander("Protocol Table"):
                         df_proto = pd.DataFrame(list(top_protos.items()), columns=["Protocol", "Count"])
-                        st.dataframe(
-                            df_proto.sort_values("Count", ascending=False).head(10), hide_index=True
-                        )
+                        st.dataframe(df_proto.sort_values("Count", ascending=False).head(10), hide_index=True)
 
             else:
                 # --- Domain-centric view ---
@@ -1226,9 +1221,7 @@ with tab_dashboard:
                             width="stretch",
                         )
                         with st.expander("Queried Domain Table"):
-                            df_qdom = pd.DataFrame(
-                                list(top_src_domains.items()), columns=["Domain", "Queries"]
-                            )
+                            df_qdom = pd.DataFrame(list(top_src_domains.items()), columns=["Domain", "Queries"])
                             st.dataframe(
                                 df_qdom.sort_values("Queries", ascending=False).head(10),
                                 hide_index=True,
@@ -1236,14 +1229,10 @@ with tab_dashboard:
                     else:
                         st.info("No DNS query data available.")
 
-                    st.plotly_chart(
-                        plot_top_n_charts(top_dst_ports, "Top 10 Destination Ports"), width="stretch"
-                    )
+                    st.plotly_chart(plot_top_n_charts(top_dst_ports, "Top 10 Destination Ports"), width="stretch")
                     with st.expander("Destination Port Table"):
                         df_ports = pd.DataFrame(list(top_dst_ports.items()), columns=["Port", "Count"])
-                        st.dataframe(
-                            df_ports.sort_values("Count", ascending=False).head(10), hide_index=True
-                        )
+                        st.dataframe(df_ports.sort_values("Count", ascending=False).head(10), hide_index=True)
 
                 with tcol2:
                     if top_dst_domains:
@@ -1252,9 +1241,7 @@ with tab_dashboard:
                             width="stretch",
                         )
                         with st.expander("Resolved Domain Table"):
-                            df_rdom = pd.DataFrame(
-                                list(top_dst_domains.items()), columns=["Domain", "Responses"]
-                            )
+                            df_rdom = pd.DataFrame(list(top_dst_domains.items()), columns=["Domain", "Responses"])
                             st.dataframe(
                                 df_rdom.sort_values("Responses", ascending=False).head(10),
                                 hide_index=True,
@@ -1262,18 +1249,13 @@ with tab_dashboard:
                     else:
                         st.info("No DNS response data available.")
 
-                    st.plotly_chart(
-                        plot_top_n_charts(top_protos, "Top 10 Protocols"), width="stretch"
-                    )
+                    st.plotly_chart(plot_top_n_charts(top_protos, "Top 10 Protocols"), width="stretch")
                     with st.expander("Protocol Table"):
                         df_proto = pd.DataFrame(list(top_protos.items()), columns=["Protocol", "Count"])
-                        st.dataframe(
-                            df_proto.sort_values("Count", ascending=False).head(10), hide_index=True
-                        )
+                        st.dataframe(df_proto.sort_values("Count", ascending=False).head(10), hide_index=True)
 
         else:
             st.info("Start analysis to see Top 10 metrics.")
-
 
     # --- New Dashboard Sections ---
     st.markdown("---")
@@ -1290,15 +1272,14 @@ with tab_dashboard:
                 sankey_html, sankey_h = sankey_result
                 components.html(sankey_html, height=sankey_h + 20, scrolling=True)
                 render_chart_hint(
-                    "Drag nodes to rearrange. "
-                    "Source IP → Port (Protocol) → Destination IP. Width = packet volume."
+                    "Drag nodes to rearrange. Source IP → Port (Protocol) → Destination IP. Width = packet volume."
                 )
 
     with dash_col2:
         # Network graph
         if filtered_flows:
             _ts = {}
-            for c in (st.session_state.get("correlations") or []):
+            for c in st.session_state.get("correlations") or []:
                 if hasattr(c, "indicator"):
                     _ts[c.indicator] = c.composite_score
                 elif isinstance(c, dict):
@@ -1318,8 +1299,7 @@ with tab_dashboard:
             dns_analysis=st.session_state.get("dns_analysis"),
             yara_results=st.session_state.get("yara_results"),
             beacon_results=(
-                get_df_state("beacon_df").to_dict("records")
-                if not get_df_state("beacon_df").empty else []
+                get_df_state("beacon_df").to_dict("records") if not get_df_state("beacon_df").empty else []
             ),
             tls_analysis=st.session_state.get("tls_analysis"),
         )
@@ -1332,6 +1312,28 @@ with tab_dashboard:
             render_chart_hint("Diamond markers show events by severity and time.")
     except Exception:
         pass
+
+    # --- Traffic profiling charts ---
+    if filtered_flows:
+        prof_col1, prof_col2 = st.columns(2)
+        with prof_col1:
+            pkt_hist = plot_packet_size_histogram(filtered_flows)
+            if pkt_hist:
+                st.plotly_chart(pkt_hist, use_container_width=True)
+                render_chart_hint("Packet size distribution — small uniform packets may indicate C2.")
+        with prof_col2:
+            iat_hist = plot_inter_arrival_histogram(filtered_flows)
+            if iat_hist:
+                st.plotly_chart(iat_hist, use_container_width=True)
+                render_chart_hint("Inter-arrival time distribution — spikes at regular intervals suggest beaconing.")
+
+        # Timeline heatmap (full-width)
+        heatmap_fig = plot_traffic_timeline_heatmap(filtered_flows)
+        if heatmap_fig:
+            st.plotly_chart(heatmap_fig, use_container_width=True)
+            render_chart_hint(
+                "Rows = IPs, columns = time. Bright cells = high activity. Spot bursty or persistent connections."
+            )
 
     # --- Beaconing / YARA / TLS summaries on dashboard ---
     _beacon = get_df_state("beacon_df")

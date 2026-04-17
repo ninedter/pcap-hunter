@@ -1,12 +1,88 @@
 from __future__ import annotations
 
+import logging
 import pathlib
 import time
-from typing import Optional
+from typing import Any, Optional
 
 import streamlit as st
 
 from app.utils.common import make_slug
+
+logger = logging.getLogger(__name__)
+
+
+class PipelineTimer:
+    """Track timing for each pipeline stage for performance diagnostics.
+
+    Usage::
+
+        timer = PipelineTimer()
+        with timer.stage("PyShark"):
+            parse_pcap(...)
+        with timer.stage("Zeek"):
+            run_zeek(...)
+        print(timer.summary())
+    """
+
+    def __init__(self):
+        self._stages: list[dict[str, Any]] = []
+        self._start = time.time()
+
+    class _StageContext:
+        def __init__(self, timer: "PipelineTimer", name: str):
+            self._timer = timer
+            self._name = name
+            self._start = 0.0
+
+        def __enter__(self):
+            self._start = time.time()
+            return self
+
+        def __exit__(self, exc_type, exc_val, exc_tb):
+            elapsed = time.time() - self._start
+            self._timer._stages.append(
+                {
+                    "name": self._name,
+                    "elapsed": round(elapsed, 2),
+                    "error": str(exc_val) if exc_val else None,
+                }
+            )
+            logger.info(
+                "Pipeline stage '%s' completed in %.2fs%s",
+                self._name,
+                elapsed,
+                f" (ERROR: {exc_val})" if exc_val else "",
+            )
+            return False  # Don't suppress exceptions
+
+    def stage(self, name: str) -> _StageContext:
+        """Return a context manager that times a named stage."""
+        return self._StageContext(self, name)
+
+    @property
+    def total_elapsed(self) -> float:
+        return round(time.time() - self._start, 2)
+
+    def summary(self) -> dict[str, Any]:
+        """Return timing summary as a dict."""
+        return {
+            "total_seconds": self.total_elapsed,
+            "stages": list(self._stages),
+            "slowest": max(self._stages, key=lambda s: s["elapsed"])["name"] if self._stages else None,
+            "errors": [s["name"] for s in self._stages if s.get("error")],
+        }
+
+    def summary_text(self) -> str:
+        """Return human-readable timing summary."""
+        lines = [f"Pipeline completed in {self.total_elapsed}s:"]
+        for s in self._stages:
+            status = "❌" if s.get("error") else "✅"
+            lines.append(f"  {status} {s['name']}: {s['elapsed']}s")
+        if self._stages:
+            slowest = max(self._stages, key=lambda s: s["elapsed"])
+            lines.append(f"  ⏱️ Slowest: {slowest['name']} ({slowest['elapsed']}s)")
+        return "\n".join(lines)
 
 
 def ss_init(key, default):
@@ -18,6 +94,7 @@ def ss_init(key, default):
 def reset_run_state(phase_titles):
     st.session_state["run_active"] = True
     st.session_state["run_started_at"] = time.time()
+    st.session_state["pipeline_timer"] = PipelineTimer()
     for t in phase_titles:
         slug = make_slug(t)
         st.session_state[f"skip_{slug}"] = False
@@ -30,6 +107,10 @@ def is_run_active() -> bool:
 
 def end_run():
     st.session_state["run_active"] = False
+    # Log pipeline timing summary
+    timer = st.session_state.get("pipeline_timer")
+    if timer and isinstance(timer, PipelineTimer):
+        logger.info("Pipeline timing:\n%s", timer.summary_text())
 
 
 class PhaseTracker:
@@ -146,9 +227,7 @@ class BatchPhaseTracker:
         self.current_file += 1
         pct = int((self.current_file - 1) / self.total_files * 100)
         self.file_bar.progress(pct)
-        self.file_text.write(
-            f"File {self.current_file}/{self.total_files}: **{pathlib.Path(filename).name}**"
-        )
+        self.file_text.write(f"File {self.current_file}/{self.total_files}: **{pathlib.Path(filename).name}**")
         return PhaseTracker(self.phases_per_file, progress_container=self._container)
 
     def finish_file(self):

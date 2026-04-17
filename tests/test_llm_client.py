@@ -1,6 +1,6 @@
 import sys
 import unittest
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 # Mock openai module BEFORE importing app.llm.client
 mock_openai_module = MagicMock()
@@ -11,13 +11,11 @@ from app.llm.client import fetch_models
 
 
 class TestLLMClient(unittest.TestCase):
-    def test_fetch_models_success(self):
-        # Reset side_effect from previous tests
-        mock_openai_module.OpenAI.side_effect = None
-
+    @patch("app.llm.client.OpenAI")
+    def test_fetch_models_success(self, mock_openai_cls):
         # Setup the mock client returned by OpenAI constructor
         mock_client_instance = MagicMock()
-        mock_openai_module.OpenAI.return_value = mock_client_instance
+        mock_openai_cls.return_value = mock_client_instance
 
         # Mock models.list() response
         mock_model_1 = MagicMock()
@@ -31,25 +29,27 @@ class TestLLMClient(unittest.TestCase):
         models = fetch_models("http://test", "key")
 
         # Verify OpenAI was called with correct args
-        mock_openai_module.OpenAI.assert_called_with(base_url="http://test", api_key="key")
+        mock_openai_cls.assert_called_once()
+        call_kwargs = mock_openai_cls.call_args
+        self.assertEqual(call_kwargs.kwargs.get("base_url"), "http://test")
+        self.assertEqual(call_kwargs.kwargs.get("api_key"), "key")
         self.assertEqual(models, ["model-a", "model-b"])
 
-    def test_fetch_models_failure(self):
+    @patch("app.llm.client.OpenAI")
+    def test_fetch_models_failure(self, mock_openai_cls):
         # Setup exception
-        mock_openai_module.OpenAI.side_effect = Exception("Connection error")
+        mock_openai_cls.side_effect = Exception("Connection error")
         models = fetch_models("http://test", "key")
         self.assertEqual(models, [])  # Should return empty list on error
 
-    def test_generate_report(self):
+    @patch("app.llm.client.OpenAI")
+    def test_generate_report(self, mock_openai_cls):
         # Import inside test to avoid early import issues with mocks
         from app.llm.client import generate_report
 
-        # Reset side_effect
-        mock_openai_module.OpenAI.side_effect = None
-
         # Mock client
         mock_client_instance = MagicMock()
-        mock_openai_module.OpenAI.return_value = mock_client_instance
+        mock_openai_cls.return_value = mock_client_instance
 
         # Mock completions.create
         mock_completion = MagicMock()

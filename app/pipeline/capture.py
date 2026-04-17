@@ -35,9 +35,7 @@ class LiveCapture:
         # If we can enumerate interfaces, validate against the list
         available = list_interfaces()
         if available and interface not in available:
-            raise ValueError(
-                f"Interface {interface!r} not found. Available: {', '.join(available)}"
-            )
+            raise ValueError(f"Interface {interface!r} not found. Available: {', '.join(available)}")
 
     def start(self):
         """Starts the tshark capture."""

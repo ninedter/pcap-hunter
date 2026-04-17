@@ -11,11 +11,24 @@ logger = logging.getLogger(__name__)
 
 # Well-known service ports and expected protocols
 KNOWN_SERVICES: dict[int, str] = {
-    20: "ftp-data", 21: "ftp", 22: "ssh", 23: "telnet",
-    25: "smtp", 53: "dns", 80: "http", 110: "pop3",
-    143: "imap", 443: "https", 445: "smb", 993: "imaps",
-    995: "pop3s", 3306: "mysql", 3389: "rdp", 5432: "postgres",
-    8080: "http-alt", 8443: "https-alt",
+    20: "ftp-data",
+    21: "ftp",
+    22: "ssh",
+    23: "telnet",
+    25: "smtp",
+    53: "dns",
+    80: "http",
+    110: "pop3",
+    143: "imap",
+    443: "https",
+    445: "smb",
+    993: "imaps",
+    995: "pop3s",
+    3306: "mysql",
+    3389: "rdp",
+    5432: "postgres",
+    8080: "http-alt",
+    8443: "https-alt",
 }
 
 # Ports commonly used by C2 frameworks
@@ -95,9 +108,9 @@ def detect_flow_asymmetry(flows: list[dict[str, Any]]) -> list[FlowAsymmetryResu
         List of FlowAsymmetryResult sorted by score descending
     """
     # Group flows by (src, dst) pair
-    pair_stats: dict[tuple[str, str], dict] = defaultdict(lambda: {
-        "outbound_bytes": 0, "inbound_bytes": 0, "total_packets": 0
-    })
+    pair_stats: dict[tuple[str, str], dict] = defaultdict(
+        lambda: {"outbound_bytes": 0, "inbound_bytes": 0, "total_packets": 0}
+    )
 
     for flow in flows:
         src = flow.get("src", "")
@@ -166,13 +179,19 @@ def detect_flow_asymmetry(flows: list[dict[str, Any]]) -> list[FlowAsymmetryResu
         score = min(score, 1.0)
         is_suspicious = score >= 0.4
 
-        results.append(FlowAsymmetryResult(
-            src=src, dst=dst,
-            outbound_bytes=outbound, inbound_bytes=inbound,
-            ratio=ratio, total_packets=total_packets,
-            score=score, is_suspicious=is_suspicious,
-            reason="; ".join(reasons),
-        ))
+        results.append(
+            FlowAsymmetryResult(
+                src=src,
+                dst=dst,
+                outbound_bytes=outbound,
+                inbound_bytes=inbound,
+                ratio=ratio,
+                total_packets=total_packets,
+                score=score,
+                is_suspicious=is_suspicious,
+                reason="; ".join(reasons),
+            )
+        )
 
     results.sort(key=lambda r: r.score, reverse=True)
     return results
@@ -218,26 +237,36 @@ def detect_port_anomalies(flows: list[dict[str, Any]]) -> list[PortAnomalyResult
 
         # Check known C2 ports
         if dport in C2_COMMON_PORTS:
-            results.append(PortAnomalyResult(
-                src=src, dst=dst, port=dport, proto=proto,
-                anomaly_type="c2_port",
-                expected_service="n/a",
-                score=0.7,
-                reason=f"Port {dport} commonly used by C2 frameworks",
-            ))
+            results.append(
+                PortAnomalyResult(
+                    src=src,
+                    dst=dst,
+                    port=dport,
+                    proto=proto,
+                    anomaly_type="c2_port",
+                    expected_service="n/a",
+                    score=0.7,
+                    reason=f"Port {dport} commonly used by C2 frameworks",
+                )
+            )
             continue
 
         # Check high-port to high-port (potential covert channel)
         if sport > HIGH_PORT_THRESHOLD and dport > HIGH_PORT_THRESHOLD:
             count = flow.get("count", 0)
             if count > 10:  # Only flag if sustained
-                results.append(PortAnomalyResult(
-                    src=src, dst=dst, port=dport, proto=proto,
-                    anomaly_type="high_port_pair",
-                    expected_service="n/a",
-                    score=0.4,
-                    reason=f"High-port-to-high-port ({sport}->{dport}, {count} packets)",
-                ))
+                results.append(
+                    PortAnomalyResult(
+                        src=src,
+                        dst=dst,
+                        port=dport,
+                        proto=proto,
+                        anomaly_type="high_port_pair",
+                        expected_service="n/a",
+                        score=0.4,
+                        reason=f"High-port-to-high-port ({sport}->{dport}, {count} packets)",
+                    )
+                )
 
         # Check for protocol mismatch on well-known ports
         if dport in KNOWN_SERVICES:
@@ -246,21 +275,31 @@ def detect_port_anomalies(flows: list[dict[str, Any]]) -> list[PortAnomalyResult
             if dport == 53 and proto == "tcp":
                 count = flow.get("count", 0)
                 if count > 20:
-                    results.append(PortAnomalyResult(
-                        src=src, dst=dst, port=dport, proto=proto,
+                    results.append(
+                        PortAnomalyResult(
+                            src=src,
+                            dst=dst,
+                            port=dport,
+                            proto=proto,
+                            anomaly_type="non_standard",
+                            expected_service=expected,
+                            score=0.5,
+                            reason=f"TCP traffic on DNS port 53 ({count} packets) - possible DNS-over-TCP tunneling",
+                        )
+                    )
+            elif dport == 80 and proto == "udp":
+                results.append(
+                    PortAnomalyResult(
+                        src=src,
+                        dst=dst,
+                        port=dport,
+                        proto=proto,
                         anomaly_type="non_standard",
                         expected_service=expected,
                         score=0.5,
-                        reason=f"TCP traffic on DNS port 53 ({count} packets) - possible DNS-over-TCP tunneling",
-                    ))
-            elif dport == 80 and proto == "udp":
-                results.append(PortAnomalyResult(
-                    src=src, dst=dst, port=dport, proto=proto,
-                    anomaly_type="non_standard",
-                    expected_service=expected,
-                    score=0.5,
-                    reason="UDP traffic on HTTP port 80 - unexpected protocol",
-                ))
+                        reason="UDP traffic on HTTP port 80 - unexpected protocol",
+                    )
+                )
 
     results.sort(key=lambda r: r.score, reverse=True)
     return results[:50]  # Limit output

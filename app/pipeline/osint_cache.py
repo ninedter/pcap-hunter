@@ -127,6 +127,39 @@ class OSINTCache:
         self.enabled = enabled
         logger.info(f"OSINT cache {'enabled' if enabled else 'disabled'}")
 
+    def invalidate_on_key_change(self, keys_hash: str) -> None:
+        """Invalidate cache if API keys have changed since last run.
+
+        Compares a hash of the current API key set against the stored hash.
+        If they differ, all cached responses are cleared to prevent serving
+        stale results from a different API key.
+
+        Args:
+            keys_hash: Hash of the current API key configuration.
+        """
+        try:
+            with self._get_conn() as conn:
+                conn.execute("""
+                    CREATE TABLE IF NOT EXISTS cache_meta (
+                        key TEXT PRIMARY KEY,
+                        value TEXT NOT NULL
+                    )
+                """)
+                row = conn.execute("SELECT value FROM cache_meta WHERE key = 'keys_hash'").fetchone()
+                stored_hash = row[0] if row else None
+
+                if stored_hash and stored_hash != keys_hash:
+                    count = self.invalidate()
+                    logger.warning("API keys changed — invalidated %d cached OSINT entries", count)
+
+                conn.execute(
+                    "INSERT OR REPLACE INTO cache_meta (key, value) VALUES ('keys_hash', ?)",
+                    (keys_hash,),
+                )
+                conn.commit()
+        except Exception as e:
+            logger.warning("Cache key-change check failed: %s", e)
+
     def get(self, indicator: str, provider: str) -> dict | None:
         """
         Get cached response for an indicator and provider.
@@ -204,10 +237,7 @@ class OSINTCache:
                 INSERT OR REPLACE INTO osint_cache (indicator, provider, data, created_at)
                 VALUES (?, ?, ?, ?)
                 """,
-                [
-                    (indicator.lower(), provider.lower(), json.dumps(data), now)
-                    for indicator, provider, data in entries
-                ],
+                [(indicator.lower(), provider.lower(), json.dumps(data), now) for indicator, provider, data in entries],
             )
             conn.commit()
 

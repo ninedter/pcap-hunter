@@ -328,8 +328,7 @@ def detect_tunneling(
     if pre_filtered is not None:
         # Use pre-filtered records (already scoped to base domain)
         relevant = [
-            r for r in pre_filtered
-            if r.query.lower().endswith(domain_lower) or r.query.lower() == domain_lower
+            r for r in pre_filtered if r.query.lower().endswith(domain_lower) or r.query.lower() == domain_lower
         ]
     else:
         # Fallback: scan all records (backward compatible)
@@ -564,13 +563,15 @@ def analyze_nxdomain(records: list[DNSRecord]) -> dict[str, Any]:
         total_q = src_total[src]
         ratio = nx_count / total_q if total_q > 0 else 0
         if ratio > 0.1:  # Only include sources with >10% NXDOMAIN
-            sources.append({
-                "src": src,
-                "nxdomain_count": nx_count,
-                "total_queries": total_q,
-                "ratio": round(ratio, 3),
-                "is_suspicious": ratio > NXDOMAIN_RATIO_THRESHOLD,
-            })
+            sources.append(
+                {
+                    "src": src,
+                    "nxdomain_count": nx_count,
+                    "total_queries": total_q,
+                    "ratio": round(ratio, 3),
+                    "is_suspicious": ratio > NXDOMAIN_RATIO_THRESHOLD,
+                }
+            )
 
     return {
         "nxdomain_count": nxdomain_count,
@@ -623,14 +624,16 @@ def analyze_query_velocity(records: list[DNSRecord]) -> list[dict[str, Any]]:
         else:
             continue
 
-        results.append({
-            "src": src,
-            "queries": len(timestamps),
-            "duration_sec": round(duration, 1),
-            "qps": round(qps, 1),
-            "score": score,
-            "is_suspicious": qps > QUERY_VELOCITY_THRESHOLD,
-        })
+        results.append(
+            {
+                "src": src,
+                "queries": len(timestamps),
+                "duration_sec": round(duration, 1),
+                "qps": round(qps, 1),
+                "score": score,
+                "is_suspicious": qps > QUERY_VELOCITY_THRESHOLD,
+            }
+        )
 
     results.sort(key=lambda x: x["qps"], reverse=True)
     return results[:20]
@@ -876,9 +879,7 @@ def analyze_dns(
             "fast_flux_count": sum(1 for r in fast_flux_results if r.is_fast_flux),
             "nxdomain_suspicious": nxdomain_analysis.get("is_suspicious", False),
             "nxdomain_ratio": nxdomain_analysis.get("nxdomain_ratio", 0),
-            "high_velocity_sources": sum(
-                1 for v in query_velocity if v.get("is_suspicious")
-            ),
+            "high_velocity_sources": sum(1 for v in query_velocity if v.get("is_suspicious")),
         },
     }
 
@@ -892,13 +893,9 @@ def analyze_dns(
         if alerts["fast_flux_count"]:
             alert_msg.append(f"{alerts['fast_flux_count']} fast-flux")
         if alerts.get("nxdomain_suspicious"):
-            alert_msg.append(
-                f"NXDOMAIN {alerts['nxdomain_ratio']:.0%}"
-            )
+            alert_msg.append(f"NXDOMAIN {alerts['nxdomain_ratio']:.0%}")
         if alerts.get("high_velocity_sources"):
-            alert_msg.append(
-                f"{alerts['high_velocity_sources']} high-velocity"
-            )
+            alert_msg.append(f"{alerts['high_velocity_sources']} high-velocity")
 
         summary = f"Analyzed {len(records)} DNS records, {len(all_domains)} domains."
         if alert_msg:

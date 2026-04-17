@@ -72,10 +72,14 @@ def test_detect_port_anomalies_tcp_on_dns():
 
 def test_flow_asymmetry_result_to_dict():
     r = FlowAsymmetryResult(
-        src="10.0.0.1", dst="1.2.3.4",
-        outbound_bytes=5000000, inbound_bytes=1000,
-        ratio=5000.0, total_packets=100,
-        score=0.8, is_suspicious=True,
+        src="10.0.0.1",
+        dst="1.2.3.4",
+        outbound_bytes=5000000,
+        inbound_bytes=1000,
+        ratio=5000.0,
+        total_packets=100,
+        score=0.8,
+        is_suspicious=True,
         reason="extreme ratio",
     )
     d = r.to_dict()
@@ -86,8 +90,10 @@ def test_flow_asymmetry_result_to_dict():
 
 def test_port_anomaly_result_to_dict():
     r = PortAnomalyResult(
-        src="10.0.0.1", dst="1.2.3.4",
-        port=4444, proto="tcp",
+        src="10.0.0.1",
+        dst="1.2.3.4",
+        port=4444,
+        proto="tcp",
         anomaly_type="c2_port",
         expected_service="n/a",
         score=0.7,

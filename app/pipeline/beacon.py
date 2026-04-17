@@ -8,14 +8,21 @@ import pandas as pd
 INFRA_ALLOWLIST = frozenset(
     {
         # Public DNS resolvers
-        "1.1.1.1", "1.0.0.1",              # Cloudflare
-        "8.8.8.8", "8.8.4.4",              # Google
-        "208.67.222.222", "208.67.220.220", # OpenDNS
-        "9.9.9.9", "149.112.112.112",       # Quad9
-        "168.95.1.1", "168.95.192.1",       # HiNet (Taiwan)
+        "1.1.1.1",
+        "1.0.0.1",  # Cloudflare
+        "8.8.8.8",
+        "8.8.4.4",  # Google
+        "208.67.222.222",
+        "208.67.220.220",  # OpenDNS
+        "9.9.9.9",
+        "149.112.112.112",  # Quad9
+        "168.95.1.1",
+        "168.95.192.1",  # HiNet (Taiwan)
         # NTP pools (common)
-        "129.6.15.28", "129.6.15.29",       # NIST
-        "132.163.97.1", "132.163.96.1",
+        "129.6.15.28",
+        "129.6.15.29",  # NIST
+        "132.163.97.1",
+        "132.163.96.1",
     }
 )
 
@@ -25,19 +32,25 @@ BENIGN_PERIODIC_PROTOS = frozenset({"icmp", "ntp", "ssdp", "mdns", "igmp"})
 
 # Destination ports for services that maintain persistent/periodic connections
 # by design.  Multiplier applied to raw beacon score.
+#
+# Lower multiplier = stronger penalty (less likely to be a real beacon).
+# Port 443 set to 0.15 — vast majority of HTTPS beacons are CDN keep-alives;
+# genuine C2 on 443 needs corroborating OSINT signals to surface.
+# Port 53 set to 0.15 — DNS resolvers generate inherently periodic traffic.
 BENIGN_SERVICE_PORTS: dict[str, float] = {
-    "53": 0.3,      # DNS
-    "123": 0.3,     # NTP
-    "443": 0.5,     # HTTPS/QUIC — most legitimate traffic; still allows very strong C2 to surface
-    "993": 0.2,     # IMAPS — periodic IDLE keep-alives
-    "995": 0.2,     # POP3S
-    "5223": 0.2,    # Apple Push Notification
-    "5228": 0.2,    # Google Play / FCM push
-    "1883": 0.3,    # MQTT (IoT)
-    "8883": 0.3,    # MQTT over TLS
-    "5060": 0.3,    # SIP
-    "5061": 0.3,    # SIP-TLS
-    "5353": 0.3,    # mDNS
+    "53": 0.15,  # DNS — inherently periodic, strong penalty
+    "123": 0.15,  # NTP — inherently periodic
+    "443": 0.15,  # HTTPS/QUIC — overwhelmingly legitimate; real C2 needs OSINT corroboration
+    "80": 0.3,  # HTTP — less common, moderate penalty
+    "993": 0.15,  # IMAPS — periodic IDLE keep-alives
+    "995": 0.15,  # POP3S
+    "5223": 0.15,  # Apple Push Notification
+    "5228": 0.15,  # Google Play / FCM push
+    "1883": 0.2,  # MQTT (IoT)
+    "8883": 0.2,  # MQTT over TLS
+    "5060": 0.2,  # SIP
+    "5061": 0.2,  # SIP-TLS
+    "5353": 0.15,  # mDNS
 }
 
 
@@ -171,6 +184,12 @@ def rank_beaconing(flows: list[dict[str, object]], top_n: int = 20) -> pd.DataFr
         ts = sorted(f.get("pkt_times", []))
         if len(ts) < 2:
             continue
+
+        # Minimum packet guard: single-digit packet counts to any destination
+        # should not generate actionable beacon alerts.
+        if len(ts) < 4:
+            continue
+
         stats = periodicity_score(ts)
         jitter = jitter_score(ts)
         # Use the higher of the two scores
@@ -183,18 +202,21 @@ def rank_beaconing(flows: list[dict[str, object]], top_n: int = 20) -> pd.DataFr
         dport = str(f.get("dport", ""))
 
         # --- False-positive penalties (multiplicative, stack) ---
+        # Applied BEFORE any threshold checks so that benign traffic
+        # is scored down before it can appear as a candidate.
 
-        # 1. Well-known infrastructure IPs (DNS resolvers, NTP servers)
-        if dst in INFRA_ALLOWLIST or src in INFRA_ALLOWLIST:
-            final_score *= 0.15
-
-        # 2. Inherently periodic protocols (ICMP pings, NTP, mDNS, etc.)
-        if proto in BENIGN_PERIODIC_PROTOS:
-            final_score *= 0.2
-
-        # 3. Benign service ports (HTTPS, IMAPS, Apple Push, MQTT, etc.)
+        # 1. Benign service ports FIRST — this is the most common FP source
+        #    (e.g., HTTPS keep-alives to CDNs on port 443)
         if dport in BENIGN_SERVICE_PORTS:
             final_score *= BENIGN_SERVICE_PORTS[dport]
+
+        # 2. Well-known infrastructure IPs (DNS resolvers, NTP servers)
+        if dst in INFRA_ALLOWLIST or src in INFRA_ALLOWLIST:
+            final_score *= 0.1
+
+        # 3. Inherently periodic protocols (ICMP pings, NTP, mDNS, etc.)
+        if proto in BENIGN_PERIODIC_PROTOS:
+            final_score *= 0.15
 
         # 4. High-volume large-payload flows (streaming/downloads, not C2)
         #    Real C2 beacons are small, infrequent packets.
@@ -202,7 +224,7 @@ def rank_beaconing(flows: list[dict[str, object]], top_n: int = 20) -> pd.DataFr
         if pkt_lens and len(ts) > 200:
             avg_pkt_size = sum(pkt_lens) / len(pkt_lens)
             if avg_pkt_size > 500:
-                final_score *= 0.3
+                final_score *= 0.25
 
         rows.append(
             {

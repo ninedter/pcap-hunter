@@ -200,14 +200,16 @@ def plot_flow_timeline(flows: List[Dict[str, Any]]) -> go.Figure:
         duration = max(f["pkt_times"]) - start_ts
         proto = f.get("proto", "Unknown")
         size = f.get("count", 1)
-        data.append({
-            "ts": pd.to_datetime(start_ts, unit="s"),
-            "duration": duration,
-            "proto": proto,
-            "packets": size,
-            "src": f.get("src"),
-            "dst": f.get("dst")
-        })
+        data.append(
+            {
+                "ts": pd.to_datetime(start_ts, unit="s"),
+                "duration": duration,
+                "proto": proto,
+                "packets": size,
+                "src": f.get("src"),
+                "dst": f.get("dst"),
+            }
+        )
 
     if not data:
         return go.Figure()
@@ -228,7 +230,7 @@ def plot_flow_timeline(flows: List[Dict[str, Any]]) -> go.Figure:
             line=dict(color="rgba(100, 150, 255, 0.2)", width=1),
             fillcolor="rgba(100, 150, 255, 0.1)",
             yaxis="y2",
-            hoverinfo="skip" # Focus on flows
+            hoverinfo="skip",  # Focus on flows
         )
     )
 
@@ -248,14 +250,14 @@ def plot_flow_timeline(flows: List[Dict[str, Any]]) -> go.Figure:
                     size=sub["packets"].apply(lambda x: min(2 + x * 0.5, 18)),
                     opacity=0.5,
                     color=colors[i % len(colors)],
-                    line=dict(width=0.5, color="rgba(255,255,255,0.2)")
+                    line=dict(width=0.5, color="rgba(255,255,255,0.2)"),
                 ),
                 customdata=sub[["src", "dst", "packets"]],
                 hovertemplate=(
                     "<b>%{name}</b><br>Time: %{x}<br>Duration: %{y}s<br>"
                     "Src: %{customdata[0]}<br>Dst: %{customdata[1]}<br>"
                     "Packets: %{customdata[2]}<extra></extra>"
-                )
+                ),
             )
         )
 
@@ -265,10 +267,7 @@ def plot_flow_timeline(flows: List[Dict[str, Any]]) -> go.Figure:
         height=500,
         xaxis_title=None,
         yaxis_title="Flow Duration (s)",
-        yaxis=dict(
-            gridcolor="rgba(255,255,255,0.05)",
-            zerolinecolor="rgba(255,255,255,0.1)"
-        ),
+        yaxis=dict(gridcolor="rgba(255,255,255,0.05)", zerolinecolor="rgba(255,255,255,0.1)"),
         yaxis2=dict(
             title="Volume (pkts/sec)",
             overlaying="y",
@@ -276,7 +275,7 @@ def plot_flow_timeline(flows: List[Dict[str, Any]]) -> go.Figure:
             showgrid=False,
             rangemode="tozero",
             tickfont=dict(color="rgba(100, 150, 255, 0.6)"),
-            title_font=dict(color="rgba(100, 150, 255, 0.6)")
+            title_font=dict(color="rgba(100, 150, 255, 0.6)"),
         ),
         legend=dict(
             orientation="h",
@@ -285,14 +284,14 @@ def plot_flow_timeline(flows: List[Dict[str, Any]]) -> go.Figure:
             xanchor="center",
             x=0.5,
             font=dict(size=10),
-            bgcolor="rgba(0,0,0,0)"
+            bgcolor="rgba(0,0,0,0)",
         ),
         hovermode="closest",
         margin=dict(l=50, r=50, t=80, b=40),
         xaxis=dict(
             gridcolor="rgba(255,255,255,0.05)",
-            rangeslider=dict(visible=False) # Removal of rangeslider for cleaner look
-        )
+            rangeslider=dict(visible=False),  # Removal of rangeslider for cleaner look
+        ),
     )
     return fig
 
@@ -310,7 +309,7 @@ def plot_top_n_charts(data: Dict[str, Dict[str, int]], title: str) -> go.Figure:
     values = list(data.values())
 
     # Sort for display
-    sorted_items = sorted(zip(labels, values), key=lambda x: x[1], reverse=True)[:10] # Top 10 focus
+    sorted_items = sorted(zip(labels, values), key=lambda x: x[1], reverse=True)[:10]  # Top 10 focus
     if not sorted_items:
         return go.Figure()
 
@@ -322,8 +321,8 @@ def plot_top_n_charts(data: Dict[str, Dict[str, int]], title: str) -> go.Figure:
         orientation="h",
         title=title,
         template="plotly_dark",
-        labels={"x": "Frequency", "y": ""}, # Hide redundant 'Indicator' label
-        color_discrete_sequence=["#4A90E2"] # Professional blue
+        labels={"x": "Frequency", "y": ""},  # Hide redundant 'Indicator' label
+        color_discrete_sequence=["#4A90E2"],  # Professional blue
     )
     fig.update_layout(
         margin={"r": 20, "t": 40, "l": 20, "b": 20},
@@ -331,12 +330,10 @@ def plot_top_n_charts(data: Dict[str, Dict[str, int]], title: str) -> go.Figure:
         yaxis={"categoryorder": "total ascending"},
         plot_bgcolor="rgba(0,0,0,0)",
         paper_bgcolor="rgba(0,0,0,0)",
-        title_font=dict(size=14, color="#DDD")
+        title_font=dict(size=14, color="#DDD"),
     )
     fig.update_traces(
-        marker_color="rgba(74, 144, 226, 0.7)",
-        marker_line_color="rgba(74, 144, 226, 1)",
-        marker_line_width=1
+        marker_color="rgba(74, 144, 226, 0.7)", marker_line_color="rgba(74, 144, 226, 1)", marker_line_width=1
     )
     return fig
 
@@ -367,16 +364,18 @@ def plot_attack_timeline(timeline_events: List[Dict[str, Any]]) -> go.Figure:
         ts = evt.get("timestamp", "")
         severity = evt.get("severity", "info")
         event_type = evt.get("event_type", "alert")
-        data.append({
-            "timestamp": str(ts),
-            "severity_num": severity_map.get(severity, 0),
-            "severity": severity.upper(),
-            "event_type": event_type,
-            "description": evt.get("description", ""),
-            "source_ip": evt.get("source_ip", ""),
-            "dest_ip": evt.get("dest_ip", ""),
-            "color": color_map.get(event_type, "#95A5A6"),
-        })
+        data.append(
+            {
+                "timestamp": str(ts),
+                "severity_num": severity_map.get(severity, 0),
+                "severity": severity.upper(),
+                "event_type": event_type,
+                "description": evt.get("description", ""),
+                "source_ip": evt.get("source_ip", ""),
+                "dest_ip": evt.get("dest_ip", ""),
+                "color": color_map.get(event_type, "#95A5A6"),
+            }
+        )
 
     df = pd.DataFrame(data)
 
@@ -384,29 +383,31 @@ def plot_attack_timeline(timeline_events: List[Dict[str, Any]]) -> go.Figure:
 
     for etype in df["event_type"].unique():
         sub = df[df["event_type"] == etype]
-        fig.add_trace(go.Scatter(
-            x=sub["timestamp"],
-            y=sub["severity_num"],
-            mode="markers",
-            name=etype.replace("_", " ").title(),
-            marker=dict(
-                size=12,
-                color=sub["color"].iloc[0],
-                line=dict(width=1, color="rgba(255,255,255,0.3)"),
-                symbol="diamond",
-            ),
-            customdata=sub[["description", "source_ip", "dest_ip"]],
-            hovertemplate=(
-                "<b>%{name}</b><br>"
-                "Time: %{x}<br>"
-                "Severity: %{text}<br>"
-                "%{customdata[0]}<br>"
-                "Src: %{customdata[1]}<br>"
-                "Dst: %{customdata[2]}"
-                "<extra></extra>"
-            ),
-            text=sub["severity"],
-        ))
+        fig.add_trace(
+            go.Scatter(
+                x=sub["timestamp"],
+                y=sub["severity_num"],
+                mode="markers",
+                name=etype.replace("_", " ").title(),
+                marker=dict(
+                    size=12,
+                    color=sub["color"].iloc[0],
+                    line=dict(width=1, color="rgba(255,255,255,0.3)"),
+                    symbol="diamond",
+                ),
+                customdata=sub[["description", "source_ip", "dest_ip"]],
+                hovertemplate=(
+                    "<b>%{name}</b><br>"
+                    "Time: %{x}<br>"
+                    "Severity: %{text}<br>"
+                    "%{customdata[0]}<br>"
+                    "Src: %{customdata[1]}<br>"
+                    "Dst: %{customdata[2]}"
+                    "<extra></extra>"
+                ),
+                text=sub["severity"],
+            )
+        )
 
     fig.update_layout(
         title="Attack Timeline",
@@ -420,8 +421,12 @@ def plot_attack_timeline(timeline_events: List[Dict[str, Any]]) -> go.Figure:
             gridcolor="rgba(255,255,255,0.05)",
         ),
         legend=dict(
-            orientation="h", yanchor="top", y=-0.2,
-            xanchor="center", x=0.5, font=dict(size=10),
+            orientation="h",
+            yanchor="top",
+            y=-0.2,
+            xanchor="center",
+            x=0.5,
+            font=dict(size=10),
         ),
         hovermode="closest",
         margin=dict(l=60, r=20, t=50, b=40),
@@ -465,10 +470,7 @@ def plot_network_graph(
     node_set = {n for n, _ in top_nodes}
 
     # Filter edges to only include top nodes
-    filtered_edges = {
-        k: v for k, v in edge_counts.items()
-        if k[0] in node_set and k[1] in node_set
-    }
+    filtered_edges = {k: v for k, v in edge_counts.items() if k[0] in node_set and k[1] in node_set}
 
     if not filtered_edges:
         return go.Figure()
@@ -488,14 +490,16 @@ def plot_network_graph(
     for (src, dst), count in filtered_edges.items():
         width = 0.5 + (count / max_edge) * 3
         opacity = 0.2 + (count / max_edge) * 0.4
-        fig.add_trace(go.Scatter(
-            x=[pos[src][0], pos[dst][0]],
-            y=[pos[src][1], pos[dst][1]],
-            mode="lines",
-            line=dict(width=width, color=f"rgba(150,150,255,{opacity})"),
-            hoverinfo="skip",
-            showlegend=False,
-        ))
+        fig.add_trace(
+            go.Scatter(
+                x=[pos[src][0], pos[dst][0]],
+                y=[pos[src][1], pos[dst][1]],
+                mode="lines",
+                line=dict(width=width, color=f"rgba(150,150,255,{opacity})"),
+                hoverinfo="skip",
+                showlegend=False,
+            )
+        )
 
     # Draw nodes
     node_x = [pos[n][0] for n in nodes]
@@ -514,25 +518,28 @@ def plot_network_graph(
             node_colors.append("#4A90E2")
 
     node_text = [
-        f"{n}<br>Connections: {node_conns[n]}"
-        + (f"<br>Threat: {threat_scores[n]:.0%}" if n in threat_scores else "")
+        f"{n}<br>Connections: {node_conns[n]}" + (f"<br>Threat: {threat_scores[n]:.0%}" if n in threat_scores else "")
         for n in nodes
     ]
 
-    fig.add_trace(go.Scatter(
-        x=node_x, y=node_y,
-        mode="markers+text",
-        marker=dict(
-            size=node_sizes, color=node_colors,
-            line=dict(width=1, color="rgba(255,255,255,0.3)"),
-        ),
-        text=[n.split(".")[-1] if len(n) > 12 else n for n in nodes],
-        textposition="top center",
-        textfont=dict(size=8, color="#AAA"),
-        hovertext=node_text,
-        hoverinfo="text",
-        showlegend=False,
-    ))
+    fig.add_trace(
+        go.Scatter(
+            x=node_x,
+            y=node_y,
+            mode="markers+text",
+            marker=dict(
+                size=node_sizes,
+                color=node_colors,
+                line=dict(width=1, color="rgba(255,255,255,0.3)"),
+            ),
+            text=[n.split(".")[-1] if len(n) > 12 else n for n in nodes],
+            textposition="top center",
+            textfont=dict(size=8, color="#AAA"),
+            hovertext=node_text,
+            hoverinfo="text",
+            showlegend=False,
+        )
+    )
 
     fig.update_layout(
         title="Network Communication Graph",
@@ -547,15 +554,39 @@ def plot_network_graph(
 
 
 _WELL_KNOWN_PORTS: Dict[str, str] = {
-    "20": "FTP-Data", "21": "FTP", "22": "SSH", "23": "Telnet",
-    "25": "SMTP", "53": "DNS", "67": "DHCP", "68": "DHCP",
-    "80": "HTTP", "110": "POP3", "123": "NTP", "143": "IMAP",
-    "443": "HTTPS", "445": "SMB", "465": "SMTPS", "587": "SMTP",
-    "993": "IMAPS", "995": "POP3S", "1883": "MQTT", "3306": "MySQL",
-    "3389": "RDP", "5060": "SIP", "5061": "SIPS", "5222": "XMPP",
-    "5223": "APNs", "5228": "FCM", "5353": "mDNS", "5432": "PostgreSQL",
-    "6379": "Redis", "8080": "HTTP-Alt", "8443": "HTTPS-Alt",
-    "8883": "MQTT-TLS", "9200": "Elasticsearch",
+    "20": "FTP-Data",
+    "21": "FTP",
+    "22": "SSH",
+    "23": "Telnet",
+    "25": "SMTP",
+    "53": "DNS",
+    "67": "DHCP",
+    "68": "DHCP",
+    "80": "HTTP",
+    "110": "POP3",
+    "123": "NTP",
+    "143": "IMAP",
+    "443": "HTTPS",
+    "445": "SMB",
+    "465": "SMTPS",
+    "587": "SMTP",
+    "993": "IMAPS",
+    "995": "POP3S",
+    "1883": "MQTT",
+    "3306": "MySQL",
+    "3389": "RDP",
+    "5060": "SIP",
+    "5061": "SIPS",
+    "5222": "XMPP",
+    "5223": "APNs",
+    "5228": "FCM",
+    "5353": "mDNS",
+    "5432": "PostgreSQL",
+    "6379": "Redis",
+    "8080": "HTTP-Alt",
+    "8443": "HTTPS-Alt",
+    "8883": "MQTT-TLS",
+    "9200": "Elasticsearch",
 }
 
 
@@ -607,7 +638,7 @@ def build_sankey_html(
         except (ValueError, TypeError):
             dp = 0
 
-        proto = (f.get("proto") or "unknown")
+        proto = f.get("proto") or "unknown"
         count = f.get("count", 1)
 
         sp_wk = 0 < sp < 10000
@@ -763,3 +794,150 @@ def build_sankey_html(
     """
     return html, chart_height
 
+
+def plot_traffic_timeline_heatmap(flows: list[dict]) -> go.Figure | None:
+    """Plot a time-vs-IP heatmap showing when each IP communicated.
+
+    Args:
+        flows: List of flow dicts with 'dst', 'pkt_times' keys.
+
+    Returns:
+        Plotly Figure or None if insufficient data.
+    """
+    if not flows:
+        return None
+
+    rows = []
+    for f in flows:
+        dst = f.get("dst", "")
+        times = f.get("pkt_times", [])
+        if not dst or not times:
+            continue
+        for t in times[:500]:  # Limit per flow for performance
+            try:
+                rows.append({"IP": dst, "timestamp": float(t)})
+            except (ValueError, TypeError):
+                continue
+
+    if len(rows) < 10:
+        return None
+
+    df = pd.DataFrame(rows)
+    # Convert epoch to relative minutes
+    t_min = df["timestamp"].min()
+    df["minute"] = ((df["timestamp"] - t_min) / 60).astype(int)
+
+    # Top 20 IPs by activity
+    top_ips = df["IP"].value_counts().head(20).index.tolist()
+    df = df[df["IP"].isin(top_ips)]
+
+    # Create heatmap matrix
+    pivot = df.groupby(["IP", "minute"]).size().reset_index(name="packets")
+    heatmap = pivot.pivot_table(index="IP", columns="minute", values="packets", fill_value=0)
+
+    fig = px.imshow(
+        heatmap,
+        aspect="auto",
+        color_continuous_scale="YlOrRd",
+        labels={"x": "Time (minutes)", "y": "Destination IP", "color": "Packets"},
+        title="Traffic Timeline Heatmap (Top 20 IPs)",
+        height=max(300, len(top_ips) * 25 + 100),
+    )
+    fig.update_layout(
+        margin=dict(l=0, r=0, t=40, b=0),
+        xaxis_title="Time (minutes from capture start)",
+        yaxis_title="",
+    )
+    return fig
+
+
+def plot_packet_size_histogram(flows: list[dict]) -> go.Figure | None:
+    """Plot distribution of packet sizes across all flows.
+
+    Args:
+        flows: List of flow dicts with 'pkt_lens' key.
+
+    Returns:
+        Plotly Figure or None if insufficient data.
+    """
+    all_sizes = []
+    for f in flows:
+        pkt_lens = f.get("pkt_lens", [])
+        if isinstance(pkt_lens, list):
+            all_sizes.extend(pkt_lens[:1000])  # Limit per flow
+
+    if len(all_sizes) < 10:
+        return None
+
+    # Cap at reasonable display range
+    sizes = [min(s, 2000) for s in all_sizes if isinstance(s, (int, float)) and s > 0]
+    if not sizes:
+        return None
+
+    df = pd.DataFrame({"Packet Size (bytes)": sizes})
+
+    fig = px.histogram(
+        df,
+        x="Packet Size (bytes)",
+        nbins=50,
+        title="Packet Size Distribution",
+        labels={"count": "Frequency"},
+        height=350,
+        color_discrete_sequence=["#4A90E2"],
+    )
+    fig.update_layout(
+        margin=dict(l=0, r=0, t=40, b=0),
+        bargap=0.05,
+        showlegend=False,
+    )
+
+    # Add annotation for common sizes
+    fig.add_vline(x=64, line_dash="dash", line_color="red", annotation_text="Min TCP (64B)")
+    fig.add_vline(x=1500, line_dash="dash", line_color="orange", annotation_text="MTU (1500B)")
+
+    return fig
+
+
+def plot_inter_arrival_histogram(flows: list[dict]) -> go.Figure | None:
+    """Plot distribution of inter-arrival times for traffic profiling.
+
+    Args:
+        flows: List of flow dicts with 'pkt_times' key.
+
+    Returns:
+        Plotly Figure or None if insufficient data.
+    """
+    import numpy as np
+
+    all_gaps = []
+    for f in flows:
+        ts = sorted(f.get("pkt_times", []))
+        if len(ts) < 2:
+            continue
+        gaps = list(np.diff(ts))
+        all_gaps.extend(gaps[:500])  # Limit per flow
+
+    if len(all_gaps) < 10:
+        return None
+
+    # Filter to reasonable range (0-60s) for display
+    gaps = [g for g in all_gaps if isinstance(g, (int, float)) and 0 < g < 60]
+    if not gaps:
+        return None
+
+    df = pd.DataFrame({"Inter-Arrival Time (seconds)": gaps})
+
+    fig = px.histogram(
+        df,
+        x="Inter-Arrival Time (seconds)",
+        nbins=60,
+        title="Inter-Arrival Time Distribution",
+        height=350,
+        color_discrete_sequence=["#51CF66"],
+    )
+    fig.update_layout(
+        margin=dict(l=0, r=0, t=40, b=0),
+        bargap=0.05,
+        showlegend=False,
+    )
+    return fig

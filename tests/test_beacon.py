@@ -79,6 +79,7 @@ def test_jitter_score_periodic():
 
 def test_jitter_score_with_jitter():
     import random
+
     random.seed(42)
     # Periodic at ~10s interval with +-1s jitter
     ts = [10.0 * i + random.uniform(-1, 1) for i in range(30)]
@@ -91,6 +92,7 @@ def test_jitter_score_with_jitter():
 
 def test_jitter_score_random():
     import random
+
     random.seed(123)
     # Completely random timestamps
     ts = sorted([random.uniform(0, 1000) for _ in range(20)])

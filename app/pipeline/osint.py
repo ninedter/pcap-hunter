@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import concurrent.futures
+import hashlib
 import logging
 import threading
 import time
@@ -25,6 +26,7 @@ def _get_session():
     if not hasattr(_thread_local, "session"):
         _thread_local.session = hardened_session(timeout=12)
     return _thread_local.session
+
 
 # Global cache instance (lazy loaded)
 _cache = None
@@ -122,38 +124,55 @@ def _query_provider(
 # Provider definitions: (result_key, cache_provider, key_name, url_template, headers, params)
 _IP_PROVIDERS = [
     (
-        "greynoise", "greynoise", "GREYNOISE_KEY",
+        "greynoise",
+        "greynoise",
+        "GREYNOISE_KEY",
         "https://api.greynoise.io/v3/community/{indicator}",
-        {"key": "__KEY__", "Accept": "application/json"}, None,
+        {"key": "__KEY__", "Accept": "application/json"},
+        None,
     ),
     (
-        "abuseipdb", "abuseipdb", "ABUSEIPDB_KEY",
+        "abuseipdb",
+        "abuseipdb",
+        "ABUSEIPDB_KEY",
         "https://api.abuseipdb.com/api/v2/check",
         {"Key": "__KEY__", "Accept": "application/json"},
         {"ipAddress": "{indicator}", "maxAgeInDays": "90"},
     ),
     (
-        "vt", "vt_ip", "VT_KEY",
+        "vt",
+        "vt_ip",
+        "VT_KEY",
         "https://www.virustotal.com/api/v3/ip_addresses/{indicator}",
-        {"x-apikey": "__KEY__"}, None,
+        {"x-apikey": "__KEY__"},
+        None,
     ),
     (
-        "shodan", "shodan", "SHODAN_KEY",
+        "shodan",
+        "shodan",
+        "SHODAN_KEY",
         "https://api.shodan.io/shodan/host/{indicator}",
-        None, {"key": "__KEY__"},
+        None,
+        {"key": "__KEY__"},
     ),
 ]
 
 _DOMAIN_PROVIDERS = [
     (
-        "vt", "vt_domain", "VT_KEY",
+        "vt",
+        "vt_domain",
+        "VT_KEY",
         "https://www.virustotal.com/api/v3/domains/{indicator}",
-        {"x-apikey": "__KEY__"}, None,
+        {"x-apikey": "__KEY__"},
+        None,
     ),
     (
-        "otx", "otx", "OTX_KEY",
+        "otx",
+        "otx",
+        "OTX_KEY",
         "https://otx.alienvault.com/api/v1/indicators/domain/{indicator}/general",
-        {"X-OTX-API-KEY": "__KEY__"}, None,
+        {"X-OTX-API-KEY": "__KEY__"},
+        None,
     ),
 ]
 
@@ -171,22 +190,24 @@ def _query_single_provider_task(
 ) -> tuple[str, dict | None, bool]:
     """Query a single provider — designed to run inside a thread pool."""
     url = url_tpl.replace("{indicator}", safe_indicator)
-    headers = {
-        k: v.replace("{indicator}", indicator) if isinstance(v, str) else v
-        for k, v in (hdr_tpl or {}).items()
-    }
-    params = {
-        k: v.replace("{indicator}", indicator) if isinstance(v, str) else v
-        for k, v in (param_tpl or {}).items()
-    }
+    headers = {k: v.replace("{indicator}", indicator) if isinstance(v, str) else v for k, v in (hdr_tpl or {}).items()}
+    params = {k: v.replace("{indicator}", indicator) if isinstance(v, str) else v for k, v in (param_tpl or {}).items()}
     result, cached = _query_provider(
-        indicator, cache_prov, key_name, keys, url, headers=headers, params=params,
+        indicator,
+        cache_prov,
+        key_name,
+        keys,
+        url,
+        headers=headers,
+        params=params,
     )
     return result_key, result, cached
 
 
 def _query_providers(
-    indicator: str, provider_defs: list, keys: dict[str, str],
+    indicator: str,
+    provider_defs: list,
+    keys: dict[str, str],
 ) -> tuple[dict, int]:
     """Run all configured providers for an indicator in parallel."""
     # URL-encode the indicator to prevent SSRF / injection via crafted values
@@ -200,8 +221,15 @@ def _query_providers(
         futures = {
             executor.submit(
                 _query_single_provider_task,
-                indicator, safe_indicator,
-                result_key, cache_prov, key_name, url_tpl, hdr_tpl, param_tpl, keys,
+                indicator,
+                safe_indicator,
+                result_key,
+                cache_prov,
+                key_name,
+                url_tpl,
+                hdr_tpl,
+                param_tpl,
+                keys,
             ): result_key
             for result_key, cache_prov, key_name, url_tpl, hdr_tpl, param_tpl in provider_defs
         }
@@ -220,17 +248,64 @@ def _query_providers(
 
 
 def enrich(
-    artifacts: dict[str, list], keys: dict[str, str], phase: PhaseHandle | None = None, throttle: float = 0.35
+    artifacts: dict[str, list],
+    keys: dict[str, str],
+    phase: PhaseHandle | None = None,
+    throttle: float = 0.35,
+    previous_results: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    """Enrich artifacts with OSINT data from configured providers.
+
+    Args:
+        artifacts: Dict with 'ips', 'domains', 'macs' lists.
+        keys: API key mapping (provider -> key).
+        phase: Optional progress tracker.
+        throttle: Delay between API calls (seconds).
+        previous_results: Prior OSINT results for deduplication in batch mode.
+            IPs/domains already present here are skipped (reused as-is).
+
+    Returns:
+        OSINT enrichment dict with 'ips', 'domains', 'ja3', 'macs'.
+    """
     if phase and phase.should_skip():
         phase.done("OSINT skipped.")
         return {"ips": {}, "domains": {}, "ja3": {}}
 
-    ips = [ip for ip in artifacts.get("ips", []) if is_public_ipv4(ip)]
-    doms = artifacts.get("domains", [])
+    # Invalidate cache if API keys changed since last run
+    keys_str = "|".join(sorted(f"{k}={v[:8]}" for k, v in keys.items() if v))
+    keys_hash = hashlib.sha256(keys_str.encode()).hexdigest()[:16]
+    try:
+        cache = _get_cache()
+        cache.invalidate_on_key_change(keys_hash)
+    except Exception as e:
+        logger.warning("Cache key-change check failed: %s", e)
+
+    prev = previous_results or {}
+    prev_ips = prev.get("ips") or {}
+    prev_doms = prev.get("domains") or {}
+
+    all_ips = [ip for ip in artifacts.get("ips", []) if is_public_ipv4(ip)]
+    all_doms = artifacts.get("domains", [])
+
+    # Deduplicate: skip indicators already enriched in a previous batch run
+    new_ips = [ip for ip in all_ips if ip not in prev_ips]
+    new_doms = [d for d in all_doms if d not in prev_doms]
+    dedup_ip = len(all_ips) - len(new_ips)
+    dedup_dom = len(all_doms) - len(new_doms)
+    if dedup_ip or dedup_dom:
+        logger.info(
+            "OSINT dedup: skipping %d IPs and %d domains already enriched",
+            dedup_ip,
+            dedup_dom,
+        )
+
+    ips = new_ips
+    doms = new_doms
     total = len(ips) + len(doms)
     done = 0
-    res: dict[str, Any] = {"ips": {}, "domains": {}, "ja3": {}}
+
+    # Start with previous results so deduped indicators are preserved
+    res: dict[str, Any] = {"ips": dict(prev_ips), "domains": dict(prev_doms), "ja3": {}}
 
     def tick(msg):
         nonlocal done

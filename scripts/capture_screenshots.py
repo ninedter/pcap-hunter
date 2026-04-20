@@ -26,6 +26,7 @@ import sys
 import time
 from pathlib import Path
 
+import numpy as np
 from PIL import Image, ImageDraw
 from playwright.sync_api import Page, sync_playwright
 
@@ -376,6 +377,46 @@ def redact_png(
     return total
 
 
+def crop_trailing_blank(
+    png_path: Path,
+    min_blank_run: int = 300,
+    blank_pixel_threshold: int = 240,
+    padding: int = 40,
+) -> None:
+    """Trim trailing whitespace and any post-content duplicate render.
+
+    Streamlit's full_page screenshot can include both trailing blank space
+    and a duplicate header re-render below the actual page end. We scan
+    rows top-to-bottom and crop at the first run of >=min_blank_run blank
+    rows after content begins — that point is always the true page end.
+    """
+    img = Image.open(png_path)
+    arr = np.array(img.convert("L"))
+    h = arr.shape[0]
+    non_white_frac = (arr < blank_pixel_threshold).mean(axis=1)
+    is_blank = non_white_frac < 0.005
+    if not (~is_blank).any():
+        return
+    first_content = int(np.argmax(~is_blank))
+    crop_at = h
+    run_start = None
+    for i in range(first_content, h):
+        if is_blank[i]:
+            if run_start is None:
+                run_start = i
+            elif i - run_start + 1 >= min_blank_run:
+                crop_at = run_start
+                break
+        else:
+            run_start = None
+    if crop_at >= h:
+        return
+    new_h = min(h, crop_at + padding)
+    cropped = img.crop((0, 0, img.width, new_h))
+    cropped.save(png_path, optimize=True)
+    print(f"  ✂  cropped {png_path.name}: {h} → {new_h}px (saved {h - new_h}px)")
+
+
 def capture_and_redact(
     page: Page,
     filename: str,
@@ -389,6 +430,7 @@ def capture_and_redact(
     if redact:
         n = redact_png(path, boxes, dpr=dpr, run_ocr_fallback=True)
         print(f"  ✂  redacted {n} IP region(s) in {filename}")
+    crop_trailing_blank(path)
 
 
 # ---------------------------------------------------------------------------
@@ -423,6 +465,7 @@ def main() -> int:
         for png in sorted(OUT_DIR.glob("*.png")):
             n = redact_png(png, [], dpr=1.0, run_ocr_fallback=True)
             print(f"  ✂  redacted {n} IP region(s) in {png.name}")
+            crop_trailing_blank(png)
         return 0
 
     if not SAMPLE_PCAP.is_file() and not args.skip_analysis:

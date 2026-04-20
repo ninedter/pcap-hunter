@@ -412,7 +412,7 @@ python3 scripts/capture_screenshots.py --redact-only   # re-run OCR redaction on
 python3 scripts/capture_screenshots.py --keep-ips      # keep IPs (internal use only)
 ```
 
-The capture script uses Playwright headless Chromium, drives the UI, and runs a two-pass IP redaction: DOM-aware bounding-box extraction first, then multi-PSM tesseract OCR for any IPs rendered into canvas (Streamlit's `st.dataframe`).
+The capture script uses Playwright headless Chromium, drives the UI, and runs a two-pass IP redaction: DOM-aware bounding-box extraction first, then multi-PSM tesseract OCR for any IPs rendered into canvas (Streamlit's `st.dataframe`). After redaction it auto-crops trailing whitespace and any post-content duplicate render so README screenshots stay tight to actual content.
 
 ### Testing discipline
 

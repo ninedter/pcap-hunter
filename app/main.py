@@ -1485,6 +1485,19 @@ with tab_llm:
                         f"**Fix:** `{install_hint}`"
                     )
                 else:
+                    # Pre-compute GeoIP data for the world map in the PDF.
+                    # We only geo-locate public IPs and cap the list so kaleido
+                    # renders quickly even on very large captures.
+                    _geoip_data: list = []
+                    try:
+                        for ip in (features.get("artifacts", {}).get("ips") or [])[:200]:
+                            if is_public_ipv4(ip):
+                                geo = GeoIP.lookup(ip)
+                                if geo:
+                                    _geoip_data.append(geo)
+                    except Exception as _ge:
+                        logger.warning("GeoIP lookup for PDF failed: %s", _ge)
+
                     with st.spinner("Generating PDF report..."):
                         pdf_report = generator.generate(
                             report_md=report_md,
@@ -1493,6 +1506,10 @@ with tab_llm:
                             yara_results=st.session_state.get("yara_results"),
                             dns_analysis=st.session_state.get("dns_analysis"),
                             tls_analysis=st.session_state.get("tls_analysis"),
+                            beacon_df=st.session_state.get("beacon_df"),
+                            correlations=st.session_state.get("correlations"),
+                            geoip_data=_geoip_data or None,
+                            attack_timeline=st.session_state.get("attack_timeline"),
                         )
 
                     if pdf_report:

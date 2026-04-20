@@ -139,6 +139,8 @@ class PDFReportGenerator:
         case_info: dict | None = None,
         beacon_df: "pd.DataFrame | None" = None,
         correlations: list | None = None,
+        geoip_data: list | None = None,
+        attack_timeline: list | None = None,
     ) -> PDFReport | None:
         """
         Generate a complete PDF report.
@@ -173,6 +175,8 @@ class PDFReportGenerator:
                 case_info=case_info,
                 beacon_df=beacon_df,
                 correlations=correlations,
+                geoip_data=geoip_data,
+                attack_timeline=attack_timeline,
             )
 
             # Generate PDF with accurate page count
@@ -214,6 +218,8 @@ class PDFReportGenerator:
         case_info: dict | None,
         beacon_df: "pd.DataFrame | None" = None,
         correlations: list | None = None,
+        geoip_data: list | None = None,
+        attack_timeline: list | None = None,
     ) -> str:
         """Build the complete HTML document."""
         sections = []
@@ -226,6 +232,16 @@ class PDFReportGenerator:
 
         # Executive Summary (from LLM report)
         sections.append(self._render_executive_summary(report_md))
+
+        # Visual dashboard (charts embedded as PNG)
+        if self.config.include_charts:
+            charts_html = self._render_charts_section(
+                features=features,
+                geoip_data=geoip_data,
+                attack_timeline=attack_timeline,
+            )
+            if charts_html:
+                sections.append(charts_html)
 
         # Threat Correlation Summary
         if correlations:
@@ -310,6 +326,8 @@ class PDFReportGenerator:
     ) -> str:
         """Render table of contents."""
         items = ['<li><a href="#summary">Executive Summary</a></li>']
+        if self.config.include_charts:
+            items.append('<li><a href="#charts">Visual Overview</a></li>')
         if correlations:
             items.append('<li><a href="#correlations">Threat Correlation Summary</a></li>')
         items.append('<li><a href="#iocs">Indicators of Compromise</a></li>')
@@ -343,6 +361,145 @@ class PDFReportGenerator:
     <div class="summary-content">
         {html_content}
     </div>
+</section>
+<div class="page-break"></div>
+"""
+
+    def _render_charts_section(
+        self,
+        features: dict,
+        geoip_data: list | None = None,
+        attack_timeline: list | None = None,
+    ) -> str:
+        """Render the dashboard-style visual panel with charts as PNG images.
+
+        Charts are generated via Plotly and rendered with kaleido (pure-Python,
+        no browser). If kaleido isn't installed or rendering fails, the whole
+        section is omitted — the rest of the PDF still generates normally.
+        """
+        from app.reports.chart_images import charts_available, figure_to_img_tag
+
+        if not charts_available():
+            logger.info("kaleido not available — skipping charts section in PDF")
+            return ""
+
+        flows = features.get("flows") or []
+
+        chart_blocks: list[str] = []
+
+        # 1) Protocol distribution — pie chart of packets per protocol
+        try:
+            from app.ui.charts import plot_protocol_distribution
+
+            proto_counts: dict[str, int] = {}
+            for f in flows:
+                proto = str(f.get("proto") or "UNKNOWN")
+                proto_counts[proto] = proto_counts.get(proto, 0) + int(f.get("count") or 0)
+            if proto_counts:
+                fig = plot_protocol_distribution(proto_counts)
+                tag = figure_to_img_tag(fig, alt="Protocol distribution", width=720, height=420)
+                if tag:
+                    chart_blocks.append(f'<div class="chart-block"><h3>Protocol Distribution</h3>{tag}</div>')
+        except Exception as e:
+            logger.warning("Protocol chart failed: %s", e)
+
+        # 2) Top talkers — stacked bar of top source/destination IPs and ports
+        try:
+            from app.ui.charts import plot_top_n_charts
+
+            src_counts: dict[str, int] = {}
+            dst_counts: dict[str, int] = {}
+            dport_counts: dict[str, int] = {}
+            for f in flows:
+                src = f.get("src")
+                dst = f.get("dst")
+                dport = f.get("dport")
+                pkts = int(f.get("count") or 0)
+                if src:
+                    src_counts[str(src)] = src_counts.get(str(src), 0) + pkts
+                if dst:
+                    dst_counts[str(dst)] = dst_counts.get(str(dst), 0) + pkts
+                if dport:
+                    dport_counts[str(dport)] = dport_counts.get(str(dport), 0) + pkts
+
+            def _top_n(d: dict[str, int], n: int = 10) -> dict[str, int]:
+                return dict(sorted(d.items(), key=lambda kv: kv[1], reverse=True)[:n])
+
+            # plot_top_n_charts takes a flat dict[str, int], one chart per dim
+            for subtitle, counts in (
+                ("Top Source IPs", _top_n(src_counts)),
+                ("Top Destination IPs", _top_n(dst_counts)),
+                ("Top Destination Ports", _top_n(dport_counts)),
+            ):
+                if not counts:
+                    continue
+                fig = plot_top_n_charts(counts, subtitle)
+                tag = figure_to_img_tag(fig, alt=subtitle, width=900, height=360)
+                if tag:
+                    chart_blocks.append(f'<div class="chart-block"><h3>{subtitle}</h3>{tag}</div>')
+        except Exception as e:
+            logger.warning("Top talkers chart failed: %s", e)
+
+        # 3) Flow timeline — packets-per-minute over the capture window
+        try:
+            from app.ui.charts import plot_flow_timeline
+
+            if flows:
+                fig = plot_flow_timeline(flows)
+                tag = figure_to_img_tag(fig, alt="Flow timeline", width=900, height=360)
+                if tag:
+                    chart_blocks.append(f'<div class="chart-block"><h3>Flow Timeline</h3>{tag}</div>')
+        except Exception as e:
+            logger.warning("Flow timeline chart failed: %s", e)
+
+        # 4) Network graph — IP-to-IP connectivity
+        try:
+            from app.ui.charts import plot_network_graph
+
+            if flows:
+                fig = plot_network_graph(flows)
+                tag = figure_to_img_tag(fig, alt="Network graph", width=900, height=520)
+                if tag:
+                    chart_blocks.append(f'<div class="chart-block"><h3>Network Graph</h3>{tag}</div>')
+        except Exception as e:
+            logger.warning("Network graph chart failed: %s", e)
+
+        # 5) World map — geographic distribution of external IPs
+        try:
+            from app.ui.charts import plot_world_map
+
+            if geoip_data:
+                fig = plot_world_map(geoip_data)
+                tag = figure_to_img_tag(fig, alt="Geographic distribution", width=900, height=460)
+                if tag:
+                    chart_blocks.append(f'<div class="chart-block"><h3>Geographic Distribution</h3>{tag}</div>')
+        except Exception as e:
+            logger.warning("World map chart failed: %s", e)
+
+        # 6) Attack timeline — ATT&CK-mapped events ordered by severity/time
+        try:
+            if attack_timeline:
+                from app.ui.charts import plot_attack_timeline
+
+                fig = plot_attack_timeline(attack_timeline)
+                tag = figure_to_img_tag(fig, alt="Attack timeline", width=900, height=420)
+                if tag:
+                    chart_blocks.append(f'<div class="chart-block"><h3>Attack Timeline</h3>{tag}</div>')
+        except Exception as e:
+            logger.warning("Attack timeline chart failed: %s", e)
+
+        if not chart_blocks:
+            return ""
+
+        return f"""
+<section id="charts">
+    <h2>2. Visual Overview</h2>
+    <p class="section-intro">
+        The following charts replicate the interactive dashboard in static form.
+        They summarise traffic composition, top talkers, time-series patterns,
+        and attack-chain observations drawn from the same underlying data.
+    </p>
+    {"".join(chart_blocks)}
 </section>
 <div class="page-break"></div>
 """
@@ -951,6 +1108,33 @@ h3 { font-size: 12pt; color: #1a1a2e; margin-top: 1em; }
     page-break-after: always;
 }
 
+/* Visual Overview section — dashboard charts embedded as images */
+.chart-block {
+    margin: 1.2em 0;
+    page-break-inside: avoid;
+}
+
+.chart-block h3 {
+    margin-top: 0.5em;
+    margin-bottom: 0.3em;
+    border-bottom: 1px solid #d0d5dd;
+    padding-bottom: 0.2em;
+}
+
+.chart-block img.report-chart {
+    display: block;
+    width: 100%;
+    max-width: 17cm;
+    height: auto;
+    margin: 0.3em auto;
+}
+
+.section-intro {
+    color: #555;
+    font-size: 9.5pt;
+    margin-bottom: 1em;
+}
+
 .toc {
     margin-top: 2cm;
 }
@@ -1103,6 +1287,8 @@ def generate_pdf_report(
     config: ReportConfig | None = None,
     beacon_df: "pd.DataFrame | None" = None,
     correlations: list | None = None,
+    geoip_data: list | None = None,
+    attack_timeline: list | None = None,
 ) -> PDFReport | None:
     """
     Convenience function to generate a PDF report.
@@ -1131,4 +1317,6 @@ def generate_pdf_report(
         tls_analysis=tls_analysis,
         beacon_df=beacon_df,
         correlations=correlations,
+        geoip_data=geoip_data,
+        attack_timeline=attack_timeline,
     )

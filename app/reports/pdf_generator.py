@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import html
+import os
 import re
+import sys
 from dataclasses import dataclass
 from datetime import datetime
 from io import BytesIO
@@ -17,14 +19,47 @@ from app.utils.logger import get_logger
 
 logger = get_logger(__name__)
 
-# Try to import weasyprint, but make it optional
+
+def _ensure_dyld_path() -> None:
+    """Make Homebrew-installed libs (pango, glib, cairo) discoverable by dyld.
+
+    On macOS, WeasyPrint depends on libraries installed by Homebrew under
+    ``/opt/homebrew/lib`` (Apple Silicon) or ``/usr/local/lib`` (Intel).
+    macOS dyld doesn't search those directories by default, which breaks
+    WeasyPrint's ``cffi.dlopen('libgobject-2.0-0')`` call with an OSError.
+
+    Setting ``DYLD_FALLBACK_LIBRARY_PATH`` before cffi calls ``dlopen``
+    fixes this. We do it here so users don't have to export env vars
+    manually before running the app.
+    """
+    if sys.platform != "darwin":
+        return
+    candidate_dirs = ["/opt/homebrew/lib", "/usr/local/lib"]
+    existing = os.environ.get("DYLD_FALLBACK_LIBRARY_PATH", "")
+    parts = [p for p in existing.split(":") if p]
+    for d in candidate_dirs:
+        if os.path.isdir(d) and d not in parts:
+            parts.insert(0, d)
+    if parts:
+        os.environ["DYLD_FALLBACK_LIBRARY_PATH"] = ":".join(parts)
+
+
+_ensure_dyld_path()
+
+
+# Try to import weasyprint, but make it optional.
+# Catch BOTH ImportError (missing package) and OSError (cffi dlopen failure
+# because system libs like libgobject aren't discoverable). Either way we
+# fall back to graceful degradation instead of crashing the app.
 try:
     from weasyprint import CSS, HTML
 
     WEASYPRINT_AVAILABLE = True
-except ImportError:
+    WEASYPRINT_ERROR: str | None = None
+except (ImportError, OSError) as _e:
     WEASYPRINT_AVAILABLE = False
-    logger.warning("weasyprint not installed. PDF generation disabled.")
+    WEASYPRINT_ERROR = str(_e)
+    logger.warning("WeasyPrint unavailable — PDF generation disabled: %s", _e)
 
 try:
     import markdown

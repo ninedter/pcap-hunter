@@ -1467,7 +1467,23 @@ with tab_llm:
                 generator = PDFReportGenerator(config)
 
                 if not generator.is_available:
-                    st.error("PDF generation requires weasyprint. Install with: pip install weasyprint")
+                    import sys as _sys
+
+                    from app.reports.pdf_generator import WEASYPRINT_ERROR
+
+                    if _sys.platform == "darwin":
+                        install_hint = "brew install pango glib cairo  (then restart the app)"
+                    elif _sys.platform == "win32":
+                        gtk_url = "https://github.com/tschoonj/GTK-for-Windows-Runtime-Environment-Installer"
+                        install_hint = f"Install GTK3 runtime ({gtk_url}) and ensure pip install weasyprint is complete"
+                    else:
+                        install_hint = "sudo apt install libpango1.0-dev libcairo2 libgdk-pixbuf2.0-0"
+
+                    st.error(
+                        "**PDF generation unavailable.**  \n"
+                        f"Reason: `{WEASYPRINT_ERROR or 'weasyprint not installed'}`  \n\n"
+                        f"**Fix:** `{install_hint}`"
+                    )
                 else:
                     with st.spinner("Generating PDF report..."):
                         pdf_report = generator.generate(

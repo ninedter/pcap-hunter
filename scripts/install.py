@@ -114,12 +114,15 @@ def install_macos(dry_run: bool) -> None:
         run(["brew", "install", "yara"], dry_run=dry_run)
     else:
         ok("yara already installed")
-    # Pango for PDF export (WeasyPrint)
-    rc = subprocess.run(["brew", "list", "pango"], capture_output=True).returncode
-    if rc != 0:
-        run(["brew", "install", "pango"], dry_run=dry_run)
-    else:
-        ok("pango already installed")
+    # WeasyPrint PDF export dependencies. Pango pulls in glib + cairo as
+    # deps, but we install them explicitly to avoid surprises if that ever
+    # changes, and to give a clearer progress line.
+    for pkg in ("pango", "glib", "cairo"):
+        rc = subprocess.run(["brew", "list", pkg], capture_output=True).returncode
+        if rc != 0:
+            run(["brew", "install", pkg], dry_run=dry_run)
+        else:
+            ok(f"{pkg} already installed")
 
 
 def install_linux(dry_run: bool, assume_yes: bool) -> None:
@@ -144,8 +147,13 @@ def install_linux(dry_run: bool, assume_yes: bool) -> None:
             "tshark",
             "zeek",
             "yara",
-            "libpango1.0-dev",
             "libpcap0.8",
+            # WeasyPrint (PDF export) runtime deps
+            "libpango-1.0-0",
+            "libpangoft2-1.0-0",
+            "libharfbuzz0b",
+            "libcairo2",
+            "libgdk-pixbuf-2.0-0",
         ],
         dry_run=dry_run,
     )

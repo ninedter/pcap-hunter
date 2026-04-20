@@ -31,8 +31,10 @@ pytest>=8.0,<9.0
 pytest-cov>=4.1,<6.0
 plotly>=5.18.0,<6.0
 # Static image renderer for Plotly — required to embed charts in PDF reports.
-# Pure-Python, no browser needed.
-kaleido>=0.2.1,<1.0
+# kaleido 1.x uses a bundled headless Chromium (via the choreographer helper)
+# that's auto-managed on first use. The older 0.x series is deprecated and
+# will be removed from Plotly after September 2025.
+kaleido>=1.0.0,<2.0
 maxminddb-geolite2>=4.1,<5.0
 ruff>=0.3.0,<1.0
 python-whois>=0.9,<1.0

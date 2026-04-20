@@ -228,6 +228,20 @@ def install_python_deps(dry_run: bool) -> None:
     run([sys.executable, "-m", "pip", "install", "--upgrade", "pip"], dry_run=dry_run)
     run([sys.executable, "-m", "pip", "install", "-r", str(REQUIREMENTS)], dry_run=dry_run)
 
+    # kaleido 1.x downloads a bundled Chromium on first use. Doing it here
+    # instead of at first-chart-render means the user isn't surprised by a
+    # 100+ MB network call when generating their first PDF. Best-effort —
+    # if it fails, the app still works and provisions on demand.
+    info("Pre-provisioning kaleido renderer (downloads Chromium on first run)...")
+    if not dry_run:
+        try:
+            import plotly.graph_objects as _go
+
+            _go.Figure().to_image(format="png", width=10, height=10)
+            ok("kaleido renderer ready")
+        except Exception as e:
+            warn(f"kaleido pre-provision skipped: {e}")
+
 
 # ---------------------------------------------------------------------------
 # Dependency check

@@ -753,13 +753,28 @@ def generate_report(
         display_title = lang_data.get("title", title)
         display_instruction = lang_data.get("instruction", instruction)
 
+        # Titles the LLM might echo back (both the English key and the
+        # translated display form). We strip any leading line that matches
+        # one of these to avoid duplicating the heading we emit ourselves.
+        title_aliases = {title, display_title}
+
         # Build section-specific evidence context
         relevant_keys = section_evidence_map.get(title, [])
         section_evidence = {k: evidence_blocks[k] for k in relevant_keys if k in evidence_blocks}
 
         # Build the user prompt
-        section_prompt = "Write ONLY the following section of the threat report:\n\n"
-        section_prompt += f"**{display_title}**\n\n"
+        #
+        # IMPORTANT: do NOT wrap the section name in Markdown formatting
+        # (e.g. "**Title**") — the LLM interprets that as a heading it should
+        # reproduce, producing a duplicate when we later prepend "## Title".
+        # Instead, refer to the section by name in prose and instruct the LLM
+        # to start directly with body content.
+        section_prompt = (
+            f"Write ONLY the body content for the '{display_title}' section of the threat report.\n"
+            "Do NOT include the section title, heading, or any Markdown heading prefix "
+            "(no '#', '##', or bolded title line) — the caller prepends the heading. "
+            "Start directly with the first sentence or bullet of the section body.\n\n"
+        )
         section_prompt += f"{display_instruction}\n\n"
 
         if lang_instruction:
@@ -782,6 +797,7 @@ def generate_report(
             )
             content = resp.choices[0].message.content if resp and resp.choices else ""
             if content:
+                content = _strip_duplicate_heading(content, title_aliases)
                 full_report_parts.append(f"## {display_title}\n\n{content}")
         except Exception as e:
             logger.error("LLM section '%s' failed: %s", display_title, e)
@@ -791,6 +807,44 @@ def generate_report(
         return "_No content returned from the model._"
 
     return "\n\n".join(full_report_parts)
+
+
+def _strip_duplicate_heading(content: str, title_aliases: set[str]) -> str:
+    """Strip a leading heading line that repeats the section title.
+
+    Some LLMs ignore the "do not include the title" instruction and emit a
+    heading as the first line of the section body. Since the caller already
+    prepends ``## Title``, the result is a duplicated heading. This function
+    removes any leading line that matches one of *title_aliases*, whether it
+    appears as plain text, bold (``**Title**``), or a Markdown heading
+    (``# Title`` / ``## Title`` / ``### Title``).
+    """
+    if not content:
+        return content
+    lines = content.splitlines()
+    # Skip up to 3 leading blank lines
+    idx = 0
+    while idx < len(lines) and not lines[idx].strip():
+        idx += 1
+    if idx >= len(lines):
+        return content
+
+    first = lines[idx].strip()
+    # Normalize: drop leading #/##/### and surrounding ** or *
+    stripped = first.lstrip("#").strip()
+    if stripped.startswith("**") and stripped.endswith("**"):
+        stripped = stripped[2:-2].strip()
+    elif stripped.startswith("*") and stripped.endswith("*"):
+        stripped = stripped[1:-1].strip()
+
+    normalized_aliases = {a.strip().lower() for a in title_aliases if a}
+    if stripped.lower() in normalized_aliases:
+        # Drop the duplicate heading line plus any immediately following blanks
+        idx += 1
+        while idx < len(lines) and not lines[idx].strip():
+            idx += 1
+        return "\n".join(lines[idx:])
+    return content
 
 
 def _get_translations() -> dict:

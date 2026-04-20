@@ -72,5 +72,56 @@ class TestLLMClient(unittest.TestCase):
         self.assertTrue(report.startswith("## Executive Summary"))
 
 
+class TestStripDuplicateHeading(unittest.TestCase):
+    """The LLM sometimes echoes the section title; _strip_duplicate_heading removes it."""
+
+    def setUp(self):
+        from app.llm.client import _strip_duplicate_heading
+
+        self.strip = _strip_duplicate_heading
+        self.aliases = {"Executive Summary"}
+
+    def test_plain_title_stripped(self):
+        content = "Executive Summary\n\nBody text starts here."
+        result = self.strip(content, self.aliases)
+        self.assertEqual(result, "Body text starts here.")
+
+    def test_bold_title_stripped(self):
+        content = "**Executive Summary**\n\nBody text."
+        self.assertEqual(self.strip(content, self.aliases), "Body text.")
+
+    def test_markdown_h2_stripped(self):
+        content = "## Executive Summary\n\nBody text."
+        self.assertEqual(self.strip(content, self.aliases), "Body text.")
+
+    def test_markdown_h1_stripped(self):
+        content = "# Executive Summary\n\nBody text."
+        self.assertEqual(self.strip(content, self.aliases), "Body text.")
+
+    def test_leading_blanks_skipped(self):
+        content = "\n\nExecutive Summary\n\nBody text."
+        self.assertEqual(self.strip(content, self.aliases), "Body text.")
+
+    def test_case_insensitive(self):
+        content = "executive SUMMARY\n\nBody."
+        self.assertEqual(self.strip(content, self.aliases), "Body.")
+
+    def test_translated_alias_stripped(self):
+        content = "摘要\n\n報告內容"
+        result = self.strip(content, {"Executive Summary", "摘要"})
+        self.assertEqual(result, "報告內容")
+
+    def test_no_match_passes_through(self):
+        content = "The captured traffic shows...\n\nMore details."
+        self.assertEqual(self.strip(content, self.aliases), content)
+
+    def test_empty_content(self):
+        self.assertEqual(self.strip("", self.aliases), "")
+
+    def test_only_heading_returns_empty(self):
+        # If the entire content is just the heading, return empty (edge case)
+        self.assertEqual(self.strip("## Executive Summary", self.aliases), "")
+
+
 if __name__ == "__main__":
     unittest.main()

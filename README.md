@@ -31,9 +31,6 @@ By combining industry-standard network analysis tools (**Zeek**, **Tshark**, **P
 
 ## Visual Tour
 
-> Screenshots captured against `sample.pcap`. All IP addresses are automatically redacted
-> via `scripts/capture_screenshots.py` before publication.
-
 ### 1. Upload — load one or many PCAPs
 
 Drag-and-drop a `.pcap` / `.pcapng` file (up to 200 MB each) or paste a container path.

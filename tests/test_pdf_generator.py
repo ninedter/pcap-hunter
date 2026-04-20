@@ -4,21 +4,19 @@ from datetime import datetime
 
 import pytest
 
-try:
-    import weasyprint  # noqa: F401
-
-    WEASYPRINT_AVAILABLE = True
-except (ImportError, OSError):
-    WEASYPRINT_AVAILABLE = False
-
+# Import pdf_generator FIRST — it runs _ensure_dyld_path() at module load
+# time which fixes the WeasyPrint native-lib lookup on macOS. Importing
+# weasyprint directly here would run before that fix and incorrectly
+# report WeasyPrint as unavailable.
 from app.reports.pdf_generator import (
-    WEASYPRINT_AVAILABLE as MODULE_WEASYPRINT,
-)
-from app.reports.pdf_generator import (
+    WEASYPRINT_AVAILABLE,
     PDFReport,
     PDFReportGenerator,
     ReportConfig,
 )
+
+# Keep MODULE_WEASYPRINT as an alias for any legacy test code that uses it.
+MODULE_WEASYPRINT = WEASYPRINT_AVAILABLE
 
 
 class TestReportConfig:
@@ -316,6 +314,52 @@ class TestPDFReportGenerator:
         )
         assert result is not None
         assert len(result.content) > 0
+
+    @pytest.mark.skipif(not WEASYPRINT_AVAILABLE, reason="weasyprint not installed")
+    def test_render_correlation_with_signal_dataclasses(self):
+        """Regression: CorrelationSignal dataclass objects must not crash rendering.
+
+        Previously the correlation section called ``', '.join(c.signals)``
+        directly, which raised ``TypeError: sequence item 0: expected str
+        instance, CorrelationSignal found`` when the real pipeline passed in
+        dataclass instances. Render the names instead.
+        """
+        from app.analysis.correlation import CorrelationResult, CorrelationSignal
+
+        correlations = [
+            CorrelationResult(
+                indicator="8.8.8.8",
+                indicator_type="ip",
+                signals=[
+                    CorrelationSignal("vt_detections", -10, 0.5, "virustotal"),
+                    CorrelationSignal("beacon_score", 0.9, 0.9, "beacon"),
+                    CorrelationSignal("vt_detections", -10, 0.5, "virustotal"),  # duplicate
+                ],
+                composite_score=0.75,
+                verdict="high",
+            ),
+        ]
+        gen = PDFReportGenerator()
+        html = gen._render_correlation_section(correlations)
+        # Signals should appear as joined names, duplicates removed
+        assert "vt_detections, beacon_score" in html
+        assert "8.8.8.8" in html
+        assert "high" in html
+
+    @pytest.mark.skipif(not WEASYPRINT_AVAILABLE, reason="weasyprint not installed")
+    def test_render_correlation_with_dict_signals(self):
+        """Dict-shaped correlations with list[dict] signals must also render."""
+        correlations = [
+            {
+                "indicator": "evil.example",
+                "verdict": "critical",
+                "signals": [{"name": "dga_domain"}, {"name": "dns_tunneling"}],
+            },
+        ]
+        gen = PDFReportGenerator()
+        html = gen._render_correlation_section(correlations)
+        assert "dga_domain, dns_tunneling" in html
+        assert "evil.example" in html
 
 
 class TestConfigSections:

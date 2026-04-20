@@ -823,16 +823,39 @@ class PDFReportGenerator:
         detail_rows = []
         for c in correlations[:20]:
             if hasattr(c, "indicator"):
+                # c.signals is a list[CorrelationSignal] dataclass — pull the
+                # human-readable signal names (e.g. "vt_detections",
+                # "beacon_score") and de-duplicate while preserving order.
+                sig_names: list[str] = []
+                for s in getattr(c, "signals", []) or []:
+                    name = getattr(s, "name", None)
+                    if name and name not in sig_names:
+                        sig_names.append(str(name))
                 detail_rows.append(
                     f"<tr><td>{self._escape(c.indicator)}</td>"
                     f"<td>{self._escape(c.verdict)}</td>"
-                    f"<td>{self._escape(', '.join(c.signals) if hasattr(c, 'signals') else '')}</td></tr>"
+                    f"<td>{self._escape(', '.join(sig_names))}</td></tr>"
                 )
             elif isinstance(c, dict):
+                # Dict-shaped correlations — signals may be a list of dicts
+                # with a 'name' key, or a list of strings, or a single string.
+                raw_sigs = c.get("signals", "")
+                if isinstance(raw_sigs, list):
+                    names: list[str] = []
+                    for item in raw_sigs:
+                        if isinstance(item, dict):
+                            name = item.get("name") or item.get("type") or ""
+                            if name:
+                                names.append(str(name))
+                        else:
+                            names.append(str(item))
+                    sig_display = ", ".join(names)
+                else:
+                    sig_display = str(raw_sigs)
                 detail_rows.append(
                     f"<tr><td>{self._escape(str(c.get('indicator', '')))}</td>"
                     f"<td>{self._escape(str(c.get('verdict', '')))}</td>"
-                    f"<td>{self._escape(str(c.get('signals', '')))}</td></tr>"
+                    f"<td>{self._escape(sig_display)}</td></tr>"
                 )
 
         verdict_table = "\n".join(verdict_rows) if verdict_rows else "<tr><td colspan='2'>No correlations</td></tr>"

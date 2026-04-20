@@ -73,7 +73,7 @@ from app.ui.layout import (
     render_yara_results,
     render_zeek,
 )
-from app.utils.common import ensure_dir, is_public_ipv4, make_slug, uniq_sorted
+from app.utils.common import ensure_dir, find_bin, is_public_ipv4, make_slug, uniq_sorted
 
 logger = logging.getLogger(__name__)
 
@@ -415,6 +415,25 @@ if st.session_state.get("trigger_llm_rerun"):
     st.session_state["trigger_llm_rerun"] = False
     st.rerun()
 init_config_defaults()
+
+# ---------------------- Dependency pre-flight check ----------------------
+# Warn prominently if critical binaries are missing — the pipeline silently
+# produces empty results without them, and users are left staring at a blank
+# dashboard wondering what went wrong.
+_missing_bins: list[str] = []
+if not find_bin("tshark", cfg_key="cfg_tshark_bin"):
+    _missing_bins.append("**tshark** (required for packet parsing)")
+if not find_bin("zeek", env_key="ZEEK_BIN", cfg_key="cfg_zeek_bin"):
+    _missing_bins.append("**zeek** (required for protocol analysis)")
+
+if _missing_bins:
+    st.error(
+        "⚠️ **Missing required binaries** — analysis will produce empty results until these are installed:\n\n"
+        + "\n".join(f"- {b}" for b in _missing_bins)
+        + "\n\n**Install on macOS:** `brew install wireshark zeek`  \n"
+        + "**Install on Ubuntu/Debian:** `sudo apt install tshark zeek`  \n"
+        + "Or set explicit paths in the **Settings** tab below."
+    )
 
 # Tabs
 tab_upload, tab_progress, tab_dashboard, tab_llm, tab_osint, tab_results, tab_cases, tab_config = make_tabs()

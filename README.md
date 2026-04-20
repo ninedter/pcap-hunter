@@ -181,21 +181,48 @@ app/
 
 ### Prerequisites
 
-| Tool | Install (macOS) | Install (Linux) |
-|------|-----------------|-----------------|
-| **Python 3.10+** | `brew install python@3.12` | `sudo apt install python3` |
-| **Zeek** | `brew install zeek` | [Zeek packages](https://software.zeek.org/) |
-| **Tshark** | `brew install wireshark` | `sudo apt install tshark` |
-| **Pango** (PDF) | `brew install pango` | `sudo apt install libpango1.0-dev` |
-| **LM Studio** (optional) | [lmstudio.ai](https://lmstudio.ai/) | [lmstudio.ai](https://lmstudio.ai/) |
+PCAP Hunter has **hard dependencies** on system binaries — the pipeline cannot parse
+packets without them. The `make install` target now installs both system and Python
+dependencies automatically, and verifies them afterwards.
 
-### Install
+| Tool | Required? | Purpose |
+|------|-----------|---------|
+| **Python 3.10+** | required | Runtime |
+| **Tshark** (Wireshark) | required | Packet parsing — the pipeline silently produces empty results without it |
+| **Capinfos** (Wireshark) | required | Fast packet counting (ships with tshark) |
+| **Zeek** | required | Protocol analysis (conn.log, dns.log, http.log, ssl.log) |
+| **YARA** | optional | Rule-based scanning of carved files |
+| **Pango** | required for PDF | WeasyPrint PDF report generation |
+| **LM Studio** | optional | Local LLM ([lmstudio.ai](https://lmstudio.ai/)) |
+
+### Install (recommended)
 
 ```bash
 git clone https://github.com/ninedter/pcap-hunter.git
 cd pcap-hunter
-make install
+make install           # installs system deps + python deps + runs dependency check
 ```
+
+### Install (manual)
+
+```bash
+# macOS
+brew install wireshark zeek yara pango
+make install-python
+
+# Debian / Ubuntu
+sudo apt install -y tshark zeek yara libpango1.0-dev libpcap0.8
+make install-python
+```
+
+### Verifying your install
+
+```bash
+make doctor    # runs scripts/check_dependencies.py and reports status
+```
+
+The app also runs this check at startup and shows a red banner at the top of every
+page if any required binary is missing — you'll never get a silently empty dashboard.
 
 ---
 

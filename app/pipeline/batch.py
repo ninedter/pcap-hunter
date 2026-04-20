@@ -520,7 +520,9 @@ class BatchProcessor:
         self.results: list[PCAPResult] = []
 
         logger.info(
-            f"BatchProcessor initialized with {len(validated_paths)} files ({total_size / (1024**2):.1f}MB total)"
+            "BatchProcessor initialized with %d files (%.1fMB total)",
+            len(validated_paths),
+            total_size / (1024**2),
         )
 
     def add_result(self, result: PCAPResult) -> None:

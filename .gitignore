@@ -40,3 +40,10 @@ data/
 *.pcap
 *.log
 .DS_Store
+
+# Claude Code local state (plans, worktrees, agents, memory)
+# CLAUDE.md is intentionally tracked (documents project conventions);
+# everything under .claude/ is session-local and must not be committed.
+.claude/
+CLAUDE.local.md
+

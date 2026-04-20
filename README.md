@@ -15,6 +15,7 @@ By combining industry-standard network analysis tools (**Zeek**, **Tshark**, **P
 
 ## Table of Contents
 
+- [Visual Tour](#visual-tour)
 - [Key Features](#key-features)
 - [Architecture](#architecture)
 - [Installation](#installation)
@@ -25,6 +26,76 @@ By combining industry-standard network analysis tools (**Zeek**, **Tshark**, **P
 - [Development](#development)
 - [Documentation](#documentation)
 - [License](#license)
+
+---
+
+## Visual Tour
+
+> Screenshots captured against `sample.pcap`. All IP addresses are automatically redacted
+> via `scripts/capture_screenshots.py` before publication.
+
+### 1. Upload — load one or many PCAPs
+
+Drag-and-drop a `.pcap` / `.pcapng` file (up to 200 MB each) or paste a container path.
+Multiple files trigger batch mode with cross-file correlation.
+
+![Upload tab](docs/images/01-upload.png)
+
+### 2. Progress — transparent 10-stage pipeline
+
+Every stage of the analysis pipeline reports live progress with a skippable per-stage
+control. You always know what's running and how far it has to go.
+
+![Progress tab](docs/images/02-progress.png)
+
+### 3. Dashboard — at-a-glance threat summary
+
+The Dashboard surfaces the highest-signal findings first: overall risk level, alert
+count, beacon candidates, YARA hits, and certificate issues. A global traffic map,
+protocol distribution, and activity timeline put the capture in visual context.
+
+![Dashboard tab](docs/images/03-dashboard.png)
+
+### 4. LLM Analysis — AI-generated threat report
+
+An 8-section narrative (Executive Summary → Key Findings → Indicators & Evidence →
+OSINT Corroboration → Beaconing / C2 → DNS & TLS → Risk Assessment → Recommended
+Actions) with confidence qualifiers and MITRE ATT&CK mapping, generated locally
+via LM Studio or any OpenAI-compatible endpoint.
+
+![LLM Analysis tab](docs/images/04-llm-analysis.png)
+
+### 5. OSINT — multi-provider IOC enrichment
+
+Prioritized IOC table with VirusTotal, AbuseIPDB, GreyNoise, Shodan, OTX, and
+VT Domain signals merged into one view. Sub-tabs expose Domains, Detail Cards,
+Geo Map, Infrastructure ASN clustering, Export, Devices, and Notes.
+
+![OSINT tab](docs/images/05-osint.png)
+
+### 6. Raw Data — Zeek logs, flows, carved payloads, YARA matches
+
+Every underlying data source is available: flow table, DNS and TLS analyses,
+NXDOMAIN analysis, JA3/JA3S fingerprints, Zeek `conn.log`/`dns.log`/`http.log`/
+`ssl.log`, carved HTTP payloads, and YARA scan results. Export any view as CSV
+or JSON with CSV-injection protection.
+
+![Raw Data tab](docs/images/06-raw-data.png)
+
+### 7. Cases — persistent investigation tracking
+
+Promote any capture and its findings into a case. Cases carry IOCs, severity, tags,
+investigation notes, status, and search — stored in a local SQLite database.
+
+![Cases tab](docs/images/07-cases.png)
+
+### 8. Config — centralized settings
+
+LLM endpoint, API keys (PBKDF2-encrypted at rest), home location for the world map,
+OSINT provider toggles, binary paths, and pipeline thresholds — all in one place
+with per-section clear buttons.
+
+![Config tab](docs/images/08-config.png)
 
 ---
 
@@ -88,7 +159,7 @@ By combining industry-standard network analysis tools (**Zeek**, **Tshark**, **P
   - **Jitter** — Modal interval analysis with ±20% tolerance for detecting randomized C2.
   - **Volume** — Packet count and payload size consistency.
 - **False-Positive Reduction** — Multi-layered penalties to prevent benign traffic from triggering alerts:
-  - Infrastructure allowlist (DNS resolvers: 1.1.1.1, 8.8.8.8, etc.)
+  - Infrastructure allowlist (major public DNS resolvers)
   - Protocol awareness (ICMP, NTP, mDNS, SSDP, IGMP are inherently periodic)
   - Service port penalties (HTTPS, IMAPS, Apple Push, MQTT, SIP)
   - High-volume large-payload filtering (streaming/downloads vs. C2)
@@ -124,13 +195,14 @@ Integrates with leading threat intelligence providers:
 
 ### Professional PDF Export
 - Multi-page PDF reports with executive summary, key findings, technical analysis, and recommendations.
-- Chart/visualization embedding via WeasyPrint.
-- Configurable TLP classification.
+- **Embedded dashboard charts** — protocol distribution, top talkers, flow timeline, network graph, world map — rendered to PNG via kaleido for static handoff.
+- Configurable TLP classification and analyst metadata.
 
 ### Export Formats
 - **CSV / JSON** — Export any data table with CSV injection protection.
 - **STIX 2.0/2.1** — Export indicators in standard STIX format.
 - **ATT&CK Navigator** — Export technique mappings for MITRE ATT&CK Navigator.
+- **CEF (ArcSight)** — SIEM-ingestible events from correlations, beacons, DNS, and IOCs.
 
 ---
 
@@ -153,11 +225,11 @@ app/
 │   ├── rdns_cache.py    # SQLite reverse-DNS caching layer
 │   ├── tls_certs.py # Certificate validation
 │   └── yara_scan.py # YARA rule scanning
-├── reports/         # PDF report generation
+├── reports/         # PDF report generation (WeasyPrint + kaleido charts)
 ├── security/        # OPSEC hardening & data sanitization
 ├── threat_intel/    # MITRE ATT&CK mapping
 ├── ui/              # Streamlit interface (8 tabs)
-├── utils/           # Export, GeoIP, config, binary discovery, network utils
+├── utils/           # Export, GeoIP, config, binary discovery, CEF
 ├── config.py        # Application defaults
 └── main.py          # Streamlit entry point
 ```
@@ -192,7 +264,7 @@ and verifies everything afterwards.
 | **Capinfos** (Wireshark) | required | Fast packet counting (ships with tshark) |
 | **Zeek** | required | Protocol analysis (conn.log, dns.log, http.log, ssl.log) |
 | **YARA** | optional | Rule-based scanning of carved files |
-| **Pango** | required for PDF | WeasyPrint PDF report generation |
+| **Pango + glib + cairo** | required for PDF | WeasyPrint PDF report generation |
 | **LM Studio** | optional | Local LLM ([lmstudio.ai](https://lmstudio.ai/)) |
 
 ### One command, any platform
@@ -271,7 +343,7 @@ Open `http://localhost:8501` in your browser.
 3. **Analyze** — Click **Extract & Analyze** to start the pipeline.
 4. **Monitor** — Watch the Progress tab as stages execute: Packet Counting > Parsing > Zeek > DNS/TLS > Beaconing > Carving > YARA > OSINT > LLM Report.
 5. **Review** — Explore results across Dashboard, LLM Analysis, OSINT, Raw Data, and Cases tabs.
-6. **Export** — Download CSV/JSON data, PDF reports, STIX bundles, or ATT&CK Navigator layers.
+6. **Export** — Download CSV/JSON data, PDF reports, STIX bundles, ATT&CK Navigator layers, or CEF syslog events.
 
 ### Re-run Reports
 
@@ -285,83 +357,81 @@ Use the granular **Clear** buttons in Config to independently wipe PCAP data, OS
 
 ## Configuration
 
-Defaults are managed in `app/config.py` and persisted to `.pcap_hunter_config.json`.
+- Defaults in `app/config.py` (thresholds, paths, URLs)
+- Persistent config in `~/.pcap_hunter_config.json` (encrypted by `ConfigManager`)
+- API keys encrypted at rest with machine-derived PBKDF2 key
+- Environment-variable overrides: `OTT_KEY`, `VT_KEY`, `SHODAN_KEY`, etc.
+- LLM defaults: `http://localhost:1234/v1` (LM Studio)
 
-| Setting | Default | Description |
-|---------|---------|-------------|
-| `LM_BASE_URL` | `http://localhost:1234/v1` | LLM API endpoint |
-| `LM_MODEL` | `local` | Model identifier |
-| `LM_LANGUAGE` | `US English` | Report language |
-| `DEFAULT_PYSHARK_LIMIT` | `200,000` | Max packets for deep inspection |
-| `OSINT_TOP_IPS_DEFAULT` | `50` | Number of top IPs to enrich (0 = all) |
-| `OSINT_CACHE_ENABLED` | `True` | SQLite caching for OSINT results |
-| `PARALLEL_PARSE_ENABLED` | `True` | Run PyShark + Zeek in parallel |
-| `RDNS_CACHE_TTL_HOURS` | `168` (7 days) | Reverse DNS cache TTL |
-| `BATCH_MAX_FILES` | `50` | Max files in multi-PCAP batch |
-| `DATA_DIR` | `./data` | Storage for analysis artifacts |
+### Key Thresholds
 
-### OSINT API Keys
-
-Set via the Config tab or environment variables:
-
-```bash
-export OTX_KEY="your-key"
-export VT_KEY="your-key"
-export ABUSEIPDB_KEY="your-key"
-export GREYNOISE_KEY="your-key"
-export SHODAN_KEY="your-key"
-```
+| Setting | Default | Purpose |
+|---------|---------|---------|
+| DGA entropy | 4.0 bits | Shannon entropy threshold for DGA detection |
+| Fast flux | 10+ IPs | Minimum distinct IPs per domain |
+| Flow asymmetry | 10:1 + ≥1 MB | Exfil candidate threshold |
+| C2 common ports | 4444, 5555, 6666, 7777, 8888, 9999, 1337, 31337 | Port-anomaly match list |
+| PyShark limit | 200,000 packets | Deep-parse cap |
 
 ---
 
 ## Docker
 
-```bash
-docker build -t pcap-hunter .
-docker run -p 8501:8501 pcap-hunter
-```
-
-The Docker image includes Zeek and Tshark pre-installed. Mount a volume for persistent data:
+The bundled `Dockerfile` ships tshark, zeek, libpcap, and all Python deps baked in — the simplest path to a fully-working environment.
 
 ```bash
-docker run -p 8501:8501 -v $(pwd)/data:/app/data pcap-hunter
+docker compose up --build
+# → http://localhost:8501
 ```
 
 ---
 
 ## Development
 
-```bash
-make test       # Run tests with coverage
-make lint       # Lint with Ruff
-make format     # Format code with Ruff
-make clean      # Clean caches
-```
-
-### macOS Capture Permissions
+### Pre-commit gate — `make verify`
 
 ```bash
-make fix-permissions
+make verify     # format check + lint + full test suite
 ```
 
-### CI/CD
+Required before every commit. CI runs the same three steps, so `make verify` passing locally means CI will pass too.
 
-GitHub Actions runs on every push/PR to `main`:
-- Python 3.11 test suite with coverage
-- Ruff linting and format check
+### Other make targets
+
+```bash
+make test          # pytest with coverage
+make test-pdf      # focused PDF + chart test suite
+make lint          # ruff check
+make format        # ruff format
+make doctor        # dependency verification
+make clean         # remove caches
+```
+
+### Regenerate README screenshots
+
+```bash
+python3 scripts/capture_screenshots.py        # captures all 8 tabs, auto-redacts IPs
+python3 scripts/capture_screenshots.py --redact-only   # re-run OCR redaction on existing PNGs
+python3 scripts/capture_screenshots.py --keep-ips      # keep IPs (internal use only)
+```
+
+The capture script uses Playwright headless Chromium, drives the UI, and runs a two-pass IP redaction: DOM-aware bounding-box extraction first, then multi-PSM tesseract OCR for any IPs rendered into canvas (Streamlit's `st.dataframe`).
+
+### Testing discipline
+
+PCAP Hunter uses **production-shape test data**, not simplified inputs. See `tests/test_pdf_integration.py` for the canonical pattern — real `CorrelationSignal` dataclasses, real pandas DataFrames, and the nested dict shapes the pipeline actually produces. When adding a new PDF section or chart, extend the corresponding integration test. See `CLAUDE.md` for the full contributor guide.
 
 ---
 
 ## Documentation
 
-- [User Manual (English)](docs/en/USER_MANUAL.md)
-- [使用手冊 (繁體中文)](docs/zh-TW/USER_MANUAL.md)
-- [Changelog](CHANGELOG.md)
+- **[User Manual (English)](docs/en/USER_MANUAL.md)** — end-user guide
+- **[中文說明 (Traditional Chinese)](docs/zh-TW/README.md)** — 繁體中文版
+- **[CLAUDE.md](CLAUDE.md)** — contributor/AI guide: conventions, testing discipline, known bug patterns
+- **[docs/roadmap.md](docs/roadmap.md)** — planned work
 
 ---
 
 ## License
 
-MIT License. See [LICENSE](LICENSE) for details.
-
-Copyright (c) 2025 ninedter
+[MIT License](LICENSE) — see file for details.

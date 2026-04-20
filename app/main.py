@@ -427,12 +427,26 @@ if not find_bin("zeek", env_key="ZEEK_BIN", cfg_key="cfg_zeek_bin"):
     _missing_bins.append("**zeek** (required for protocol analysis)")
 
 if _missing_bins:
+    # Show OS-appropriate install commands so users don't hunt for the right one.
+    import sys as _sys
+
+    if _sys.platform == "darwin":
+        _install_help = "**Install on macOS:** `brew install wireshark zeek`"
+    elif _sys.platform == "win32":
+        _install_help = (
+            "**Install on Windows:** `winget install WiresharkFoundation.Wireshark`  \n"
+            "Zeek has no native Windows build — use **WSL2** (`wsl --install` → `sudo apt install zeek`) "
+            "or the **Docker image** (`docker compose up`)."
+        )
+    else:
+        _install_help = "**Install on Ubuntu/Debian:** `sudo apt install tshark zeek`"
+
     st.error(
         "⚠️ **Missing required binaries** — analysis will produce empty results until these are installed:\n\n"
         + "\n".join(f"- {b}" for b in _missing_bins)
-        + "\n\n**Install on macOS:** `brew install wireshark zeek`  \n"
-        + "**Install on Ubuntu/Debian:** `sudo apt install tshark zeek`  \n"
-        + "Or set explicit paths in the **Settings** tab below."
+        + "\n\n"
+        + _install_help
+        + "  \nOr set explicit paths in the **Settings** tab below."
     )
 
 # Tabs

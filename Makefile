@@ -89,7 +89,7 @@ fix-permissions:
 # -------------------------------------------------------------------------
 
 help:
-	@echo "PCAP Hunter — make targets"
+	@echo "PCAP Hunter — make targets (macOS / Linux)"
 	@echo ""
 	@echo "  make install          Full install (system + python) + verification"
 	@echo "  make install-system   System binaries only (tshark, zeek, yara, pango)"
@@ -102,3 +102,6 @@ help:
 	@echo "  make format           Run ruff format"
 	@echo "  make clean            Remove caches"
 	@echo "  make fix-permissions  Grant macOS BPF capture permissions"
+	@echo ""
+	@echo "Windows users: run  .\\scripts\\install.ps1  in PowerShell,"
+	@echo "               or use Docker ('docker compose up') / WSL2."

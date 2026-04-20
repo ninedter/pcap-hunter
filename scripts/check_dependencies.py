@@ -10,6 +10,8 @@ Exits non-zero when any *required* dependency is missing so this can be
 wired into CI or a pre-run hook. Missing optional deps print a warning
 but do not fail the script.
 
+Supported platforms: macOS, Linux, Windows.
+
 Usage:
     python3 scripts/check_dependencies.py          # full check
     python3 scripts/check_dependencies.py --quiet  # only failures
@@ -20,6 +22,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import platform
 import shutil
 import subprocess
@@ -27,21 +30,53 @@ import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
+IS_WINDOWS = sys.platform == "win32"
+
+
+# ---------------------------------------------------------------------------
+# Common install locations (matches app/utils/binary_discovery.py)
+# ---------------------------------------------------------------------------
+
+
+def _unix_common_paths() -> list[str]:
+    return [
+        "/opt/homebrew/bin",
+        "/opt/local/bin",
+        "/usr/local/bin",
+        "/usr/bin",
+        "/Applications/Wireshark.app/Contents/MacOS",
+        "/Applications/Zeek.app/Contents/MacOS",
+        "/opt/zeek/bin",
+        "/usr/local/zeek/bin",
+    ]
+
+
+def _windows_common_paths() -> list[str]:
+    program_files = os.environ.get("ProgramFiles", r"C:\Program Files")
+    program_files_x86 = os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)")
+    localappdata = os.environ.get("LOCALAPPDATA", "")
+    userprofile = os.environ.get("USERPROFILE", "")
+    dirs = [
+        rf"{program_files}\Wireshark",
+        rf"{program_files_x86}\Wireshark",
+        rf"{program_files}\Zeek\bin",
+        rf"{program_files}\YARA",
+        rf"{program_files}\Git\usr\bin",
+        r"C:\ProgramData\chocolatey\bin",
+    ]
+    if localappdata:
+        dirs.append(rf"{localappdata}\Programs\Wireshark")
+    if userprofile:
+        dirs.append(rf"{userprofile}\scoop\shims")
+    return dirs
+
+
+COMMON_BIN_PATHS = _windows_common_paths() if IS_WINDOWS else _unix_common_paths()
+
+
 # ---------------------------------------------------------------------------
 # Dependency definitions
 # ---------------------------------------------------------------------------
-
-# Common install locations to check beyond $PATH (matches app/utils/binary_discovery.py)
-COMMON_BIN_PATHS = [
-    "/opt/homebrew/bin",
-    "/opt/local/bin",
-    "/usr/local/bin",
-    "/usr/bin",
-    "/Applications/Wireshark.app/Contents/MacOS",
-    "/Applications/Zeek.app/Contents/MacOS",
-    "/opt/zeek/bin",
-    "/usr/local/zeek/bin",
-]
 
 
 @dataclass
@@ -51,11 +86,15 @@ class BinaryCheck:
     purpose: str
     install_macos: str
     install_linux: str
+    install_windows: str
     version_flag: str = "--version"
     found_path: str | None = field(default=None, init=False)
     version: str | None = field(default=None, init=False)
 
 
+# Note on Zeek for Windows: Zeek has no official native Windows build.
+# The recommended options are WSL2 (run inside Ubuntu) or the official Docker image.
+# The install hint points users in that direction.
 REQUIRED_BINARIES = [
     BinaryCheck(
         name="tshark",
@@ -63,6 +102,7 @@ REQUIRED_BINARIES = [
         purpose="Packet parsing (the entire pipeline depends on it)",
         install_macos="brew install wireshark",
         install_linux="sudo apt install -y tshark",
+        install_windows="winget install WiresharkFoundation.Wireshark  (or: choco install wireshark)",
     ),
     BinaryCheck(
         name="capinfos",
@@ -70,6 +110,7 @@ REQUIRED_BINARIES = [
         purpose="Fast packet counting (ships with tshark)",
         install_macos="brew install wireshark",
         install_linux="sudo apt install -y tshark",
+        install_windows="winget install WiresharkFoundation.Wireshark  (or: choco install wireshark)",
     ),
     BinaryCheck(
         name="zeek",
@@ -77,6 +118,9 @@ REQUIRED_BINARIES = [
         purpose="Protocol analysis (conn.log, dns.log, http.log, ssl.log)",
         install_macos="brew install zeek",
         install_linux="sudo apt install -y zeek",
+        install_windows=(
+            "Zeek has no native Windows build — use WSL2 (`wsl --install` then `sudo apt install zeek`) or Docker"
+        ),
     ),
     BinaryCheck(
         name="yara",
@@ -84,6 +128,7 @@ REQUIRED_BINARIES = [
         purpose="YARA rule scanning of carved files (optional)",
         install_macos="brew install yara",
         install_linux="sudo apt install -y yara",
+        install_windows="choco install yara  (or: scoop install yara)",
     ),
     BinaryCheck(
         name="openssl",
@@ -91,6 +136,7 @@ REQUIRED_BINARIES = [
         purpose="TLS certificate parsing fallback",
         install_macos="brew install openssl",
         install_linux="sudo apt install -y openssl",
+        install_windows="Ships with Git for Windows; or: choco install openssl",
         version_flag="version",
     ),
 ]
@@ -113,13 +159,18 @@ REQUIRED_PYTHON_PACKAGES = [
 
 def find_binary(name: str) -> str | None:
     """Return the path to *name* checking $PATH and common install dirs."""
+    # shutil.which handles Windows PATHEXT (.exe, .bat, etc.) automatically
     found = shutil.which(name)
     if found:
         return found
+
+    # Fallback: check common dirs for `name` or `name.exe` (Windows)
+    candidates = [name, f"{name}.exe"] if IS_WINDOWS else [name]
     for prefix in COMMON_BIN_PATHS:
-        candidate = Path(prefix) / name
-        if candidate.is_file():
-            return str(candidate)
+        for cand in candidates:
+            candidate_path = Path(prefix) / cand
+            if candidate_path.is_file():
+                return str(candidate_path)
     return None
 
 
@@ -197,9 +248,25 @@ def print_results_human(results: dict, use_color: bool) -> None:
 # ---------------------------------------------------------------------------
 
 
-def run_checks() -> dict:
+def _os_key() -> str:
     system = platform.system()
-    os_key = "macos" if system == "Darwin" else "linux"
+    if system == "Darwin":
+        return "macos"
+    if system == "Windows":
+        return "windows"
+    return "linux"
+
+
+def _install_hint(bc: BinaryCheck, os_key: str) -> str:
+    return {
+        "macos": bc.install_macos,
+        "linux": bc.install_linux,
+        "windows": bc.install_windows,
+    }[os_key]
+
+
+def run_checks() -> dict:
+    os_key = _os_key()
 
     binary_results = []
     missing_required: list[str] = []
@@ -208,7 +275,6 @@ def run_checks() -> dict:
         bc.found_path = find_binary(bc.name)
         if bc.found_path:
             bc.version = get_version(bc.found_path, bc.version_flag)
-        hint = bc.install_macos if os_key == "macos" else bc.install_linux
         binary_results.append(
             {
                 "name": bc.name,
@@ -217,7 +283,7 @@ def run_checks() -> dict:
                 "path": bc.found_path,
                 "version": bc.version,
                 "purpose": bc.purpose,
-                "install_hint": hint,
+                "install_hint": _install_hint(bc, os_key),
             }
         )
         if bc.required and not bc.found_path:
@@ -231,7 +297,7 @@ def run_checks() -> dict:
             missing_required.append(f"python:{pkg}")
 
     return {
-        "system": system,
+        "system": platform.system(),
         "python_version": platform.python_version(),
         "binaries": binary_results,
         "python_packages": pkg_results,
@@ -246,7 +312,17 @@ def main() -> int:
     parser.add_argument("--no-color", action="store_true", help="disable colored output")
     args = parser.parse_args()
 
+    # Windows terminals: enable ANSI colors on Windows 10+ when available
     use_color = sys.stdout.isatty() and not args.no_color and not args.json
+    if use_color and IS_WINDOWS:
+        try:
+            import ctypes
+
+            kernel32 = ctypes.windll.kernel32
+            kernel32.SetConsoleMode(kernel32.GetStdHandle(-11), 7)
+        except Exception:
+            use_color = False
+
     results = run_checks()
 
     if args.json:

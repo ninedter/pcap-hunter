@@ -182,8 +182,8 @@ app/
 ### Prerequisites
 
 PCAP Hunter has **hard dependencies** on system binaries — the pipeline cannot parse
-packets without them. The `make install` target now installs both system and Python
-dependencies automatically, and verifies them afterwards.
+packets without them. The install flows below handle both system and Python
+dependencies automatically, and verify them afterwards.
 
 | Tool | Required? | Purpose |
 |------|-----------|---------|
@@ -195,30 +195,86 @@ dependencies automatically, and verifies them afterwards.
 | **Pango** | required for PDF | WeasyPrint PDF report generation |
 | **LM Studio** | optional | Local LLM ([lmstudio.ai](https://lmstudio.ai/)) |
 
-### Install (recommended)
+### macOS (recommended: `make install`)
 
 ```bash
 git clone https://github.com/ninedter/pcap-hunter.git
 cd pcap-hunter
-make install           # installs system deps + python deps + runs dependency check
+make install           # brew installs tshark/zeek/yara/pango + pip + doctor check
 ```
 
-### Install (manual)
-
+Manual:
 ```bash
-# macOS
 brew install wireshark zeek yara pango
 make install-python
+```
 
-# Debian / Ubuntu
+### Linux (Debian / Ubuntu)
+
+```bash
+git clone https://github.com/ninedter/pcap-hunter.git
+cd pcap-hunter
+make install           # apt installs tshark/zeek/yara + pip + doctor check
+```
+
+Manual:
+```bash
 sudo apt install -y tshark zeek yara libpango1.0-dev libpcap0.8
 make install-python
+```
+
+### Windows
+
+Windows has three supported paths. **Zeek has no native Windows build**, so options
+A and C are recommended for full functionality.
+
+#### A) Docker (easiest, full feature set)
+
+```powershell
+git clone https://github.com/ninedter/pcap-hunter.git
+cd pcap-hunter
+docker compose up --build
+```
+Open `http://localhost:8501`. All dependencies are baked into the image.
+
+#### B) WSL2 (Linux inside Windows, full feature set)
+
+```powershell
+wsl --install -d Ubuntu        # one-time, reboot if prompted
+wsl                            # enter Ubuntu shell
+# --- now inside Ubuntu ---
+sudo apt update && sudo apt install -y tshark zeek yara libpango1.0-dev libpcap0.8
+git clone https://github.com/ninedter/pcap-hunter.git
+cd pcap-hunter
+make install
+make run
+```
+
+#### C) Native Windows (tshark only, Zeek stage will be disabled)
+
+```powershell
+# From a PowerShell prompt in the repo root:
+.\scripts\install.ps1
+```
+
+The script installs Wireshark (tshark) via `winget` (or Chocolatey), installs
+Python packages, and runs the dependency check. You'll see a warning that Zeek
+is missing — that stage will be skipped at analysis time. Use option A or B for
+the complete pipeline.
+
+Manual:
+```powershell
+winget install WiresharkFoundation.Wireshark
+# optional:  choco install yara
+python -m pip install -r requirements.txt
+python scripts\check_dependencies.py
 ```
 
 ### Verifying your install
 
 ```bash
-make doctor    # runs scripts/check_dependencies.py and reports status
+make doctor                              # macOS / Linux
+python scripts/check_dependencies.py     # any OS (including Windows)
 ```
 
 The app also runs this check at startup and shows a red banner at the top of every

@@ -34,13 +34,13 @@ BRAND_DIR = Path(__file__).resolve().parent.parent / "docs" / "brand"
 # ---------------------------------------------------------------------------
 # Palette
 # ---------------------------------------------------------------------------
-NAVY_DEEP = (26, 26, 46, 255)     # #1a1a2e
-NAVY_MID = (22, 33, 62, 255)      # #16213e
-NAVY_BLUE = (15, 52, 96, 255)     # #0f3460
-RED_ALERT = (233, 69, 96, 255)    # #e94560
+NAVY_DEEP = (26, 26, 46, 255)  # #1a1a2e
+NAVY_MID = (22, 33, 62, 255)  # #16213e
+NAVY_BLUE = (15, 52, 96, 255)  # #0f3460
+RED_ALERT = (233, 69, 96, 255)  # #e94560
 WHITE = (255, 255, 255, 255)
 LIGHT_GRID = (233, 238, 245, 255)  # #e9eef5
-DARK_BG = (17, 20, 32, 255)       # dark variant background
+DARK_BG = (17, 20, 32, 255)  # dark variant background
 TRANSPARENT = (0, 0, 0, 0)
 
 
@@ -108,12 +108,18 @@ def _draw_logo(size: int, *, dark: bool = False, transparent: bool = True) -> Im
 
     # Packet waveform (square wave)
     wave_pts = [
-        (p(36), p(112)), (p(52), p(112)),
-        (p(52), p(82)),  (p(72), p(82)),
-        (p(72), p(112)), (p(92), p(112)),
-        (p(92), p(68)),  (p(116), p(68)),
-        (p(116), p(112)), (p(140), p(112)),
-        (p(140), p(88)), (p(164), p(88)),
+        (p(36), p(112)),
+        (p(52), p(112)),
+        (p(52), p(82)),
+        (p(72), p(82)),
+        (p(72), p(112)),
+        (p(92), p(112)),
+        (p(92), p(68)),
+        (p(116), p(68)),
+        (p(116), p(112)),
+        (p(140), p(112)),
+        (p(140), p(88)),
+        (p(164), p(88)),
     ]
     wave_color = (200, 210, 240, 255) if dark else NAVY_MID
     id_.line(wave_pts, fill=wave_color, width=int(p(4)), joint="curve")
@@ -175,8 +181,7 @@ def _draw_logo(size: int, *, dark: bool = False, transparent: bool = True) -> Im
     )
     # Inner highlight ring for depth
     d.ellipse(
-        [cx - r + int(ring_w / 2), cy - r + int(ring_w / 2),
-         cx + r - int(ring_w / 2), cy + r - int(ring_w / 2)],
+        [cx - r + int(ring_w / 2), cy - r + int(ring_w / 2), cx + r - int(ring_w / 2), cy + r - int(ring_w / 2)],
         outline=NAVY_DEEP,
         width=max(1, int(ring_w / 6)),
     )

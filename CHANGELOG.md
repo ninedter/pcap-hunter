@@ -2,6 +2,38 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.0.0] - 2026-04-22
+
+First stable release. Production-ready installer, hardened pipeline, polished UX, and brand identity.
+
+### Added
+- **Brand identity** — logo, favicons (16/32/48/180/512/ico), header mark, and PDF cover-page logo with tagline. Source SVG + `scripts/build_logo_assets.py` to regenerate raster assets.
+- **Visual tour in README** — eight redacted screenshots covering every tab, captured by `scripts/capture_screenshots.py` (Playwright + two-pass IP redaction with DOM bounding boxes and tesseract OCR fallback for canvas-rendered grids).
+- **Auto-crop screenshot pipeline** — capture script trims trailing whitespace and any post-content duplicate render, so README screenshots stay tight to actual content.
+- **PDF report dashboard charts** — protocol distribution, top talkers, flow timeline, network graph, and world map are now embedded directly in the PDF (rendered via kaleido) for static handoff.
+- **Cross-platform unified installer** (`scripts/install.py`) — single Python script handles macOS (`brew`), Linux (`apt`), and Windows (`winget` → `choco` → `scoop`). Idiomatic per-platform wrappers (`make install`, `scripts/install.ps1`) all delegate to it. Flags: `--check-only`, `--skip-system`, `--skip-python`, `--dry-run`, `--yes`.
+- **Windows installation support** — native install path via PowerShell wrapper that bootstraps Python if missing.
+- **Dependency preflight** — startup check shows a red banner at the top of every page if any required system binary is missing, eliminating silent empty-dashboard failures from a missing `tshark` or `zeek`.
+- **`make verify` pre-commit gate** — single command runs format check + lint + full test suite. Mirrors CI exactly.
+- **Enriched LLM report prompts** — per-section evidence routing with structured context (correlations, beacons, DNS, TLS, OSINT) replaces the prior monolithic prompt.
+
+### Changed
+- **PDF cover page redesign** — logo + tagline above the title, with classification banner and metadata block.
+- **Kaleido upgraded to 1.x** — 0.x reaches end-of-life September 2025; 1.x is the active branch.
+- **Testing discipline overhauled** — production-shape test data (real `CorrelationSignal` dataclasses, real DataFrames, nested dicts the pipeline actually produces) instead of simplified inputs. Documented in `CLAUDE.md` with bug-pattern history. New integration tests for every PDF section and chart.
+- **Version bumped to 1.0.0** with consolidated release notes.
+
+### Fixed
+- **WeasyPrint PDF export on macOS** failed with `OSError: cannot load library 'libgobject-2.0-0'` because dyld doesn't search `/opt/homebrew/lib` by default. Fix sets `DYLD_FALLBACK_LIBRARY_PATH` before the WeasyPrint import.
+- **PDF generation crashed on correlations** with `TypeError: expected str instance, CorrelationSignal found` — `c.signals` is a list of dataclasses, not strings. Fix extracts `.name` before joining.
+- **LLM reports showed duplicate section headings** because prompts wrapped section names in `**bold**`, which LLMs echoed back. Fix removes the wrap and adds a leading-title strip as safety net.
+- **Pre-deployment hardening pass** — security (input validation, ReDoS prevention), structured logging, type-hint coverage, expanded test coverage.
+
+### Docs
+- Visual tour in README with 8 redacted screenshots.
+- Updated installation docs with Windows + WSL2 + Docker paths.
+- Multi-language user manuals (EN + zh-TW) refreshed.
+
 ## [0.6.0-alpha] - 2026-04-07
 
 ### Added

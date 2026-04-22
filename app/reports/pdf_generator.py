@@ -304,10 +304,22 @@ class PDFReportGenerator:
             <p class="case-id">ID: {self._escape(case_info.get("id"))}</p>
             """
 
+        # Embed the brand logo if available. We base64-encode so the PDF
+        # is fully self-contained (no external file references).
+        logo_img = ""
+        logo_path = Path(__file__).resolve().parent.parent / "static" / "logo-256.png"
+        if logo_path.is_file():
+            import base64
+
+            b64 = base64.b64encode(logo_path.read_bytes()).decode("ascii")
+            logo_img = f'<img class="cover-logo" src="data:image/png;base64,{b64}" alt="PCAP Hunter" />'
+
         return f"""
 <div class="cover-page">
     <div class="classification">{self._escape(self.config.classification)}</div>
+    {logo_img}
     <h1 class="report-title">{self._escape(self.config.title)}</h1>
+    <p class="cover-tagline">AI-enhanced threat hunting workbench</p>
     {case_section}
     <div class="metadata">
         <p><strong>Generated:</strong> {date_str}</p>
@@ -1103,12 +1115,26 @@ h3 { font-size: 12pt; color: #1a1a2e; margin-top: 1em; }
     border: 2px solid #e94560;
     display: inline-block;
     padding: 0.3em 1em;
-    margin-bottom: 2cm;
+    margin-bottom: 1.2cm;
+}
+
+.cover-page .cover-logo {
+    display: block;
+    margin: 0 auto 0.6cm;
+    width: 4.5cm;
+    height: 4.5cm;
 }
 
 .cover-page .report-title {
     font-size: 32pt;
+    margin-bottom: 0.3cm;
+}
+
+.cover-page .cover-tagline {
+    font-size: 12pt;
+    color: #555;
     margin-bottom: 1cm;
+    font-style: italic;
 }
 
 .cover-page .metadata {

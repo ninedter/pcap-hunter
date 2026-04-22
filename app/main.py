@@ -399,9 +399,28 @@ def pick_top_public_ips(features: dict, n: int) -> list[str]:
 # Streamlit App
 # ---------------------------------------------------------------------------
 
-st.set_page_config(page_title=C.APP_NAME, layout="wide")
+# Resolve branding assets relative to this file so the app works regardless
+# of the current working directory (Docker vs. local vs. Streamlit cloud).
+_STATIC_DIR = pathlib.Path(__file__).resolve().parent / "static"
+_FAVICON_PATH = _STATIC_DIR / "favicon-32.png"
+_LOGO_PATH = _STATIC_DIR / "logo-256.png"
+
+st.set_page_config(
+    page_title=C.APP_NAME,
+    # page_icon accepts a file path; Streamlit embeds it as the browser tab icon.
+    page_icon=str(_FAVICON_PATH) if _FAVICON_PATH.is_file() else "🔍",
+    layout="wide",
+)
 inject_css()
-st.title(C.APP_NAME)
+
+# Header: logo + title side-by-side. Narrow left column for the mark so the
+# wordmark dominates and the layout still looks right on smaller screens.
+_hdr_logo, _hdr_title = st.columns([1, 11], gap="small", vertical_alignment="center")
+with _hdr_logo:
+    if _LOGO_PATH.is_file():
+        st.image(str(_LOGO_PATH), width=72)
+with _hdr_title:
+    st.title(C.APP_NAME)
 
 # --- RE-RUN TRIGGER LOGIC ---
 if st.session_state.get("trigger_llm_rerun"):

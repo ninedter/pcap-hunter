@@ -35,7 +35,12 @@ plotly>=5.18.0,<6.0
 # that's auto-managed on first use. The older 0.x series is deprecated and
 # will be removed from Plotly after September 2025.
 kaleido>=1.0.0,<2.0
-maxminddb-geolite2>=4.1,<5.0
+# maxminddb-geolite2 is unmaintained since 2018, but the package itself is
+# pure-Python and works on modern interpreters. Its only published version is
+# the date-stamped 2018.703 — the previous ">=4.1,<5.0" constraint pointed at
+# versions that have never existed on PyPI, which made fresh installs (e.g.,
+# the Docker build) fail to resolve. Pin to the actual published release.
+maxminddb-geolite2==2018.703
 ruff>=0.3.0,<1.0
 python-whois>=0.9,<1.0
 

@@ -30,3 +30,40 @@ def test_callback_progress_overall_pct():
 
     overall_events = [e for e in events if e.kind == "overall"]
     assert overall_events[-1].percent == 50
+
+
+def test_callback_progress_done_is_idempotent():
+    events: list[ProgressEvent] = []
+    progress = CallbackProgress(callback=events.append, total_phases=1)
+    handle = progress.start_phase("a")
+    handle.done()
+    handle.done()  # second call should be a no-op
+    done_events = [e for e in events if e.kind == "phase_done"]
+    assert len(done_events) == 1
+    overall_events = [e for e in events if e.kind == "overall"]
+    assert len(overall_events) == 1  # _phase_finished only ran once
+
+
+def test_set_after_done_is_noop():
+    events: list[ProgressEvent] = []
+    progress = CallbackProgress(callback=events.append)
+    handle = progress.start_phase("a")
+    handle.done()
+    handle.set(75, "stale")
+    assert not any(e.kind == "phase_set" and e.message == "stale" for e in events)
+
+
+def test_zero_total_phases_emits_no_overall():
+    events: list[ProgressEvent] = []
+    progress = CallbackProgress(callback=events.append, total_phases=0)
+    progress.start_phase("a").done()
+    assert not any(e.kind == "overall" for e in events)
+
+
+def test_overall_caps_at_100_when_overshot():
+    events: list[ProgressEvent] = []
+    progress = CallbackProgress(callback=events.append, total_phases=1)
+    progress.start_phase("a").done()
+    progress.start_phase("b").done()  # exceeds total_phases
+    overall = [e for e in events if e.kind == "overall"]
+    assert overall[-1].percent == 100

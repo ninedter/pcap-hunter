@@ -34,7 +34,7 @@ class Progress(Protocol):
 
 
 class _CallbackPhaseHandle:
-    def __init__(self, parent: "CallbackProgress", title: str) -> None:
+    def __init__(self, parent: CallbackProgress, title: str) -> None:
         self._parent = parent
         self._title = title
         self._done = False

@@ -70,11 +70,21 @@ def test_overall_caps_at_100_when_overshot():
 
 
 def test_streamlit_progress_satisfies_protocol():
-    """The existing PhaseTracker, wrapped in StreamlitProgressAdapter, satisfies the Progress protocol."""
-    from app.pipeline.progress import Progress
+    """StreamlitProgressAdapter delegates start_phase to the wrapped tracker."""
+    from app.pipeline.progress import Progress  # noqa: F401  (protocol used as documentation)
     from app.pipeline.state import StreamlitProgressAdapter
 
-    # The adapter is duck-typed; we don't need a live Streamlit context for this check.
-    assert hasattr(StreamlitProgressAdapter, "start_phase")
-    # Protocol is structural; this is a smoke check that the symbol exists.
-    _ = Progress  # silence unused import
+    class _StubTracker:
+        def __init__(self) -> None:
+            self.calls: list[str] = []
+
+        def next_phase(self, title: str) -> str:
+            self.calls.append(title)
+            return f"handle:{title}"
+
+    tracker = _StubTracker()
+    adapter = StreamlitProgressAdapter(tracker)
+    handle = adapter.start_phase("Packet counting")
+
+    assert tracker.calls == ["Packet counting"]
+    assert handle == "handle:Packet counting"

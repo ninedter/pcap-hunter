@@ -241,9 +241,6 @@ class BatchPhaseTracker:
         self.file_text.write(msg)
 
 
-# Append at end of app/pipeline/state.py
-
-
 class StreamlitProgressAdapter:
     """Adapts an existing PhaseTracker (Streamlit) to the headless Progress protocol.
 
@@ -251,8 +248,8 @@ class StreamlitProgressAdapter:
     of whether it's driven by the UI or by the API worker.
     """
 
-    def __init__(self, tracker: "PhaseTracker") -> None:
+    def __init__(self, tracker: PhaseTracker) -> None:
         self._tracker = tracker
 
-    def start_phase(self, title: str) -> "PhaseHandle":
+    def start_phase(self, title: str) -> PhaseHandle:
         return self._tracker.next_phase(title)

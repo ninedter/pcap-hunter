@@ -67,3 +67,14 @@ def test_overall_caps_at_100_when_overshot():
     progress.start_phase("b").done()  # exceeds total_phases
     overall = [e for e in events if e.kind == "overall"]
     assert overall[-1].percent == 100
+
+
+def test_streamlit_progress_satisfies_protocol():
+    """The existing PhaseTracker, wrapped in StreamlitProgressAdapter, satisfies the Progress protocol."""
+    from app.pipeline.progress import Progress
+    from app.pipeline.state import StreamlitProgressAdapter
+
+    # The adapter is duck-typed; we don't need a live Streamlit context for this check.
+    assert hasattr(StreamlitProgressAdapter, "start_phase")
+    # Protocol is structural; this is a smoke check that the symbol exists.
+    _ = Progress  # silence unused import

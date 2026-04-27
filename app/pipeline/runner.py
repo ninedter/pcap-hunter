@@ -10,6 +10,7 @@ This file intentionally contains no Streamlit imports.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import Callable
 
 from app.pipeline.progress import Progress
 
@@ -25,7 +26,7 @@ class PipelineOptions:
     do_carve: bool = True
     do_yara: bool = True
     pre_count: bool = True
-    pyshark_packet_limit: int | None = None
+    pyshark_packet_limit: int | None = None  # None = use config default; int = hard cap on parsed packets
     osint_top_n: int = 50
 
 
@@ -34,7 +35,7 @@ class PipelineResult:
     """Structured output of a pipeline run."""
 
     case_id: str = ""
-    analysis_id: str = ""
+    analysis_id: str | None = None
     packet_count: int = 0
     duration_seconds: float = 0.0
     stages_run: list[str] = field(default_factory=list)
@@ -60,7 +61,8 @@ def run_pipeline(
     case_id: str,
     options: PipelineOptions,
     progress: Progress,
-    heartbeat: "callable | None" = None,
+    # TODO(task-6): heartbeat plumbing is finalized in Task 6 — keep signature stable.
+    heartbeat: Callable[[], None] | None = None,
 ) -> PipelineResult:
     """Run the 10-stage pipeline against ``pcap_path`` and return a structured result.
 

@@ -21,15 +21,26 @@ import scapy.all as scapy
 
 FIXTURE_PATH = pathlib.Path(__file__).parent / "tiny.pcap"
 PACKET_COUNT = 20
+# Pinned epoch for deterministic record timestamps: 2026-01-01T00:00:00 UTC.
+BASE_EPOCH = 1767225600
 
 
 def build_packets() -> list:
-    """Return a deterministic list of 20 Ethernet/IP/TCP SYN packets."""
+    """Return a deterministic list of 20 Ethernet/IP/TCP SYN packets.
+
+    Both Ethernet MACs and packet timestamps are pinned so that regenerating
+    the fixture produces byte-identical output, no matter where or when the
+    script runs.
+    """
     pkts = []
     for i in range(PACKET_COUNT):
-        pkts.append(
-            scapy.Ether() / scapy.IP(src="10.0.0.1", dst="10.0.0.2") / scapy.TCP(sport=12345 + i, dport=80, flags="S")
+        pkt = (
+            scapy.Ether(src="00:00:00:00:00:01", dst="00:00:00:00:00:02")
+            / scapy.IP(src="10.0.0.1", dst="10.0.0.2")
+            / scapy.TCP(sport=12345 + i, dport=80, flags="S")
         )
+        pkt.time = BASE_EPOCH + i  # one packet per second, deterministic
+        pkts.append(pkt)
     return pkts
 
 

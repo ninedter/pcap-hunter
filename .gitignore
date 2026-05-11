@@ -38,6 +38,7 @@ htmlcov/
 # Project specific
 data/
 *.pcap
+!tests/fixtures/*.pcap
 *.log
 .DS_Store
 

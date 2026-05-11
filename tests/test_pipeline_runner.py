@@ -54,17 +54,89 @@ def test_pipeline_result_to_dict_is_json_serializable():
     assert restored["summary_narrative"] == "A short narrative."
 
 
-def test_run_pipeline_stub_raises_not_implemented():
-    """Guard against future regressions where the stub silently returns instead of raising."""
-    import pytest
+def test_run_pipeline_executes_sequential_stages_against_fixture():
+    """Smoke test: run the headless pipeline against the tiny.pcap fixture.
+
+    Confirms the lift wired the sequential path correctly. Stages like Zeek
+    depend on a system binary; if it's missing the stage records a warning
+    and the pipeline keeps going — we assert that PyShark at minimum ran.
+    """
+    import pathlib
+
+    from app.pipeline.progress import CallbackProgress, ProgressEvent
+    from app.pipeline.runner import PipelineOptions, PipelineResult, run_pipeline
+
+    fixture = pathlib.Path(__file__).parent / "fixtures" / "tiny.pcap"
+    assert fixture.exists(), "Run Task 4a first: tests/fixtures/tiny.pcap missing"
+
+    events: list[ProgressEvent] = []
+    heartbeats: list[int] = []
+
+    options = PipelineOptions(
+        osint_enabled=False,
+        llm_enabled=False,
+        do_pyshark=True,
+        do_zeek=True,
+        do_carve=False,  # tiny.pcap has only SYN packets, no HTTP — nothing to carve
+        do_yara=False,
+        pre_count=True,
+        pyshark_packet_limit=50,
+    )
+
+    result = run_pipeline(
+        pcap_path=str(fixture),
+        case_id="testcase01",
+        options=options,
+        progress=CallbackProgress(callback=events.append, total_phases=7),
+        heartbeat=lambda: heartbeats.append(1),
+    )
+
+    assert isinstance(result, PipelineResult)
+    assert result.case_id == "testcase01"
+    assert result.duration_seconds >= 0.0
+    # PyShark always runs in this config — must appear in stages_run
+    assert "pyshark_pass" in result.stages_run, (
+        f"PyShark stage should have run; stages_run={result.stages_run}, warnings={result.warnings}"
+    )
+    # pre_count requested — should have run unless tshark is missing
+    assert "pcap_count" in result.stages_run or "pcap_count_unavailable" in result.warnings
+    # Heartbeat should have been called at least once per executed stage
+    assert len(heartbeats) >= 1
+    # Some progress events should have fired
+    assert any(e.kind == "phase_start" for e in events)
+    assert any(e.kind == "phase_done" for e in events)
+
+
+def test_run_pipeline_skips_disabled_stages():
+    """If a stage's flag is False, it must not appear in stages_run."""
+    import pathlib
 
     from app.pipeline.progress import CallbackProgress
     from app.pipeline.runner import PipelineOptions, run_pipeline
 
-    with pytest.raises(NotImplementedError):
-        run_pipeline(
-            pcap_path="nonexistent.pcap",
-            case_id="case",
-            options=PipelineOptions(),
-            progress=CallbackProgress(callback=lambda _e: None),
-        )
+    fixture = pathlib.Path(__file__).parent / "fixtures" / "tiny.pcap"
+    if not fixture.exists():
+        import pytest
+
+        pytest.skip("tests/fixtures/tiny.pcap missing")
+
+    options = PipelineOptions(
+        osint_enabled=False,
+        llm_enabled=False,
+        do_pyshark=False,  # disabled
+        do_zeek=False,  # disabled
+        do_carve=False,
+        do_yara=False,
+        pre_count=False,
+    )
+
+    result = run_pipeline(
+        pcap_path=str(fixture),
+        case_id="skiptest",
+        options=options,
+        progress=CallbackProgress(callback=lambda _e: None, total_phases=0),
+    )
+
+    assert "pyshark_pass" not in result.stages_run
+    assert "zeek" not in result.stages_run
+    assert "pcap_count" not in result.stages_run

@@ -107,14 +107,42 @@ class CaseRepository:
                     PRIMARY KEY (case_id, tag_id)
                 );
 
+                -- Jobs table for async pipeline execution
+                CREATE TABLE IF NOT EXISTS jobs (
+                    id TEXT PRIMARY KEY,
+                    case_id TEXT REFERENCES cases(id) ON DELETE CASCADE,
+                    pcap_path TEXT NOT NULL,
+                    options_json TEXT,
+                    status TEXT NOT NULL DEFAULT 'queued',
+                    progress_stage TEXT,
+                    progress_done INTEGER DEFAULT 0,
+                    progress_total INTEGER DEFAULT 10,
+                    submitted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    started_at TIMESTAMP,
+                    finished_at TIMESTAMP,
+                    heartbeat_at TIMESTAMP,
+                    error_code TEXT,
+                    error_detail TEXT,
+                    result_json BLOB
+                );
+
                 -- Indexes
                 CREATE INDEX IF NOT EXISTS idx_analyses_case ON analyses(case_id);
                 CREATE INDEX IF NOT EXISTS idx_iocs_analysis ON iocs(analysis_id);
                 CREATE INDEX IF NOT EXISTS idx_iocs_type_value ON iocs(ioc_type, value);
                 CREATE INDEX IF NOT EXISTS idx_notes_case ON notes(case_id);
+                CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status);
+                CREATE INDEX IF NOT EXISTS idx_jobs_case ON jobs(case_id);
                 """
             )
             conn.commit()
+
+            # Idempotent column additions (ALTER TABLE ADD COLUMN errors if column exists)
+            try:
+                conn.execute("ALTER TABLE cases ADD COLUMN source TEXT DEFAULT 'ui'")
+                conn.commit()
+            except sqlite3.OperationalError:
+                pass  # column already exists
         finally:
             conn.close()
 

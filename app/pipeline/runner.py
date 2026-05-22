@@ -12,6 +12,7 @@ from __future__ import annotations
 import logging
 import pathlib
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from typing import Callable
 
@@ -100,9 +101,11 @@ def run_pipeline(
 ) -> PipelineResult:
     """Run the 10-stage pipeline against ``pcap_path`` and return a structured result.
 
-    Sequential execution only — the parallel PyShark+Zeek branch is added in Task 4c.
-    Each stage is gated by its corresponding ``PipelineOptions`` flag. Failures in
-    individual stages are recorded in ``result.warnings`` rather than aborting the run.
+    Stages 2 (PyShark) and 3 (Zeek) run concurrently via ThreadPoolExecutor when both
+    are enabled — they're I/O-bound subprocesses against the same pcap and independent
+    until the merge step.  Each stage is gated by its corresponding ``PipelineOptions``
+    flag. Failures in individual stages are recorded in ``result.warnings`` rather than
+    aborting the run.
     """
     start = time.time()
     filename = pathlib.Path(pcap_path).name
@@ -144,8 +147,9 @@ def run_pipeline(
             h.done(f"Found ~{total_pkts:,} packets.")
         _emit_heartbeat()
 
-    # --- Stage 2: PyShark parsing ---
-    if options.do_pyshark:
+    # --- Stages 2 & 3: PyShark + Zeek (parallel when both enabled) ---
+    def _run_pyshark() -> None:
+        nonlocal features
         h = progress.start_phase("Parsing Packets")
         try:
             features = parse_pcap_pyshark(
@@ -155,9 +159,6 @@ def run_pipeline(
                 total_packets=total_pkts,
                 progress_every=250,
             )
-            # parse_pcap_pyshark returns its empty default ({"flows": [], "artifacts": {...}})
-            # if tshark is missing — it doesn't raise. Flag that case so callers can tell
-            # the stage ran but produced nothing.
             if not features.get("flows") and not any(features.get("artifacts", {}).values()):
                 warnings.append(WARNING_PYSHARK_NO_DATA)
             stages_run.append("pyshark_pass")
@@ -166,10 +167,9 @@ def run_pipeline(
             logger.error("PyShark failed for %s: %s", filename, exc)
             warnings.append(WARNING_PYSHARK_FAILED)
             h.done("Parsing failed.")
-        _emit_heartbeat()
 
-    # --- Stage 3: Zeek processing ---
-    if options.do_zeek:
+    def _run_zeek() -> None:
+        nonlocal zeek_tables
         h = progress.start_phase("Zeek processing")
         try:
             logs = run_zeek(pcap_path, str(C.ZEEK_DIR), phase=h)
@@ -190,6 +190,18 @@ def run_pipeline(
             if WARNING_ZEEK_FAILED not in warnings:
                 warnings.append(WARNING_ZEEK_NO_LOGS)
             h.done("Zeek produced no logs.")
+
+    if options.do_pyshark and options.do_zeek:
+        with ThreadPoolExecutor(max_workers=2, thread_name_prefix="pipeline") as pool:
+            futures = [pool.submit(_run_pyshark), pool.submit(_run_zeek)]
+            for fut in as_completed(futures):
+                fut.result()  # re-raises if the callable raised past our try/except
+        _emit_heartbeat()
+    elif options.do_pyshark:
+        _run_pyshark()
+        _emit_heartbeat()
+    elif options.do_zeek:
+        _run_zeek()
         _emit_heartbeat()
 
     # Merge Zeek DNS queries into artifacts (only meaningful when both stages ran)
@@ -243,7 +255,7 @@ def run_pipeline(
             h.done("Beaconing failed.")
         _emit_heartbeat()
 
-    # --- Stage 7: HTTP carving (sequential — parallel branch lives in Task 4c) ---
+    # --- Stage 7: HTTP carving ---
     if options.do_carve:
         h = progress.start_phase("HTTP carving (tshark)")
         try:

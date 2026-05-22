@@ -145,3 +145,71 @@ def test_run_pipeline_skips_disabled_stages():
     assert "pcap_count" not in result.stages_run
     assert result.stages_run == []
     assert result.packet_count == 0
+
+
+def test_run_pipeline_parallel_pyshark_zeek():
+    """When both PyShark and Zeek are enabled, they run concurrently via ThreadPoolExecutor.
+
+    We verify this by checking that:
+    1. Both stages appear in stages_run (or warnings for missing binaries)
+    2. The phase events show both stage starts before either finishes (overlap)
+    """
+    import pathlib
+
+    from app.pipeline.progress import CallbackProgress, ProgressEvent
+    from app.pipeline.runner import PipelineOptions, run_pipeline
+
+    fixture = pathlib.Path(__file__).parent / "fixtures" / "tiny.pcap"
+    if not fixture.exists():
+        import pytest
+
+        pytest.skip("tests/fixtures/tiny.pcap missing")
+
+    events: list[ProgressEvent] = []
+    options = PipelineOptions(
+        osint_enabled=False,
+        llm_enabled=False,
+        do_pyshark=True,
+        do_zeek=True,
+        do_carve=False,
+        do_yara=False,
+        pre_count=True,
+        pyshark_packet_limit=50,
+    )
+
+    result = run_pipeline(
+        pcap_path=str(fixture),
+        case_id="parallel_test",
+        options=options,
+        progress=CallbackProgress(callback=events.append, total_phases=7),
+    )
+
+    # Both stages either ran or warned — neither was silently skipped
+    pyshark_ran = "pyshark_pass" in result.stages_run
+    pyshark_warned = any(w.startswith("pyshark") for w in result.warnings)
+    zeek_ran = "zeek" in result.stages_run
+    zeek_warned = any(w.startswith("zeek") for w in result.warnings)
+    assert pyshark_ran or pyshark_warned, "PyShark neither ran nor warned"
+    assert zeek_ran or zeek_warned, "Zeek neither ran nor warned"
+
+    # Check phase events show parallel start pattern — both "Parsing Packets"
+    # and "Zeek processing" should start before either completes
+    phase_starts = [e.title for e in events if e.kind == "phase_start"]
+    if "Parsing Packets" in phase_starts and "Zeek processing" in phase_starts:
+        pyshark_start_idx = next(
+            i for i, e in enumerate(events) if e.kind == "phase_start" and e.title == "Parsing Packets"
+        )
+        zeek_start_idx = next(
+            i for i, e in enumerate(events) if e.kind == "phase_start" and e.title == "Zeek processing"
+        )
+        # In parallel mode: both starts happen before either finishes
+        first_done_idx = next(
+            (
+                i
+                for i, e in enumerate(events)
+                if e.kind == "phase_done" and e.title in ("Parsing Packets", "Zeek processing")
+            ),
+            len(events),
+        )
+        assert pyshark_start_idx < first_done_idx, "PyShark start should precede first done"
+        assert zeek_start_idx < first_done_idx, "Zeek start should precede first done"

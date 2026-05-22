@@ -1,10 +1,23 @@
 # app/pipeline/runner.py
 """Headless end-to-end pipeline runner.
 
-The single shared entrypoint for running the 10-stage pipeline against a PCAP.
-Both the Streamlit UI and the API worker call ``run_pipeline()``.
+Public surface (importable):
+    PipelineOptions   — tunable knobs for a single pipeline run
+    PipelineResult    — structured output (case_id, packet_count, stages_run, warnings)
+    run_pipeline()    — end-to-end execution
 
-This file intentionally contains no Streamlit imports.
+Both the Streamlit UI (via StreamlitProgressAdapter) and the API worker
+(via CallbackProgress) drive this function. The function does NOT import
+streamlit and is safe to call from any process.
+
+Caller responsibilities:
+    * Create the Case row before calling (run_pipeline does not write to the DB).
+    * Persist PipelineResult and any features/iocs returned via repository APIs.
+    * Provide a Progress implementation appropriate for the calling context.
+
+The runner is best-effort: stages that fail (e.g., LLM offline, OSINT not
+configured) are recorded in ``result.warnings`` rather than raising. Hard
+failures (corrupt PCAP, disk full) raise ``RuntimeError``.
 """
 
 from __future__ import annotations

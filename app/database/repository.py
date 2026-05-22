@@ -6,11 +6,11 @@ import gzip
 import json
 import sqlite3
 import uuid
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-from app.database.models import IOC, Analysis, Case, CaseStatus, IOCType, Note, Severity
+from app.database.models import IOC, Analysis, Case, CaseStatus, IOCType, Job, JobStatus, Note, Severity
 from app.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -771,5 +771,117 @@ class CaseRepository:
                 "total_iocs": iocs_count,
                 "by_status": by_status,
             }
+        finally:
+            conn.close()
+
+    # ==================== Job CRUD ====================
+
+    def create_job(self, job: Job) -> str:
+        if not job.id:
+            job.id = f"j_{uuid.uuid4().hex[:8]}"
+        conn = self._get_conn()
+        try:
+            conn.execute(
+                """
+                INSERT INTO jobs (id, case_id, pcap_path, options_json, status,
+                                  progress_stage, progress_done, progress_total,
+                                  submitted_at, heartbeat_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    job.id,
+                    job.case_id,
+                    job.pcap_path,
+                    job.options_json,
+                    job.status.value,
+                    job.progress_stage,
+                    job.progress_done,
+                    job.progress_total,
+                    job.submitted_at.isoformat(),
+                    datetime.now().isoformat(),
+                ),
+            )
+            conn.commit()
+            return job.id
+        finally:
+            conn.close()
+
+    def get_job(self, job_id: str) -> Job | None:
+        conn = self._get_conn()
+        try:
+            row = conn.execute("SELECT * FROM jobs WHERE id = ?", (job_id,)).fetchone()
+            if not row:
+                return None
+            return Job.from_dict(dict(row))
+        finally:
+            conn.close()
+
+    def update_job_status(
+        self,
+        job_id: str,
+        status: JobStatus,
+        error_code: str | None = None,
+        error_detail: str | None = None,
+        result_json: bytes | None = None,
+    ) -> None:
+        now = datetime.now().isoformat()
+        conn = self._get_conn()
+        try:
+            if status == JobStatus.RUNNING:
+                conn.execute(
+                    "UPDATE jobs SET status=?, started_at=?, heartbeat_at=? WHERE id=?",
+                    (status.value, now, now, job_id),
+                )
+            elif status in (JobStatus.DONE, JobStatus.FAILED, JobStatus.CANCELLED):
+                conn.execute(
+                    """UPDATE jobs SET status=?, finished_at=?, error_code=?,
+                                        error_detail=?, result_json=? WHERE id=?""",
+                    (status.value, now, error_code, error_detail, result_json, job_id),
+                )
+            else:
+                conn.execute("UPDATE jobs SET status=? WHERE id=?", (status.value, job_id))
+            conn.commit()
+        finally:
+            conn.close()
+
+    def update_job_progress(self, job_id: str, stage: str, done: int, total: int) -> None:
+        conn = self._get_conn()
+        try:
+            conn.execute(
+                "UPDATE jobs SET progress_stage=?, progress_done=?, progress_total=?, heartbeat_at=? WHERE id=?",
+                (stage, done, total, datetime.now().isoformat(), job_id),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+    def touch_job_heartbeat(self, job_id: str) -> None:
+        conn = self._get_conn()
+        try:
+            conn.execute(
+                "UPDATE jobs SET heartbeat_at=? WHERE id=?",
+                (datetime.now().isoformat(), job_id),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+    def find_stale_running_jobs(self, stale_after_seconds: int = 120) -> list[Job]:
+        cutoff = (datetime.now() - timedelta(seconds=stale_after_seconds)).isoformat()
+        conn = self._get_conn()
+        try:
+            rows = conn.execute(
+                "SELECT * FROM jobs WHERE status='running' AND heartbeat_at < ?",
+                (cutoff,),
+            ).fetchall()
+            return [Job.from_dict(dict(r)) for r in rows]
+        finally:
+            conn.close()
+
+    def count_active_jobs(self) -> int:
+        conn = self._get_conn()
+        try:
+            row = conn.execute("SELECT COUNT(*) FROM jobs WHERE status IN ('queued', 'running')").fetchone()
+            return int(row[0])
         finally:
             conn.close()

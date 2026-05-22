@@ -13,7 +13,7 @@ from fastapi.responses import JSONResponse
 
 from app.api.deps import get_settings
 from app.api.queue import recover_stale_running_jobs
-from app.api.routers import cases, health, jobs, pcaps
+from app.api.routers import cases, health, iocs, jobs, pcaps
 
 logger = logging.getLogger(__name__)
 
@@ -111,4 +111,5 @@ def create_app() -> FastAPI:
     app.include_router(pcaps.router)
     app.include_router(jobs.router)
     app.include_router(cases.router)
+    app.include_router(iocs.router)
     return app

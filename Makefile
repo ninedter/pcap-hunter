@@ -1,4 +1,4 @@
-.PHONY: install install-system install-python check-deps doctor test test-pdf verify lint format run clean fix-permissions help
+.PHONY: install install-system install-python check-deps doctor test test-pdf verify lint format run clean fix-permissions help run-api run-api-dev smoke-api
 
 # Prefer the Python interpreter that streamlit is installed under. Falls back
 # to whatever python3 is on $PATH. This matters on macOS where framework
@@ -74,6 +74,19 @@ fix-permissions:
 	@ls -l /dev/bpf*
 
 # -------------------------------------------------------------------------
+# API targets
+# -------------------------------------------------------------------------
+
+run-api:
+	PYTHONPATH=. uvicorn app.api.app:create_app --factory --host 127.0.0.1 --port 8000
+
+run-api-dev:
+	PYTHONPATH=. uvicorn app.api.app:create_app --factory --host 127.0.0.1 --port 8000 --reload --log-level debug
+
+smoke-api:
+	@bash scripts/api_smoke_test.sh
+
+# -------------------------------------------------------------------------
 # Help
 # -------------------------------------------------------------------------
 
@@ -92,6 +105,9 @@ help:
 	@echo "  make lint             Run ruff check"
 	@echo "  make format           Run ruff format"
 	@echo "  make clean            Remove caches"
+	@echo "  make run-api          Start the integrations API on :8000"
+	@echo "  make run-api-dev      Run API with --reload + debug logging"
+	@echo "  make smoke-api        End-to-end smoke test against local API"
 	@echo "  make fix-permissions  Grant macOS BPF capture permissions"
 	@echo ""
 	@echo "All install targets delegate to: python3 scripts/install.py"

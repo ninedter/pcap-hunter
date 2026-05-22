@@ -2,13 +2,17 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
+import os
+import pathlib
 import time
 import uuid
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException, Request
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from app.api.deps import get_settings
@@ -20,13 +24,34 @@ logger = logging.getLogger(__name__)
 
 @asynccontextmanager
 async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
-    """Startup/shutdown hook — recover stale jobs on boot."""
+    """Startup/shutdown hook — recover stale jobs on boot, schedule GC."""
     from app.api.deps import get_repo
 
     n = recover_stale_running_jobs(get_repo(), stale_after_seconds=120)
     if n:
         logger.warning("Recovered %d stale running jobs at startup", n)
+
+    # Schedule hourly GC sweep
+    gc_task = asyncio.create_task(_gc_loop())
     yield
+    gc_task.cancel()
+
+
+async def _gc_loop() -> None:
+    """Hourly garbage collection for retention policies."""
+    from app.api.deps import get_repo
+    from app.api.gc import gc_sweep
+
+    settings = get_settings()
+    uploads = pathlib.Path(os.environ.get("PCAP_HUNTER_API_UPLOADS_DIR", "data/api_uploads"))
+    artifacts = pathlib.Path(os.environ.get("PCAP_HUNTER_API_ARTIFACTS_DIR", "data/carved"))
+
+    while True:
+        try:
+            gc_sweep(repo=get_repo(), settings=settings, uploads_dir=uploads, artifacts_dir=artifacts)
+        except Exception:
+            logger.exception("gc_sweep failed")
+        await asyncio.sleep(3600)
 
 
 def _title_for_status(status: int) -> str:
@@ -44,9 +69,22 @@ def _title_for_status(status: int) -> str:
     }.get(status, "Error")
 
 
+def _identify_key(request: Request, settings) -> str:
+    """Derive key name for audit logging (NOT used for auth decisions)."""
+    auth = request.headers.get("Authorization", "")
+    if not auth.startswith("Bearer "):
+        return "-"
+    presented = auth.removeprefix("Bearer ").strip()
+    if settings.main_key and presented == settings.main_key:
+        return "main"
+    if settings.feed_key and presented == settings.feed_key:
+        return "feed"
+    return "-"
+
+
 def create_app() -> FastAPI:
     """Build the FastAPI app. Reads APISettings from env (refuses to start without keys)."""
-    get_settings()  # raises NoKeysConfiguredError if neither key is set
+    settings = get_settings()  # raises NoKeysConfiguredError if neither key is set
 
     app = FastAPI(
         title="PCAP Hunter Integrations API",
@@ -57,20 +95,32 @@ def create_app() -> FastAPI:
         lifespan=_lifespan,
     )
 
+    # Conditional CORS middleware
+    if settings.cors_origins:
+        app.add_middleware(
+            CORSMiddleware,
+            allow_origins=settings.cors_origins,
+            allow_credentials=False,
+            allow_methods=["GET", "POST", "DELETE"],
+            allow_headers=["Authorization", "Content-Type", "If-None-Match", "X-Request-ID"],
+        )
+
     @app.middleware("http")
     async def request_id_middleware(request: Request, call_next):
         rid = request.headers.get("X-Request-ID") or uuid.uuid4().hex
+        key_name = _identify_key(request, settings)
         start = time.monotonic()
         response = await call_next(request)
         response.headers["X-Request-ID"] = rid
         duration_ms = int((time.monotonic() - start) * 1000)
         logger.info(
-            "%s %s -> %d (%dms) request_id=%s",
+            "%s %s -> %d (%dms) request_id=%s key_name=%s",
             request.method,
             request.url.path,
             response.status_code,
             duration_ms,
             rid,
+            key_name,
         )
         return response
 

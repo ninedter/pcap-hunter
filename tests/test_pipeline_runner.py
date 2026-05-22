@@ -147,6 +147,25 @@ def test_run_pipeline_skips_disabled_stages():
     assert result.packet_count == 0
 
 
+def test_streamlit_to_options_mapping():
+    """Smoke check: the boolean flags PipelineOptions exposes match what main.py passes."""
+    from app.pipeline.runner import PipelineOptions
+
+    opts = PipelineOptions(
+        osint_enabled=True,
+        llm_enabled=False,
+        do_pyshark=True,
+        do_zeek=False,
+        do_carve=True,
+        do_yara=False,
+        pre_count=True,
+        pyshark_packet_limit=10000,
+    )
+    assert opts.do_zeek is False
+    assert opts.pyshark_packet_limit == 10000
+    assert opts.osint_top_n == 50
+
+
 def test_run_pipeline_parallel_pyshark_zeek():
     """When both PyShark and Zeek are enabled, they run concurrently via ThreadPoolExecutor.
 

@@ -75,6 +75,13 @@ class PipelineResult:
     tls_analysis: dict = field(default_factory=dict)
     beacon_df_records: list[dict] = field(default_factory=list)
 
+    # Intermediate state — available to callers (e.g. Streamlit) that need to run
+    # further stages (YARA, OSINT) on top of the runner output.  Not serialized by
+    # to_dict() since the API constructs its response from the fields above.
+    features: dict = field(default_factory=dict)
+    zeek_tables: dict = field(default_factory=dict)
+    carved_items: list[dict] = field(default_factory=list)
+
     def to_dict(self) -> dict:
         return {
             "case_id": self.case_id,
@@ -123,6 +130,7 @@ def run_pipeline(
     dns_result: dict = {}
     tls_result: dict = {}
     beacon_records: list[dict] = []
+    carved: list[dict] = []
 
     # TODO(task-6): per-stage heartbeats may be too coarse for >30s stages
     # (Zeek/PyShark on large pcaps). Task 6 owns mid-stage heartbeat injection.
@@ -288,4 +296,7 @@ def run_pipeline(
         dns_analysis=dns_result,
         tls_analysis=tls_result,
         beacon_df_records=beacon_records,
+        features=features,
+        zeek_tables=zeek_tables,
+        carved_items=carved if options.do_carve else [],
     )

@@ -315,7 +315,9 @@ if _missing_bins:
     )
 
 # Tabs
-tab_upload, tab_progress, tab_dashboard, tab_llm, tab_osint, tab_results, tab_cases, tab_config = make_tabs()
+tab_upload, tab_progress, tab_dashboard, tab_llm, tab_osint, tab_results, tab_cases, tab_api_keys, tab_config = (
+    make_tabs()
+)
 
 # Defaults
 for k, v in [
@@ -1434,7 +1436,13 @@ with tab_cases:
 
     render_cases_tab()
 
-# 7) Config ----------------------
+# 7) API Keys --------------------
+with tab_api_keys:
+    from app.ui.api_keys_tab import render_api_keys_tab
+
+    render_api_keys_tab()
+
+# 8) Config ----------------------
 with tab_config:
     render_config_tab()
 

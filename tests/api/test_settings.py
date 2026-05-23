@@ -3,9 +3,7 @@
 
 from __future__ import annotations
 
-import pytest
-
-from app.api.settings import APISettings, NoKeysConfiguredError
+from app.api.settings import APISettings
 
 
 def test_loads_main_key_from_env(monkeypatch):
@@ -24,11 +22,13 @@ def test_loads_both_keys(monkeypatch):
     assert s.feed_key == "feed"
 
 
-def test_refuses_to_start_when_no_keys(monkeypatch):
+def test_allows_no_env_keys_when_db_keys_may_exist(monkeypatch):
+    """Env-var keys are optional when DB-backed keys might exist."""
     monkeypatch.delenv("PCAP_HUNTER_API_KEY", raising=False)
     monkeypatch.delenv("PCAP_HUNTER_FEED_KEY", raising=False)
-    with pytest.raises(NoKeysConfiguredError):
-        APISettings.from_env()
+    s = APISettings.from_env()
+    assert s.main_key is None
+    assert s.feed_key is None
 
 
 def test_max_pcap_bytes_default_2gb(monkeypatch):

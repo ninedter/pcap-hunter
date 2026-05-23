@@ -57,4 +57,4 @@ def test_401_is_problem_json(client):
     assert r.status_code == 401
     assert r.headers["content-type"].startswith("application/problem+json")
     body = r.json()
-    assert body["code"] == "missing_or_invalid_auth"
+    assert body["code"] == "missing_or_malformed_auth"

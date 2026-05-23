@@ -15,9 +15,9 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
-from app.api.deps import get_settings
+from app.api.deps import get_key_repo, get_settings, get_usage_tracker
 from app.api.queue import recover_stale_running_jobs
-from app.api.routers import cases, health, iocs, jobs, pcaps
+from app.api.routers import admin, cases, health, iocs, jobs, pcaps
 
 logger = logging.getLogger(__name__)
 
@@ -33,8 +33,33 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     # Schedule hourly GC sweep
     gc_task = asyncio.create_task(_gc_loop())
+
+    # Schedule usage tracker flush every 60 seconds
+    flush_task = asyncio.create_task(_usage_flush_loop())
+
     yield
+
+    # Shutdown: final flush before stopping
+    flush_task.cancel()
     gc_task.cancel()
+    try:
+        tracker = get_usage_tracker()
+        key_repo = get_key_repo()
+        tracker.flush(key_repo)
+    except Exception:
+        logger.exception("Final usage flush failed")
+
+
+async def _usage_flush_loop() -> None:
+    """Flush in-memory usage counters to DB every 60 seconds."""
+    while True:
+        await asyncio.sleep(60)
+        try:
+            tracker = get_usage_tracker()
+            key_repo = get_key_repo()
+            tracker.flush(key_repo)
+        except Exception:
+            logger.exception("Usage flush failed")
 
 
 async def _gc_loop() -> None:
@@ -64,6 +89,7 @@ def _title_for_status(status: int) -> str:
         410: "Gone",
         413: "Payload Too Large",
         415: "Unsupported Media Type",
+        429: "Too Many Requests",
         500: "Internal Server Error",
         503: "Service Unavailable",
     }.get(status, "Error")
@@ -71,14 +97,25 @@ def _title_for_status(status: int) -> str:
 
 def _identify_key(request: Request, settings) -> str:
     """Derive key name for audit logging (NOT used for auth decisions)."""
+    import hashlib
+
     auth = request.headers.get("Authorization", "")
     if not auth.startswith("Bearer "):
         return "-"
     presented = auth.removeprefix("Bearer ").strip()
     if settings.main_key and presented == settings.main_key:
-        return "main"
+        return "env:main"
     if settings.feed_key and presented == settings.feed_key:
-        return "feed"
+        return "env:feed"
+    # Try DB key lookup for audit log
+    try:
+        key_repo = get_key_repo()
+        key_hash = hashlib.sha256(presented.encode("utf-8")).hexdigest()
+        api_key = key_repo.get_key_by_hash(key_hash)
+        if api_key:
+            return api_key.name
+    except Exception:
+        pass
     return "-"
 
 
@@ -162,4 +199,5 @@ def create_app() -> FastAPI:
     app.include_router(jobs.router)
     app.include_router(cases.router)
     app.include_router(iocs.router)
+    app.include_router(admin.router)
     return app

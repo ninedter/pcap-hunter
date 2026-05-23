@@ -7,7 +7,7 @@ from dataclasses import dataclass
 
 
 class NoKeysConfiguredError(RuntimeError):
-    """Raised when neither API key env var is set."""
+    """Raised when no auth keys exist (neither env vars nor DB keys)."""
 
 
 @dataclass(frozen=True)
@@ -30,8 +30,8 @@ class APISettings:
     def from_env(cls) -> "APISettings":
         main = os.environ.get("PCAP_HUNTER_API_KEY") or None
         feed = os.environ.get("PCAP_HUNTER_FEED_KEY") or None
-        if not main and not feed:
-            raise NoKeysConfiguredError("At least one of PCAP_HUNTER_API_KEY or PCAP_HUNTER_FEED_KEY must be set.")
+        # Env-var keys are optional when DB-backed keys exist.
+        # The app checks for at least one auth source at startup.
 
         cpu = max(1, (os.cpu_count() or 2) // 2)
         return cls(

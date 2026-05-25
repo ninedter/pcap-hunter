@@ -48,3 +48,6 @@ data/
 .claude/
 CLAUDE.local.md
 
+# Superpowers auto-generated specs and plans (session artifacts, not source)
+docs/superpowers/
+

@@ -17,6 +17,7 @@ By combining industry-standard network analysis tools (**Zeek**, **Tshark**, **P
 
 - [Visual Tour](#visual-tour)
 - [Key Features](#key-features)
+- [Integrations API](#integrations-api)
 - [Architecture](#architecture)
 - [Installation](#installation)
 - [Quick Start](#quick-start)
@@ -86,7 +87,13 @@ investigation notes, status, and search — stored in a local SQLite database.
 
 ![Cases tab](docs/images/07-cases.png)
 
-### 8. Config — centralized settings
+### 8. API Keys — manage programmatic access
+
+Create, revoke, and monitor API keys for the Integrations API. Each key has its own
+scope (full or feed-only), optional expiration, per-key rate limits, and a usage
+sparkline. Environment-variable keys are shown as read-only bootstrap entries.
+
+### 9. Config — centralized settings
 
 LLM endpoint, API keys (PBKDF2-encrypted at rest), home location for the world map,
 OSINT provider toggles, binary paths, and pipeline thresholds — all in one place
@@ -166,6 +173,18 @@ with per-section clear buttons.
 - **YARA Scanner** — Scan carved files with custom/community YARA rules.
 - **Safe Storage** — Quarantined directory with path traversal and symlink protection.
 
+### Integrations API (REST)
+- **PCAP Ingestion** — `POST /api/v1/pcaps` accepts multipart uploads, queues background analysis, and returns a job ID for polling.
+- **Job Tracking** — `GET /api/v1/jobs/{id}` returns stage-level progress, percent complete, and timestamps.
+- **IOC Feed Egress** — Pull extracted indicators as JSON, CSV, or STIX 2.1 with ETag caching, cursor pagination, and score/type/date filters.
+- **Case Retrieval** — `GET /api/v1/cases/{id}` and PDF report download.
+- **DB-Backed API Key Management** — Create, revoke, and rotate keys via admin endpoints or the Streamlit API Keys tab. Each key carries a scope (full / feed-only), optional expiration, and per-key rate limit.
+- **Backward-Compatible Auth** — Environment-variable keys (`PCAP_HUNTER_API_KEY`, `PCAP_HUNTER_FEED_KEY`) still work as bootstrap/fallback alongside DB keys.
+- **RFC 7807 Errors** — All error responses use `application/problem+json` with request-ID tracing.
+- **Ops-Ready** — Health/readiness endpoints, hourly GC sweep, request audit logging, CORS allowlist.
+
+> Full endpoint reference, curl examples, and SIEM integration guides: **[docs/API.md](docs/API.md)**
+
 ### Interactive Dashboard & World Map
 - **Threat Summary Panel** — At-a-glance risk level (Critical/High/Medium/Low) with corroboration-based escalation, alert count, beacon candidates, YARA hits, and certificate issues.
 - **World Map** — Threat-level coloring, connectivity arcs with volume-based thickness, configurable home location.
@@ -203,11 +222,46 @@ Integrates with leading threat intelligence providers:
 
 ---
 
+## Integrations API
+
+PCAP Hunter ships a FastAPI-based REST API alongside the Streamlit UI so SOAR platforms, SIEM systems, and custom scripts can submit PCAPs and consume IOCs programmatically.
+
+```bash
+# Start the API server (port 8000)
+PCAP_HUNTER_API_KEY=changeme uvicorn app.api.app:app --host 0.0.0.0 --port 8000
+
+# Submit a PCAP for analysis
+curl -X POST http://localhost:8000/api/v1/pcaps \
+  -H "Authorization: Bearer changeme" \
+  -F "pcap=@capture.pcap" \
+  -F "name=Suspicious traffic"
+
+# Poll job status
+curl http://localhost:8000/api/v1/jobs/j_abc123 \
+  -H "Authorization: Bearer changeme"
+
+# Pull IOC feed (JSON)
+curl "http://localhost:8000/api/v1/iocs.json?min_score=50" \
+  -H "Authorization: Bearer changeme"
+```
+
+The API reuses the same 10-stage pipeline, SQLite case database, and configuration as the Streamlit app. Submissions create regular Cases visible in both interfaces.
+
+> Complete endpoint reference, authentication guide, SIEM integration examples, and configuration: **[docs/API.md](docs/API.md)**
+
+---
+
 ## Architecture
 
 ```
 app/
 ├── analysis/        # Correlation engine, flow analysis, IOC scorer, narrator
+├── api/             # FastAPI integrations API (REST endpoints, auth, key mgmt)
+│   ├── routers/     # health, pcaps, jobs, cases, iocs, admin
+│   ├── key_auth.py  # DB + env-var authentication pipeline
+│   ├── key_repository.py  # SQLite API key store
+│   ├── rate_limiter.py    # Sliding-window per-key rate limiter
+│   └── worker.py    # Background pipeline execution (ProcessPoolExecutor)
 ├── database/        # Case management (SQLite)
 ├── llm/             # LLM client & multi-language report generation
 ├── pipeline/        # 10-stage analysis pipeline
@@ -422,6 +476,7 @@ PCAP Hunter uses **production-shape test data**, not simplified inputs. See `tes
 ## Documentation
 
 - **[User Manual (English)](docs/en/USER_MANUAL.md)** — end-user guide
+- **[Integrations API Reference](docs/API.md)** — REST endpoints, authentication, SIEM integration
 - **[中文說明 (Traditional Chinese)](docs/zh-TW/README.md)** — 繁體中文版
 - **[CLAUDE.md](CLAUDE.md)** — contributor/AI guide: conventions, testing discipline, known bug patterns
 - **[docs/roadmap.md](docs/roadmap.md)** — planned work

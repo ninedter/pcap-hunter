@@ -241,15 +241,59 @@ class BatchPhaseTracker:
         self.file_text.write(msg)
 
 
+class _ThreadSafePhaseHandle:
+    """Wraps a Streamlit PhaseHandle to be safe for use from worker threads.
+
+    The pipeline runner executes PyShark and Zeek in parallel via ThreadPoolExecutor.
+    Streamlit's PhaseHandle accesses ``st.session_state`` and widget delta generators,
+    which require the ScriptRunContext only available on the main script thread.
+    Calls from worker threads would raise exceptions that abort the analysis stage.
+
+    This wrapper catches and logs those exceptions so the analysis continues
+    even if progress UI updates fail from a thread.
+    """
+
+    def __init__(self, inner: PhaseHandle) -> None:
+        self._inner = inner
+
+    def set(self, pct: float, msg: str = "") -> None:
+        try:
+            self._inner.set(pct, msg)
+        except Exception:
+            pass  # UI update failed from thread — analysis continues
+
+    def done(self, msg: str = "Done") -> None:
+        try:
+            self._inner.done(msg)
+        except Exception:
+            pass
+
+    def should_skip(self) -> bool:
+        try:
+            return self._inner.should_skip()
+        except Exception:
+            return False  # default: don't skip
+
+    def is_done(self) -> bool:
+        try:
+            return self._inner.is_done()
+        except Exception:
+            return False
+
+
 class StreamlitProgressAdapter:
     """Adapts an existing PhaseTracker (Streamlit) to the headless Progress protocol.
 
     Allows pipeline orchestration code to call ``progress.start_phase()`` regardless
     of whether it's driven by the UI or by the API worker.
+
+    Phase handles are wrapped in ``_ThreadSafePhaseHandle`` so they can be safely
+    passed to worker threads (e.g. the PyShark+Zeek ThreadPoolExecutor).
     """
 
     def __init__(self, tracker: PhaseTracker) -> None:
         self._tracker = tracker
 
-    def start_phase(self, title: str) -> PhaseHandle:
-        return self._tracker.next_phase(title)
+    def start_phase(self, title: str) -> _ThreadSafePhaseHandle:
+        inner = self._tracker.next_phase(title)
+        return _ThreadSafePhaseHandle(inner)

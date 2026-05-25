@@ -72,7 +72,7 @@ def test_overall_caps_at_100_when_overshot():
 def test_streamlit_progress_satisfies_protocol():
     """StreamlitProgressAdapter delegates start_phase to the wrapped tracker."""
     from app.pipeline.progress import Progress  # noqa: F401  (protocol used as documentation)
-    from app.pipeline.state import StreamlitProgressAdapter
+    from app.pipeline.state import StreamlitProgressAdapter, _ThreadSafePhaseHandle
 
     class _StubTracker:
         def __init__(self) -> None:
@@ -87,4 +87,6 @@ def test_streamlit_progress_satisfies_protocol():
     handle = adapter.start_phase("Packet counting")
 
     assert tracker.calls == ["Packet counting"]
-    assert handle == "handle:Packet counting"
+    # The adapter wraps the inner handle in a thread-safe wrapper
+    assert isinstance(handle, _ThreadSafePhaseHandle)
+    assert handle._inner == "handle:Packet counting"

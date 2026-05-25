@@ -169,9 +169,13 @@ def run_pipeline(
         _emit_heartbeat()
 
     # --- Stages 2 & 3: PyShark + Zeek (parallel when both enabled) ---
-    def _run_pyshark() -> None:
+    #
+    # IMPORTANT: Phase handles must be created on the main thread because
+    # Streamlit widget creation (st.progress, st.caption, etc.) requires
+    # the ScriptRunContext which is only available on the main thread.
+    # Worker threads receive pre-created handles and only call set()/done().
+    def _run_pyshark(h) -> None:
         nonlocal features
-        h = progress.start_phase("Parsing Packets")
         try:
             features = parse_pcap_pyshark(
                 pcap_path,
@@ -189,9 +193,8 @@ def run_pipeline(
             warnings.append(WARNING_PYSHARK_FAILED)
             h.done("Parsing failed.")
 
-    def _run_zeek() -> None:
+    def _run_zeek(h) -> None:
         nonlocal zeek_tables
-        h = progress.start_phase("Zeek processing")
         try:
             logs = run_zeek(pcap_path, str(C.ZEEK_DIR), phase=h)
         except Exception as exc:
@@ -213,16 +216,22 @@ def run_pipeline(
             h.done("Zeek produced no logs.")
 
     if options.do_pyshark and options.do_zeek:
+        # Create phase handles on the main thread (widget creation needs ScriptRunContext),
+        # then pass them to worker threads which only update existing widgets.
+        h_pyshark = progress.start_phase("Parsing Packets")
+        h_zeek = progress.start_phase("Zeek processing")
         with ThreadPoolExecutor(max_workers=2, thread_name_prefix="pipeline") as pool:
-            futures = [pool.submit(_run_pyshark), pool.submit(_run_zeek)]
+            futures = [pool.submit(_run_pyshark, h_pyshark), pool.submit(_run_zeek, h_zeek)]
             for fut in as_completed(futures):
                 fut.result()  # re-raises if the callable raised past our try/except
         _emit_heartbeat()
     elif options.do_pyshark:
-        _run_pyshark()
+        h_pyshark = progress.start_phase("Parsing Packets")
+        _run_pyshark(h_pyshark)
         _emit_heartbeat()
     elif options.do_zeek:
-        _run_zeek()
+        h_zeek = progress.start_phase("Zeek processing")
+        _run_zeek(h_zeek)
         _emit_heartbeat()
 
     # Merge Zeek DNS queries into artifacts (only meaningful when both stages ran)

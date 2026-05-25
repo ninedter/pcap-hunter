@@ -104,7 +104,7 @@ def render_export_buttons(data, prefix: str, key_suffix: str = "", is_dataframe:
 
 
 def make_tabs():
-    """Top tabs: Upload • Progress • Dashboard • LLM Analysis • OSINT • Results • Cases • Config."""
+    """Top tabs: Upload • Progress • Dashboard • LLM Analysis • OSINT • Results • Cases • API Keys • Config."""
     tab_names = [
         "📤 Upload",
         "📈 Progress",
@@ -113,10 +113,11 @@ def make_tabs():
         "🕵️ OSINT",
         "📋 Raw Data",
         "📁 Cases",
+        "🔑 API Keys",
         "⚙️ Config",
     ]
     tabs = st.tabs(tab_names)
-    return tabs[0], tabs[1], tabs[2], tabs[3], tabs[4], tabs[5], tabs[6], tabs[7]
+    return tabs[0], tabs[1], tabs[2], tabs[3], tabs[4], tabs[5], tabs[6], tabs[7], tabs[8]
 
 
 def make_progress_panel(container):

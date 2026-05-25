@@ -53,5 +53,9 @@ COPY app/ /app/
 RUN useradd -m runner && mkdir -p /data && chown -R runner:runner /app /data
 USER runner
 
-EXPOSE 8501
+EXPOSE 8000 8501
+
+# Default: run Streamlit. Override with:
+#   docker run ... pcap-hunter make run-api
+# to run the integrations API instead.
 CMD ["streamlit", "run", "/app/main.py", "--server.port=8501", "--server.address=0.0.0.0"]

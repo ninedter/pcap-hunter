@@ -51,3 +51,8 @@ yara-python>=4.3.0,<5.0
 weasyprint>=60.0,<63.0
 Jinja2>=3.1.0,<4.0
 markdown>=3.5.0,<4.0
+
+# Phase 4: Integrations API
+fastapi>=0.110,<1.0
+uvicorn[standard]>=0.27,<1.0
+python-multipart>=0.0.9,<1.0

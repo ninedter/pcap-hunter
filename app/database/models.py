@@ -7,6 +7,23 @@ from datetime import datetime
 from enum import Enum
 
 
+class JobStatus(str, Enum):
+    """Job lifecycle states."""
+
+    QUEUED = "queued"
+    RUNNING = "running"
+    DONE = "done"
+    FAILED = "failed"
+    CANCELLED = "cancelled"
+
+    @classmethod
+    def from_str(cls, value: str) -> "JobStatus":
+        try:
+            return cls(value.lower())
+        except ValueError:
+            return cls.QUEUED
+
+
 class CaseStatus(str, Enum):
     """Case status enumeration."""
 
@@ -278,3 +295,76 @@ class Case:
         self.status = CaseStatus.OPEN
         self.closed_at = None
         self.updated_at = datetime.now()
+
+
+@dataclass
+class Job:
+    """Async pipeline execution job."""
+
+    id: str = ""
+    case_id: str = ""
+    pcap_path: str = ""
+    options_json: str | None = None
+    status: JobStatus = JobStatus.QUEUED
+    progress_stage: str | None = None
+    progress_done: int = 0
+    progress_total: int = 10
+    submitted_at: datetime = field(default_factory=datetime.now)
+    started_at: datetime | None = None
+    finished_at: datetime | None = None
+    heartbeat_at: datetime | None = None
+    error_code: str | None = None
+    error_detail: str | None = None
+    result_json: str | None = None
+
+    def to_dict(self) -> dict:
+        return {
+            "id": self.id,
+            "case_id": self.case_id,
+            "pcap_path": self.pcap_path,
+            "options_json": self.options_json,
+            "status": self.status.value,
+            "progress_stage": self.progress_stage,
+            "progress_done": self.progress_done,
+            "progress_total": self.progress_total,
+            "submitted_at": self.submitted_at.isoformat() if self.submitted_at else None,
+            "started_at": self.started_at.isoformat() if self.started_at else None,
+            "finished_at": self.finished_at.isoformat() if self.finished_at else None,
+            "heartbeat_at": self.heartbeat_at.isoformat() if self.heartbeat_at else None,
+            "error_code": self.error_code,
+            "error_detail": self.error_detail,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "Job":
+        submitted_at = data.get("submitted_at")
+        started_at = data.get("started_at")
+        finished_at = data.get("finished_at")
+        heartbeat_at = data.get("heartbeat_at")
+
+        if isinstance(submitted_at, str):
+            submitted_at = datetime.fromisoformat(submitted_at)
+        if isinstance(started_at, str):
+            started_at = datetime.fromisoformat(started_at)
+        if isinstance(finished_at, str):
+            finished_at = datetime.fromisoformat(finished_at)
+        if isinstance(heartbeat_at, str):
+            heartbeat_at = datetime.fromisoformat(heartbeat_at)
+
+        return cls(
+            id=data.get("id", ""),
+            case_id=data.get("case_id", ""),
+            pcap_path=data.get("pcap_path", ""),
+            options_json=data.get("options_json"),
+            status=JobStatus.from_str(data.get("status", "queued")),
+            progress_stage=data.get("progress_stage"),
+            progress_done=data.get("progress_done", 0),
+            progress_total=data.get("progress_total", 10),
+            submitted_at=submitted_at or datetime.now(),
+            started_at=started_at,
+            finished_at=finished_at,
+            heartbeat_at=heartbeat_at,
+            error_code=data.get("error_code"),
+            error_detail=data.get("error_detail"),
+            result_json=data.get("result_json"),
+        )

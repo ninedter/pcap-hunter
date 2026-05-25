@@ -1,0 +1,27 @@
+# docker-compose.yml — recommended deployment for two-service setups
+services:
+  pcap-hunter-ui:
+    build: .
+    image: pcap-hunter:latest
+    command: ["streamlit", "run", "/app/main.py", "--server.port=8501", "--server.address=0.0.0.0"]
+    ports:
+      - "127.0.0.1:8501:8501"
+    volumes:
+      - ./data:/app/data
+    restart: unless-stopped
+
+  pcap-hunter-api:
+    image: pcap-hunter:latest
+    command: ["uvicorn", "app.api.app:create_app", "--factory", "--host", "0.0.0.0", "--port", "8000"]
+    ports:
+      - "127.0.0.1:8000:8000"
+    environment:
+      PCAP_HUNTER_API_KEY: "${PCAP_HUNTER_API_KEY:?must be set}"
+      PCAP_HUNTER_FEED_KEY: "${PCAP_HUNTER_FEED_KEY:-}"
+      PCAP_HUNTER_API_HOST: "0.0.0.0"
+      PYTHONPATH: "."
+    volumes:
+      - ./data:/app/data
+    depends_on:
+      - pcap-hunter-ui
+    restart: unless-stopped

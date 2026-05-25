@@ -6,7 +6,6 @@ import sys
 # Ensure top-level repo path importable
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 
-import concurrent.futures
 import logging
 import os
 import time
@@ -17,12 +16,8 @@ import streamlit as st
 from app import config as C
 from app.llm.client import generate_report
 from app.pipeline.batch import BatchProcessor, PCAPResult
-from app.pipeline.beacon import rank_beaconing
-from app.pipeline.carve import CarveError, carve_http_payloads
 from app.pipeline.geoip import GeoIP
 from app.pipeline.osint import enrich as osint_enrich
-from app.pipeline.pcap_count import count_packets_fast
-from app.pipeline.pyshark_pass import parse_pcap_pyshark
 from app.pipeline.state import (
     BatchPhaseTracker,
     PhaseTracker,
@@ -30,7 +25,6 @@ from app.pipeline.state import (
     is_run_active,
     reset_run_state,
 )
-from app.pipeline.zeek import load_zeek_any, run_zeek
 from app.ui.charts import (
     build_sankey_html,
     plot_attack_timeline,
@@ -114,36 +108,6 @@ def cfg_get(name: str, env_key: str, default):
     return st.session_state.get(name) or os.getenv(env_key, default)
 
 
-# ---------------------------------------------------------------------------
-# Pipeline worker functions (thread-safe — no Streamlit calls)
-# ---------------------------------------------------------------------------
-
-
-def _pyshark_worker(pcap_path: str, limit_packets: int | None, total_packets: int | None) -> dict:
-    """Run PyShark/tshark parsing in a worker thread (no UI updates)."""
-    return parse_pcap_pyshark(
-        pcap_path,
-        limit_packets=limit_packets,
-        phase=None,
-        total_packets=total_packets,
-        progress_every=500,
-    )
-
-
-def _zeek_worker(pcap_path: str, zeek_dir: str) -> dict:
-    """Run Zeek in a worker thread (no UI updates)."""
-    return run_zeek(pcap_path, zeek_dir, phase=None)
-
-
-def _carve_worker(pcap_path: str, carve_dir: str) -> list:
-    """Run HTTP carving in a worker thread (no UI updates)."""
-    try:
-        return carve_http_payloads(pcap_path, carve_dir, phase=None)
-    except CarveError as e:
-        logger.warning("HTTP carving failed: %s", e)
-        return []
-
-
 def _run_single_pcap_pipeline(
     pcap_path: str,
     tracker: PhaseTracker,
@@ -159,169 +123,52 @@ def _run_single_pcap_pipeline(
 ) -> PCAPResult:
     """Run stages 1-9 for a single PCAP file and return a PCAPResult.
 
-    Stages 2 (PyShark) and 3 (Zeek) run in parallel when
-    ``C.PARALLEL_PARSE_ENABLED`` is True.  Stage 7 (Carving) runs in
-    parallel with stages 4-6 (DNS/TLS/Beaconing).
+    Stages 1-7 are delegated to the headless pipeline runner (which parallelizes
+    PyShark+Zeek via ThreadPoolExecutor).  Stages 8-9 (YARA, OSINT) remain here
+    because they interact with session_state or need OSINT API keys from the UI.
     """
-    filename = pathlib.Path(pcap_path).name
-    phase_dict = dict(phases)
+    from app.pipeline.runner import PipelineOptions, run_pipeline
+    from app.pipeline.state import StreamlitProgressAdapter
 
-    features: dict = {
-        "flows": [],
-        "artifacts": {"ips": [], "domains": [], "urls": [], "hashes": [], "ja3": []},
-    }
-    zeek_tables: dict = {}
-    beacon_df = pd.DataFrame()
-    carved: list = []
-    osint_data: dict = {"ips": {}, "domains": {}, "ja3": {}}
-    dns_result: dict | None = None
-    tls_result: dict | None = None
-    total_pkts: int | None = None
+    filename = pathlib.Path(pcap_path).name
+
+    options = PipelineOptions(
+        osint_enabled=bool(osint_keys),
+        llm_enabled=False,
+        do_pyshark=do_pyshark,
+        do_zeek=do_zeek,
+        do_carve=do_carve,
+        do_yara=do_yara,
+        pre_count=pre_count,
+        pyshark_packet_limit=limit_packets,
+        osint_top_n=osint_top_n,
+    )
+
+    progress = StreamlitProgressAdapter(tracker)
 
     try:
-        # --- Stage 1: Packet counting ---
-        if phase_dict.get("Packet counting (tshark)", False):
-            p = tracker.next_phase("Packet counting (tshark)")
-            p.set(5, "Counting packets\u2026")
-            total_pkts = count_packets_fast(pcap_path)
-            p.done(f"Found ~{total_pkts:,} packets." if total_pkts else "Count unavailable.")
+        result = run_pipeline(
+            pcap_path=pcap_path,
+            case_id=pathlib.Path(pcap_path).stem,
+            options=options,
+            progress=progress,
+        )
 
-        # --- Stages 2 & 3: PyShark + Zeek (parallel) ---
-        pyshark_needed = phase_dict.get("Parsing Packets", False)
-        zeek_needed = phase_dict.get("Zeek processing", False)
+        features = result.features
+        zeek_tables = result.zeek_tables
+        beacon_df = pd.DataFrame.from_records(result.beacon_df_records) if result.beacon_df_records else pd.DataFrame()
 
-        if C.PARALLEL_PARSE_ENABLED and pyshark_needed and zeek_needed:
-            p_pyshark = tracker.next_phase("Parsing Packets")
-            p_zeek = tracker.next_phase("Zeek processing")
-            p_pyshark.set(5, "Parsing packets (parallel)\u2026")
-            p_zeek.set(5, "Running Zeek (parallel)\u2026")
-
-            with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
-                fut_pyshark = executor.submit(_pyshark_worker, pcap_path, limit_packets, total_pkts)
-                fut_zeek = executor.submit(_zeek_worker, pcap_path, str(C.ZEEK_DIR))
-
-                for future in concurrent.futures.as_completed([fut_pyshark, fut_zeek]):
-                    try:
-                        if future is fut_pyshark:
-                            features = future.result()
-                            p_pyshark.done("Packet parsing complete.")
-                        else:
-                            logs = future.result()
-                            if logs:
-                                for name, path in logs.items():
-                                    try:
-                                        df = load_zeek_any(path)
-                                    except Exception:
-                                        df = pd.DataFrame()
-                                    zeek_tables[name] = df.head(2000)
-                            p_zeek.done("Zeek logs loaded.")
-                    except Exception as exc:
-                        if future is fut_pyshark:
-                            logger.error("PyShark failed: %s", exc)
-                            p_pyshark.done("Parsing failed.")
-                        else:
-                            logger.error("Zeek failed: %s", exc)
-                            p_zeek.done("Zeek failed.")
-        else:
-            # Sequential fallback
-            if pyshark_needed:
-                p = tracker.next_phase("Parsing Packets")
-                features = parse_pcap_pyshark(
-                    pcap_path,
-                    limit_packets=limit_packets,
-                    phase=p,
-                    total_packets=total_pkts,
-                    progress_every=250,
-                )
-                p.done("Packet parsing complete.")
-
-            if zeek_needed:
-                p = tracker.next_phase("Zeek processing")
-                try:
-                    logs = run_zeek(pcap_path, str(C.ZEEK_DIR), phase=p)
-                except Exception as e:
-                    logs = {}
-                    logger.error("Zeek failed: %s", e)
-                if logs:
-                    for name, path in logs.items():
-                        try:
-                            df = load_zeek_any(path)
-                        except Exception:
-                            df = pd.DataFrame()
-                        zeek_tables[name] = df.head(2000)
-                p.done("Zeek logs loaded.")
-
-        # Merge Zeek DNS queries into artifacts
-        from app.pipeline.zeek import merge_zeek_dns
-
-        features = merge_zeek_dns(zeek_tables, features)
-
-        # --- Stages 4-6 + 7 (parallel carving) ---
-        carve_future = None
-        if C.PARALLEL_PARSE_ENABLED and phase_dict.get("HTTP carving (tshark)", False) and do_carve:
-            carve_executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
-            carve_future = carve_executor.submit(_carve_worker, pcap_path, str(C.CARVE_DIR))
-
-        # Stage 4: DNS Analysis
-        if phase_dict.get("DNS Analysis", False):
-            p = tracker.next_phase("DNS Analysis")
-            from app.pipeline.dns_analysis import analyze_dns
-
-            dns_result = analyze_dns(zeek_tables, features, phase=p)
-
-        # Stage 5: TLS Certificate Analysis
-        if phase_dict.get("TLS Certificate Analysis", False):
-            p = tracker.next_phase("TLS Certificate Analysis")
-            from app.pipeline.tls_certs import analyze_certificates
-
-            tls_result = analyze_certificates(pcap_path=pcap_path, zeek_tables=zeek_tables, phase=p)
-
-        # Stage 6: Beaconing
-        p = tracker.next_phase("Beaconing ranking")
-        if features.get("flows"):
-            p.set(30, "Scoring flows\u2026")
-            beacon_df = rank_beaconing(features["flows"], top_n=20)
-            if not isinstance(beacon_df, pd.DataFrame):
-                beacon_df = pd.DataFrame()
-            p.set(90, "Sorting top candidates\u2026")
-        p.done("Beaconing step complete.")
-
-        # Stage 7: Collect carving result (or run sequentially)
-        if carve_future is not None:
-            p_carve = tracker.next_phase("HTTP carving (tshark)")
-            p_carve.set(50, "Waiting for HTTP carving\u2026")
-            try:
-                carved = carve_future.result()
-            except Exception as e:
-                logger.error("HTTP carving failed: %s", e)
-                carved = []
-            carve_executor.shutdown(wait=False)
-            p_carve.done("HTTP carving complete.")
-        elif phase_dict.get("HTTP carving (tshark)", False) and do_carve:
-            p = tracker.next_phase("HTTP carving (tshark)")
-            try:
-                carved = carve_http_payloads(pcap_path, str(C.CARVE_DIR), phase=p)
-            except CarveError as e:
-                logger.error("HTTP carving failed: %s", e)
-                carved = []
-            p.done("HTTP carving complete.")
-
-        # Extract hashes from carved payloads
-        for item in carved:
-            h = item.get("sha256")
-            if h:
-                features["artifacts"]["hashes"].append(h)
-        features["artifacts"]["hashes"] = uniq_sorted(features["artifacts"]["hashes"])
-
-        # Stage 8: YARA Scanning
+        # --- Stage 8: YARA Scanning ---
+        phase_dict = dict(phases)
         if phase_dict.get("YARA Scanning", False) and do_yara:
             p = tracker.next_phase("YARA Scanning")
             from app.pipeline.yara_scan import scan_carved_files
 
-            _yara = scan_carved_files(carved, phase=p)
+            _yara = scan_carved_files(result.carved_items, phase=p)
             st.session_state["yara_results"] = _yara
 
-        # Stage 9: OSINT enrichment
+        # --- Stage 9: OSINT enrichment ---
+        osint_data: dict = {"ips": {}, "domains": {}, "ja3": {}}
         p = tracker.next_phase("OSINT enrichment")
         feats = (
             features
@@ -344,7 +191,6 @@ def _run_single_pcap_pipeline(
 
         all_public = [ip for ip in features.get("artifacts", {}).get("ips", []) if is_public_ipv4(ip)]
         rdns_map = bulk_resolve_ips(all_public, max_workers=C.RDNS_MAX_WORKERS)
-        # Backfill PTR into OSINT data for IPs not already resolved
         for ip, hostname in rdns_map.items():
             if ip in osint_data.get("ips", {}) and "ptr" not in osint_data["ips"][ip]:
                 osint_data["ips"][ip]["ptr"] = hostname
@@ -360,9 +206,9 @@ def _run_single_pcap_pipeline(
         zeek_tables=zeek_tables,
         osint=osint_data,
         beacon_df=beacon_df if isinstance(beacon_df, pd.DataFrame) else None,
-        dns_analysis=dns_result or {},
-        tls_analysis=tls_result or {},
-        packet_count=total_pkts or 0,
+        dns_analysis=result.dns_analysis or {},
+        tls_analysis=result.tls_analysis or {},
+        packet_count=result.packet_count,
     )
 
 
@@ -469,7 +315,9 @@ if _missing_bins:
     )
 
 # Tabs
-tab_upload, tab_progress, tab_dashboard, tab_llm, tab_osint, tab_results, tab_cases, tab_config = make_tabs()
+tab_upload, tab_progress, tab_dashboard, tab_llm, tab_osint, tab_results, tab_cases, tab_api_keys, tab_config = (
+    make_tabs()
+)
 
 # Defaults
 for k, v in [
@@ -1588,7 +1436,13 @@ with tab_cases:
 
     render_cases_tab()
 
-# 7) Config ----------------------
+# 7) API Keys --------------------
+with tab_api_keys:
+    from app.ui.api_keys_tab import render_api_keys_tab
+
+    render_api_keys_tab()
+
+# 8) Config ----------------------
 with tab_config:
     render_config_tab()
 

@@ -38,6 +38,7 @@ htmlcov/
 # Project specific
 data/
 *.pcap
+!tests/fixtures/*.pcap
 *.log
 .DS_Store
 
@@ -46,4 +47,7 @@ data/
 # everything under .claude/ is session-local and must not be committed.
 .claude/
 CLAUDE.local.md
+
+# Superpowers auto-generated specs and plans (session artifacts, not source)
+docs/superpowers/
 

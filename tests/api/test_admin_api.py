@@ -124,6 +124,18 @@ class TestUpdateKey:
         assert r.json()["name"] == "new-name"
         assert r.json()["scope"] == "full"
 
+    def test_update_rate_limit_to_zero_clears_to_unlimited(self, client):
+        cr = client.post(
+            "/api/v1/admin/keys",
+            json={"name": "limited", "rate_limit_rpm": 60},
+            headers=AUTH,
+        )
+        key_id = cr.json()["id"]
+        # Setting rate_limit_rpm=0 clears the limit (unlimited)
+        r = client.patch(f"/api/v1/admin/keys/{key_id}", json={"rate_limit_rpm": 0}, headers=AUTH)
+        assert r.status_code == 200
+        assert r.json()["rate_limit_rpm"] is None
+
     def test_update_nonexistent_key_returns_404(self, client):
         r = client.patch("/api/v1/admin/keys/k_nonexist", json={"name": "x"}, headers=AUTH)
         assert r.status_code == 404

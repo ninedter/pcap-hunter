@@ -36,6 +36,9 @@ class UsageTracker:
     def flush(self, key_repo) -> None:
         """Flush accumulated counts to the database.
 
+        On per-key failure the entry is restored to the in-memory maps so it
+        will be retried on the next flush cycle instead of being silently lost.
+
         Args:
             key_repo: KeyRepository instance for DB writes.
         """
@@ -49,6 +52,9 @@ class UsageTracker:
             return
 
         today = date.today().isoformat()
+        failed_counts: dict[str, int] = {}
+        failed_last_used: dict[str, float] = {}
+
         for key_id, count in counts.items():
             try:
                 key_repo.increment_usage(key_id, today, count)
@@ -57,6 +63,19 @@ class UsageTracker:
                     key_repo.touch_key_last_used(key_id, ts)
             except Exception:
                 logger.warning("Failed to flush usage for key %s", key_id, exc_info=True)
+                failed_counts[key_id] = count
+                if key_id in last_used:
+                    failed_last_used[key_id] = last_used[key_id]
+
+        # Restore failed entries so they are retried on the next flush
+        if failed_counts:
+            with self._lock:
+                for key_id, count in failed_counts.items():
+                    self._counts[key_id] = self._counts.get(key_id, 0) + count
+                for key_id, ts in failed_last_used.items():
+                    existing = self._last_used.get(key_id)
+                    if existing is None or existing < ts:
+                        self._last_used[key_id] = ts
 
     def get_pending_count(self, key_id: str) -> int:
         """Get unflushed request count for a key (for testing/debugging)."""

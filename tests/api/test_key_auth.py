@@ -138,7 +138,8 @@ class TestAuthErrors:
             expires_at=datetime.now() - timedelta(days=1),
         )
         repo.create_key(api_key)
-        with pytest.raises(ValueError, match="key_expired"):
+        # Expired keys return the same generic error as invalid keys
+        with pytest.raises(ValueError, match="invalid_key"):
             authenticate(f"Bearer {raw_key}", settings, repo, rl, ut, Scope.FULL)
 
     def test_revoked_key_raises(self, tmp_path):
@@ -149,7 +150,8 @@ class TestAuthErrors:
         api_key = APIKey(key_hash=key_hash, key_prefix=raw_key[:8], name="revoked", scope=Scope.FULL)
         kid = repo.create_key(api_key)
         repo.revoke_key(kid)
-        with pytest.raises(ValueError, match="key_revoked"):
+        # Revoked keys return the same generic error as invalid keys
+        with pytest.raises(ValueError, match="invalid_key"):
             authenticate(f"Bearer {raw_key}", settings, repo, rl, ut, Scope.FULL)
 
 

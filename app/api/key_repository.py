@@ -41,6 +41,7 @@ class KeyRepository:
         """Initialize database schema."""
         conn = self._get_conn()
         try:
+            conn.execute("PRAGMA journal_mode=WAL")
             conn.executescript(
                 """
                 CREATE TABLE IF NOT EXISTS api_keys (
@@ -178,6 +179,16 @@ class KeyRepository:
         finally:
             conn.close()
 
+    # Hard-coded mapping from field names to SQL column names.
+    # This prevents SQL injection through dynamic column interpolation.
+    _UPDATABLE_COLUMNS: dict[str, str] = {
+        "name": "name",
+        "scope": "scope",
+        "description": "description",
+        "rate_limit_rpm": "rate_limit_rpm",
+        "expires_at": "expires_at",
+    }
+
     def update_key(self, key_id: str, **fields: object) -> APIKey | None:
         """Partially update an API key.
 
@@ -191,8 +202,7 @@ class KeyRepository:
         Returns:
             Updated APIKey object, or None if not found.
         """
-        allowed = {"name", "scope", "description", "rate_limit_rpm", "expires_at"}
-        to_set = {k: v for k, v in fields.items() if k in allowed}
+        to_set = {k: v for k, v in fields.items() if k in self._UPDATABLE_COLUMNS}
         if not to_set:
             return self.get_key_by_id(key_id)
 
@@ -200,18 +210,19 @@ class KeyRepository:
         try:
             set_clauses = []
             params: list[object] = []
-            for col, val in to_set.items():
-                set_clauses.append(f"{col} = ?")
-                if col == "scope" and isinstance(val, Scope):
+            for field_name, val in to_set.items():
+                sql_col = self._UPDATABLE_COLUMNS[field_name]
+                set_clauses.append(f"{sql_col} = ?")
+                if field_name == "scope" and isinstance(val, Scope):
                     params.append(val.value)
-                elif col == "expires_at" and isinstance(val, datetime):
+                elif field_name == "expires_at" and isinstance(val, datetime):
                     params.append(val.isoformat())
                 else:
                     params.append(val)
 
             params.append(key_id)
             conn.execute(
-                f"UPDATE api_keys SET {', '.join(set_clauses)} WHERE id = ?",  # noqa: S608
+                f"UPDATE api_keys SET {', '.join(set_clauses)} WHERE id = ?",  # noqa: S608 — columns from frozen mapping
                 params,
             )
             conn.commit()

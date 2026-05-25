@@ -3,7 +3,9 @@
 
 from __future__ import annotations
 
-from app.api.settings import APISettings
+import pytest
+
+from app.api.settings import APISettings, NoKeysConfiguredError
 
 
 def test_loads_main_key_from_env(monkeypatch):
@@ -46,3 +48,31 @@ def test_env_overrides(monkeypatch):
     assert s.port == 9000
     assert s.queue_depth == 50
     assert s.require_https is True
+
+
+def test_create_app_refuses_start_without_any_auth(monkeypatch, tmp_path):
+    """create_app() raises NoKeysConfiguredError when no auth sources exist."""
+    monkeypatch.delenv("PCAP_HUNTER_API_KEY", raising=False)
+    monkeypatch.delenv("PCAP_HUNTER_FEED_KEY", raising=False)
+    monkeypatch.setenv("PCAP_HUNTER_API_DB_PATH", str(tmp_path / "t.db"))
+
+    from app.api.deps import get_key_repo, get_queue, get_rate_limiter, get_repo, get_settings, get_usage_tracker
+
+    get_settings.cache_clear()
+    get_repo.cache_clear()
+    get_queue.cache_clear()
+    get_key_repo.cache_clear()
+    get_rate_limiter.cache_clear()
+    get_usage_tracker.cache_clear()
+
+    from app.api.app import create_app
+
+    with pytest.raises(NoKeysConfiguredError):
+        create_app()
+
+    get_settings.cache_clear()
+    get_repo.cache_clear()
+    get_queue.cache_clear()
+    get_key_repo.cache_clear()
+    get_rate_limiter.cache_clear()
+    get_usage_tracker.cache_clear()

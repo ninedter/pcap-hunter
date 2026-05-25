@@ -8,9 +8,10 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 
 from app.api.auth import Scope
-from app.api.deps import get_key_repo, require_full_scope
+from app.api.deps import get_key_repo, get_rate_limiter, require_full_scope
 from app.api.key_models import APIKey, generate_api_key
 from app.api.key_repository import KeyRepository
+from app.api.rate_limiter import RateLimiter
 
 router = APIRouter(prefix="/api/v1/admin", tags=["admin"])
 
@@ -30,7 +31,7 @@ class UpdateKeyRequest(BaseModel):
     name: str | None = Field(default=None, min_length=1, max_length=100)
     scope: str | None = Field(default=None, pattern=r"^(full|feed)$")
     description: str | None = Field(default=None, max_length=500)
-    rate_limit_rpm: int | None = Field(default=None, ge=1)
+    rate_limit_rpm: int | None = Field(default=None, ge=0)  # 0 = clear to unlimited
     expires_at: str | None = Field(default=None)
 
 
@@ -124,7 +125,8 @@ def update_key(
     if body.description is not None:
         updates["description"] = body.description
     if body.rate_limit_rpm is not None:
-        updates["rate_limit_rpm"] = body.rate_limit_rpm
+        # 0 means "clear to unlimited" (stored as NULL in DB)
+        updates["rate_limit_rpm"] = body.rate_limit_rpm if body.rate_limit_rpm > 0 else None
     if body.expires_at is not None:
         try:
             updates["expires_at"] = datetime.fromisoformat(body.expires_at)
@@ -152,8 +154,9 @@ def revoke_key(
     key_id: str,
     _scope: Scope = Depends(require_full_scope),
     repo: KeyRepository = Depends(get_key_repo),
+    rate_limiter: RateLimiter = Depends(get_rate_limiter),
 ) -> dict:
-    """Revoke an API key (soft delete)."""
+    """Revoke an API key (soft delete) and clear its rate limit state."""
     existing = repo.get_key_by_id(key_id)
     if existing is None:
         raise HTTPException(
@@ -162,6 +165,7 @@ def revoke_key(
         )
 
     repo.revoke_key(key_id)
+    rate_limiter.reset(key_id)
     return {"status": "revoked", "id": key_id}
 
 

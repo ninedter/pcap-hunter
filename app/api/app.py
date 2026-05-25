@@ -6,6 +6,8 @@ import asyncio
 import logging
 import os
 import pathlib
+import re
+import secrets
 import time
 import uuid
 from collections.abc import AsyncIterator
@@ -18,6 +20,7 @@ from fastapi.responses import JSONResponse
 from app.api.deps import get_key_repo, get_settings, get_usage_tracker
 from app.api.queue import recover_stale_running_jobs
 from app.api.routers import admin, cases, health, iocs, jobs, pcaps
+from app.api.settings import NoKeysConfiguredError
 
 logger = logging.getLogger(__name__)
 
@@ -103,9 +106,9 @@ def _identify_key(request: Request, settings) -> str:
     if not auth.startswith("Bearer "):
         return "-"
     presented = auth.removeprefix("Bearer ").strip()
-    if settings.main_key and presented == settings.main_key:
+    if settings.main_key and secrets.compare_digest(presented, settings.main_key):
         return "env:main"
-    if settings.feed_key and presented == settings.feed_key:
+    if settings.feed_key and secrets.compare_digest(presented, settings.feed_key):
         return "env:feed"
     # Try DB key lookup for audit log
     try:
@@ -119,9 +122,26 @@ def _identify_key(request: Request, settings) -> str:
     return "-"
 
 
+_REQUEST_ID_RE = re.compile(r"[^a-zA-Z0-9\-_.]")
+_REQUEST_ID_MAX_LEN = 128
+
+
+def _sanitize_request_id(value: str) -> str:
+    """Sanitize X-Request-ID to prevent header injection and log forging."""
+    return _REQUEST_ID_RE.sub("", value)[:_REQUEST_ID_MAX_LEN]
+
+
 def create_app() -> FastAPI:
     """Build the FastAPI app. Reads APISettings from env (refuses to start without keys)."""
-    settings = get_settings()  # raises NoKeysConfiguredError if neither key is set
+    settings = get_settings()
+
+    # Ensure at least one auth source exists (env vars OR DB keys).
+    key_repo = get_key_repo()
+    if not settings.main_key and not settings.feed_key and key_repo.count_active_keys() == 0:
+        raise NoKeysConfiguredError(
+            "No auth keys configured. Set PCAP_HUNTER_API_KEY / PCAP_HUNTER_FEED_KEY "
+            "env vars, or create at least one DB-backed key before starting."
+        )
 
     app = FastAPI(
         title="PCAP Hunter Integrations API",
@@ -144,7 +164,11 @@ def create_app() -> FastAPI:
 
     @app.middleware("http")
     async def request_id_middleware(request: Request, call_next):
-        rid = request.headers.get("X-Request-ID") or uuid.uuid4().hex
+        raw_rid = request.headers.get("X-Request-ID")
+        rid = _sanitize_request_id(raw_rid) if raw_rid else uuid.uuid4().hex
+        if not rid:  # sanitisation stripped everything
+            rid = uuid.uuid4().hex
+        request.state.request_id = rid  # stash for exception handler
         key_name = _identify_key(request, settings)
         start = time.monotonic()
         response = await call_next(request)
@@ -175,7 +199,12 @@ def create_app() -> FastAPI:
             detail_text = str(detail) if not isinstance(detail, str) else detail
             extras = {}
 
-        rid = request.headers.get("X-Request-ID", "")
+        # Use the sanitized request ID stored by the middleware, or sanitize
+        # the raw header if the middleware hasn't run yet.
+        rid = getattr(request.state, "request_id", None) or ""
+        if not rid:
+            raw = request.headers.get("X-Request-ID", "")
+            rid = _sanitize_request_id(raw) if raw else ""
         body = {
             "type": f"https://pcap-hunter.io/errors/{code}",
             "title": title,

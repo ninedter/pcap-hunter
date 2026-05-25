@@ -12,11 +12,14 @@ def client(monkeypatch, tmp_path):
     monkeypatch.setenv("PCAP_HUNTER_API_KEY", "MAIN")
     monkeypatch.setenv("PCAP_HUNTER_API_DB_PATH", str(tmp_path / "t.db"))
 
-    from app.api.deps import get_queue, get_repo, get_settings
+    from app.api.deps import get_key_repo, get_queue, get_rate_limiter, get_repo, get_settings, get_usage_tracker
 
     get_settings.cache_clear()
     get_repo.cache_clear()
     get_queue.cache_clear()
+    get_key_repo.cache_clear()
+    get_rate_limiter.cache_clear()
+    get_usage_tracker.cache_clear()
 
     from app.api.app import create_app
 
@@ -25,6 +28,9 @@ def client(monkeypatch, tmp_path):
     get_settings.cache_clear()
     get_repo.cache_clear()
     get_queue.cache_clear()
+    get_key_repo.cache_clear()
+    get_rate_limiter.cache_clear()
+    get_usage_tracker.cache_clear()
 
 
 def test_error_response_is_problem_json(client):

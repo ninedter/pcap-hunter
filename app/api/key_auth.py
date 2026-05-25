@@ -91,13 +91,14 @@ def authenticate(
     if api_key is None:
         raise ValueError("invalid_key")
 
-    # Step 4: Check key status
+    # Step 4: Check key status — use the same generic error for expired
+    # and revoked keys so callers cannot distinguish key states.
     if api_key.revoked_at is not None:
-        raise ValueError("key_revoked")
+        raise ValueError("invalid_key")
 
     if api_key.expires_at is not None:
         if datetime.now() > api_key.expires_at:
-            raise ValueError("key_expired")
+            raise ValueError("invalid_key")
 
     # Step 5: Check scope
     _check_scope(api_key.scope, required)

@@ -10,7 +10,9 @@ from __future__ import annotations
 SEVERITY_ORDER = ("critical", "high", "medium", "low", "clean", "unknown")
 
 SEVERITY_COLORS: dict[str, dict[str, str]] = {
-    "critical": {"bg": "#ff6b6b", "fg": "#ffffff", "rgba": "rgba(255,107,107,0.15)"},
+    # fg is #1a1a1a for every level: dark text passes WCAG AA on all bg hues
+    # (white on #ff6b6b is only 2.78:1), and severity is always paired with a label.
+    "critical": {"bg": "#ff6b6b", "fg": "#1a1a1a", "rgba": "rgba(255,107,107,0.15)"},
     "high": {"bg": "#ffa94d", "fg": "#1a1a1a", "rgba": "rgba(255,169,77,0.15)"},
     "medium": {"bg": "#ffd43b", "fg": "#1a1a1a", "rgba": "rgba(255,212,59,0.12)"},
     "low": {"bg": "#51cf66", "fg": "#1a1a1a", "rgba": "rgba(81,207,102,0.15)"},

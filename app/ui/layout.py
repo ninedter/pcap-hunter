@@ -2112,7 +2112,7 @@ def render_ioc_scores(result_col, scored_iocs: list | None):
                 def highlight_priority(row):
                     priority = row.get("Priority", "").lower()
                     if priority in ("critical", "high", "medium"):
-                        return [f"background-color: {severity_color(priority)};"] * len(row)
+                        return [f"background-color: {severity_color(priority, 'rgba')};"] * len(row)
                     return [""] * len(row)
 
                 styled_df = df.style.apply(highlight_priority, axis=1)
@@ -2415,7 +2415,7 @@ def render_correlation_results(result_col, correlations: list | None):
                 def highlight_verdict(row):
                     v = row.get("Verdict", "").lower()
                     if v in ("critical", "high", "medium"):
-                        return [f"background-color: {severity_color(v)};"] * len(row)
+                        return [f"background-color: {severity_color(v, 'rgba')};"] * len(row)
                     return [""] * len(row)
 
                 styled_df = df.style.apply(highlight_verdict, axis=1)

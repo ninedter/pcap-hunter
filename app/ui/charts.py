@@ -12,7 +12,11 @@ from app.ui.colors import severity_color
 
 
 def _threat_score_color(score: float) -> str:
-    """Map a 0-1 threat score onto the shared severity palette."""
+    """Map a 0-1 threat score onto the shared severity palette.
+
+    Uses critical/high/medium/clean only — "low" and "unknown" aren't
+    meaningful buckets on a continuous threat-score scale.
+    """
     if score >= 0.7:
         return severity_color("critical")
     elif score >= 0.4:

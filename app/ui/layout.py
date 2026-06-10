@@ -2466,7 +2466,9 @@ def render_correlation_results(result_col, correlations: list | None):
     """Render cross-indicator correlation results."""
     with result_col:
         if correlations is None:
-            render_empty_state("Correlation ran — no cross-indicator threats found.")
+            # Not computed in this session (fresh start, restored case, or the
+            # post-analysis step failed) — never claim "ran clean" here.
+            st.info("📭 Correlation results aren't available in this session — run an analysis to compute them.")
             return
         if not correlations:
             render_empty_state("Correlation ran — no cross-indicator threats found.")
@@ -2508,7 +2510,8 @@ def render_flow_asymmetry(result_col, asymmetry_results: list | None):
     """Render flow asymmetry (data exfiltration) detection results."""
     with result_col:
         if asymmetry_results is None:
-            render_empty_state("Flow analysis ran — no asymmetric exfiltration patterns found.")
+            # Not computed in this session — never claim "ran clean" here.
+            st.info("📭 Flow-asymmetry results aren't available in this session — run an analysis to compute them.")
             return
         if not asymmetry_results:
             render_empty_state("Flow analysis ran — no asymmetric exfiltration patterns found.")
@@ -2559,7 +2562,8 @@ def render_port_anomalies(result_col, anomaly_results: list | None):
     """Render port/protocol anomaly detection results."""
     with result_col:
         if anomaly_results is None:
-            render_empty_state("Flow analysis ran — no suspicious port usage found.")
+            # Not computed in this session — never claim "ran clean" here.
+            st.info("📭 Port-anomaly results aren't available in this session — run an analysis to compute them.")
             return
         if not anomaly_results:
             render_empty_state("Flow analysis ran — no suspicious port usage found.")

@@ -108,9 +108,11 @@ class TestRestoreAnalysisToSession:
         assert st.session_state["ja3_analysis"] == {}
         assert st.session_state["zeek_tables"] == {}
         assert st.session_state["carved"] == []
-        assert st.session_state["correlations"] == []
-        assert st.session_state["flow_asymmetry"] == []
-        assert st.session_state["port_anomalies"] == []
+        # None (not []) so the dashboard's empty states report "not available"
+        # instead of a false "ran clean" for results that weren't persisted.
+        assert st.session_state["correlations"] is None
+        assert st.session_state["flow_asymmetry"] is None
+        assert st.session_state["port_anomalies"] is None
         assert st.session_state["rdns_map"] == {}
 
     def test_stale_dashboard_filters_cleared(self):

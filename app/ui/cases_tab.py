@@ -77,9 +77,11 @@ def _restore_analysis_to_session(analysis: Analysis) -> None:
     st.session_state["ja3_analysis"] = {}
     st.session_state["zeek_tables"] = {}
     st.session_state["carved"] = []
-    st.session_state["correlations"] = []
-    st.session_state["flow_asymmetry"] = []
-    st.session_state["port_anomalies"] = []
+    # None (not []) so empty-state rendering says "not available — re-run", rather
+    # than a false "ran clean" for results that simply weren't persisted.
+    st.session_state["correlations"] = None
+    st.session_state["flow_asymmetry"] = None
+    st.session_state["port_anomalies"] = None
     st.session_state["rdns_map"] = {}
     st.session_state["filter_ips"] = set()
     st.session_state["filter_protos"] = set()

@@ -13,6 +13,7 @@ end-to-end assertion here. When adding new PDF sections, extend the
 
 from __future__ import annotations
 
+import re
 from datetime import datetime
 
 import pandas as pd
@@ -214,6 +215,37 @@ def realistic_geoip_data() -> list[dict]:
     ]
 
 
+@pytest.fixture
+def full_report_html(
+    realistic_features,
+    realistic_correlations,
+    realistic_beacon_df,
+    realistic_osint,
+    realistic_dns_analysis,
+    realistic_tls_analysis,
+    realistic_yara_results,
+    realistic_geoip_data,
+) -> str:
+    """Complete report HTML built from the production-shape fixtures above.
+
+    Section structure (numbering, TOC, headings, timestamps) is asserted on
+    the HTML directly, so no WeasyPrint render is required.
+    """
+    gen = PDFReportGenerator(ReportConfig(title="Section Registry Test"))
+    return gen._build_html(
+        report_md="# Test\n\nBody.",
+        features=realistic_features,
+        osint=realistic_osint,
+        yara_results=realistic_yara_results,
+        dns_analysis=realistic_dns_analysis,
+        tls_analysis=realistic_tls_analysis,
+        case_info={"id": "CASE-001", "title": "Registry Test"},
+        beacon_df=realistic_beacon_df,
+        correlations=realistic_correlations,
+        geoip_data=realistic_geoip_data,
+    )
+
+
 # ---------------------------------------------------------------------------
 # End-to-end tests
 # ---------------------------------------------------------------------------
@@ -380,3 +412,68 @@ class TestFullPDFGeneration:
         )
         assert pdf is not None
         assert b"%PDF" in pdf.content[:10]
+
+
+class TestSectionRegistry:
+    """One ordered registry drives section numbering and the TOC.
+
+    Regression targets: the report used to ship TWO sections numbered "2.",
+    unnumbered correlation/beacon sections, a beacon heading duplicated across
+    the empty/data code paths, and a hand-built TOC that could disagree with
+    the rendered body.
+    """
+
+    def test_section_numbering_is_sequential_and_unique(self, full_report_html):
+        nums = [int(m.group(1)) for m in re.finditer(r"<h2>(\d+)\. ", full_report_html)]
+        assert nums, "no numbered <h2> section headings found"
+        assert nums == list(range(1, len(nums) + 1)), f"section numbers broken: {nums}"
+
+    def test_toc_entries_match_rendered_sections_in_order(self, full_report_html):
+        toc_ids = re.findall(r'<li><a href="#([a-z]+)">', full_report_html)
+        body_ids = [b for b in re.findall(r'<section id="([a-z]+)"', full_report_html) if b in toc_ids]
+        assert toc_ids, "TOC rendered no entries"
+        assert toc_ids == body_ids
+
+    def test_beacon_heading_appears_once(self, full_report_html):
+        assert full_report_html.count("C2 Beacon Analysis</h2>") == 1
+
+    def test_beacon_heading_appears_once_with_empty_dataframe(self, realistic_features):
+        """The empty-DataFrame path must emit the same single heading."""
+        gen = PDFReportGenerator(ReportConfig(include_charts=False))
+        html = gen._build_html(
+            report_md="# T\n\nBody.",
+            features=realistic_features,
+            osint=None,
+            yara_results=None,
+            dns_analysis=None,
+            tls_analysis=None,
+            case_info=None,
+            beacon_df=pd.DataFrame(),
+            correlations=None,
+        )
+        assert html.count("C2 Beacon Analysis</h2>") == 1
+
+    def test_numbering_stays_sequential_when_conditional_sections_absent(self, realistic_features):
+        """With charts/correlations/beacons/osint/dns/tls/yara absent, the
+        surviving sections must still be numbered 1..N and match the TOC."""
+        gen = PDFReportGenerator(ReportConfig(include_charts=False))
+        html = gen._build_html(
+            report_md="# T\n\nBody.",
+            features=realistic_features,
+            osint=None,
+            yara_results=None,
+            dns_analysis=None,
+            tls_analysis=None,
+            case_info=None,
+            beacon_df=None,
+            correlations=None,
+        )
+        nums = [int(m.group(1)) for m in re.finditer(r"<h2>(\d+)\. ", html)]
+        assert nums == list(range(1, len(nums) + 1)), f"section numbers broken: {nums}"
+        toc_ids = re.findall(r'<li><a href="#([a-z]+)">', html)
+        body_ids = [b for b in re.findall(r'<section id="([a-z]+)"', html) if b in toc_ids]
+        assert toc_ids == body_ids
+        assert toc_ids == ["summary", "iocs", "flows", "appendix"]
+
+    def test_report_timestamp_is_timezone_aware(self, full_report_html):
+        assert re.search(r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}(:\d{2})? [A-Z]{2,5}", full_report_html)

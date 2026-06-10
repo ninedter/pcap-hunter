@@ -112,10 +112,50 @@ class PDFReport:
 class PDFReportGenerator:
     """Generates professional PDF reports from analysis data."""
 
+    # Ordered registry of report sections: (anchor_id, title).
+    #
+    # This is the single source of truth for section order, titles and
+    # numbering. _build_html() renders candidate sections in this order,
+    # drops the ones that come back empty, then numbers the survivors 1..N.
+    # The TOC and the <h2> headings both derive from that one numbering, so
+    # they can never disagree. Anchor ids are stable API — tests and
+    # intra-document links rely on them.
+    SECTION_REGISTRY: tuple[tuple[str, str], ...] = (
+        ("summary", "Executive Summary"),
+        ("charts", "Visual Overview"),
+        ("correlations", "Threat Correlation Summary"),
+        ("iocs", "Indicators of Compromise"),
+        ("osint", "OSINT Analysis"),
+        ("dns", "DNS Analysis"),
+        ("tls", "TLS Certificate Analysis"),
+        ("yara", "YARA Scan Results"),
+        ("beacons", "C2 Beacon Analysis"),
+        ("flows", "Network Flow Analysis"),
+        ("appendix", "Appendix"),
+    )
+
     def __init__(self, config: ReportConfig | None = None):
         """Initialize report generator."""
         self.config = config or ReportConfig()
         self._templates_dir = Path(__file__).parent / "templates"
+
+    @classmethod
+    def _section_title(cls, sec_id: str) -> str:
+        """Look up the registry title for a section anchor id."""
+        return dict(cls.SECTION_REGISTRY)[sec_id]
+
+    @staticmethod
+    def _h2(sec_id: str) -> str:
+        """Placeholder heading emitted by the section renderers.
+
+        Design choice: RENDER FIRST, NUMBER AFTER. A renderer can't know its
+        final section number up front because conditional sections may turn
+        out empty only at render time (charts when kaleido is unavailable,
+        beacons on a render error). Renderers therefore emit this
+        deterministic placeholder; _build_html() swaps it for the final
+        "<h2>N. Title</h2>" once the surviving sections are known.
+        """
+        return f"<h2>@@{sec_id}@@</h2>"
 
     @property
     def is_available(self) -> bool:
@@ -223,16 +263,16 @@ class PDFReportGenerator:
         attack_timeline: list | None = None,
     ) -> str:
         """Build the complete HTML document."""
-        sections = []
-
-        # Cover page
-        sections.append(self._render_cover_page(case_info))
-
-        # Table of Contents
-        sections.append(self._render_toc(beacon_df=beacon_df, correlations=correlations))
+        # --- Section assembly: render first, number after (see _h2). ---
+        # Candidates are rendered in SECTION_REGISTRY order. A candidate can
+        # come back empty even when its inclusion condition held (charts when
+        # kaleido is unavailable, beacons on a render error), so the final
+        # 1..N numbering is computed from the fragments that actually
+        # survived. The TOC is built from the same survivor list.
+        candidates: list[tuple[str, str]] = []
 
         # Executive Summary (from LLM report)
-        sections.append(self._render_executive_summary(report_md))
+        candidates.append(("summary", self._render_executive_summary(report_md)))
 
         # Visual dashboard (charts embedded as PNG)
         if self.config.include_charts:
@@ -241,44 +281,57 @@ class PDFReportGenerator:
                 geoip_data=geoip_data,
                 attack_timeline=attack_timeline,
             )
-            if charts_html:
-                sections.append(charts_html)
+            candidates.append(("charts", charts_html))
 
         # Threat Correlation Summary
         if correlations:
-            sections.append(self._render_correlation_section(correlations))
+            candidates.append(("correlations", self._render_correlation_section(correlations)))
 
         # Key Findings / IOC Summary
-        sections.append(self._render_ioc_table(features, osint))
+        candidates.append(("iocs", self._render_ioc_table(features, osint)))
 
         # OSINT Results
         if self.config.include_osint and osint:
-            sections.append(self._render_osint_section(osint))
+            candidates.append(("osint", self._render_osint_section(osint)))
 
         # DNS Analysis
         if dns_analysis and not dns_analysis.get("skipped"):
-            sections.append(self._render_dns_section(dns_analysis))
+            candidates.append(("dns", self._render_dns_section(dns_analysis)))
 
         # TLS Analysis
         if tls_analysis and not tls_analysis.get("skipped"):
-            sections.append(self._render_tls_section(tls_analysis))
+            candidates.append(("tls", self._render_tls_section(tls_analysis)))
 
         # YARA Results - show if available flag is set OR if there are actual results
         if self.config.include_yara and yara_results:
             has_results = yara_results.get("yara_available") or yara_results.get("scanned", 0) > 0
             if has_results:
-                sections.append(self._render_yara_section(yara_results))
+                candidates.append(("yara", self._render_yara_section(yara_results)))
 
         # Beacon Analysis
         if beacon_df is not None:
-            sections.append(self._render_beacon_section(beacon_df))
+            candidates.append(("beacons", self._render_beacon_section(beacon_df)))
 
         # Flow Analysis
         if self.config.include_raw_data and features.get("flows"):
-            sections.append(self._render_flow_section(features))
+            candidates.append(("flows", self._render_flow_section(features)))
 
         # Appendix
-        sections.append(self._render_appendix(features))
+        candidates.append(("appendix", self._render_appendix(features)))
+
+        # Drop empty fragments, then number the survivors 1..N and swap the
+        # placeholder headings for the final numbered ones.
+        included = [(sec_id, fragment) for sec_id, fragment in candidates if fragment.strip()]
+        numbered: list[str] = []
+        for number, (sec_id, fragment) in enumerate(included, start=1):
+            heading = f"<h2>{number}. {self._section_title(sec_id)}</h2>"
+            numbered.append(fragment.replace(self._h2(sec_id), heading, 1))
+
+        sections = [
+            self._render_cover_page(case_info),
+            self._render_toc([sec_id for sec_id, _ in included]),
+            *numbered,
+        ]
 
         # Build full HTML
         body = "\n".join(sections)
@@ -295,8 +348,9 @@ class PDFReportGenerator:
 
     def _render_cover_page(self, case_info: dict | None) -> str:
         """Render the cover page."""
-        now = datetime.now()
-        date_str = now.strftime("%Y-%m-%d %H:%M")
+        # Timezone-aware local time — analysts need to know which clock the
+        # report was generated against (e.g. "2026-06-11 09:30 CST").
+        date_str = datetime.now().astimezone().strftime("%Y-%m-%d %H:%M %Z")
 
         case_section = ""
         if case_info:
@@ -332,26 +386,14 @@ class PDFReportGenerator:
 <div class="page-break"></div>
 """
 
-    def _render_toc(
-        self,
-        beacon_df: "pd.DataFrame | None" = None,
-        correlations: list | None = None,
-    ) -> str:
-        """Render table of contents."""
-        items = ['<li><a href="#summary">Executive Summary</a></li>']
-        if self.config.include_charts:
-            items.append('<li><a href="#charts">Visual Overview</a></li>')
-        if correlations:
-            items.append('<li><a href="#correlations">Threat Correlation Summary</a></li>')
-        items.append('<li><a href="#iocs">Indicators of Compromise</a></li>')
-        items.append('<li><a href="#osint">OSINT Analysis</a></li>')
-        items.append('<li><a href="#dns">DNS Analysis</a></li>')
-        items.append('<li><a href="#tls">TLS Certificate Analysis</a></li>')
-        items.append('<li><a href="#yara">YARA Scan Results</a></li>')
-        if beacon_df is not None:
-            items.append('<li><a href="#beacons">C2 Beacon Analysis</a></li>')
-        items.append('<li><a href="#flows">Network Flow Analysis</a></li>')
-        items.append('<li><a href="#appendix">Appendix</a></li>')
+    def _render_toc(self, included_ids: list[str]) -> str:
+        """Render table of contents from the included section ids.
+
+        The ids come from _build_html()'s survivor list (registry order), so
+        the <ol> numbering visually matches the body heading numbers — both
+        derive from the same single numbering.
+        """
+        items = [f'<li><a href="#{sec_id}">{self._section_title(sec_id)}</a></li>' for sec_id in included_ids]
 
         return f"""
 <div class="toc">
@@ -370,7 +412,7 @@ class PDFReportGenerator:
 
         return f"""
 <section id="summary">
-    <h2>1. Executive Summary</h2>
+    {self._h2("summary")}
     <div class="summary-content">
         {html_content}
     </div>
@@ -507,7 +549,7 @@ class PDFReportGenerator:
 
         return f"""
 <section id="charts">
-    <h2>2. Visual Overview</h2>
+    {self._h2("charts")}
     <p class="section-intro">
         The following charts replicate the interactive dashboard in static form.
         They summarise traffic composition, top talkers, time-series patterns,
@@ -551,7 +593,7 @@ class PDFReportGenerator:
 
         return f"""
 <section id="iocs">
-    <h2>2. Indicators of Compromise</h2>
+    {self._h2("iocs")}
     <table class="ioc-table">
         <thead>
             <tr>
@@ -592,7 +634,7 @@ class PDFReportGenerator:
 
         return f"""
 <section id="osint">
-    <h2>3. OSINT Analysis</h2>
+    {self._h2("osint")}
 
     <h3>IP Address Intelligence</h3>
     <table class="data-table">
@@ -681,7 +723,7 @@ class PDFReportGenerator:
 
         return f"""
 <section id="dns">
-    <h2>4. DNS Analysis</h2>
+    {self._h2("dns")}
     {stats}
     {alert_section}
     {dga_table}
@@ -736,7 +778,7 @@ class PDFReportGenerator:
 
         return f"""
 <section id="tls">
-    <h2>5. TLS Certificate Analysis</h2>
+    {self._h2("tls")}
     {stats}
     {cert_table}
 </section>
@@ -805,7 +847,7 @@ class PDFReportGenerator:
 
         return f"""
 <section id="yara">
-    <h2>6. YARA Scan Results</h2>
+    {self._h2("yara")}
     {stats}
     {severity_section}
     {match_table}
@@ -887,7 +929,7 @@ class PDFReportGenerator:
 
         return f"""
 <section id="correlations">
-    <h2>Threat Correlation Summary</h2>
+    {self._h2("correlations")}
     <table class="data-table">
         <thead><tr><th>Verdict</th><th>Count</th></tr></thead>
         <tbody>{verdict_table}</tbody>
@@ -898,21 +940,22 @@ class PDFReportGenerator:
 """
 
     def _render_beacon_section(self, beacon_df: "pd.DataFrame") -> str:
-        """Render C2 beacon analysis section."""
+        """Render C2 beacon analysis section.
+
+        The empty and populated paths share the single section shell at the
+        bottom, so the heading is emitted exactly once either way.
+        """
         try:
             if beacon_df.empty:
-                return """
-<section id="beacons">
-    <h2>C2 Beacon Analysis</h2>
-    <p>No beaconing activity detected.</p>
-</section>
-<div class="page-break"></div>
-"""
-            high_beacons = beacon_df[beacon_df["score"] >= 0.5] if "score" in beacon_df.columns else beacon_df.head(0)
-            total = len(beacon_df)
-            high_count = len(high_beacons)
+                body = "<p>No beaconing activity detected.</p>"
+            else:
+                high_beacons = (
+                    beacon_df[beacon_df["score"] >= 0.5] if "score" in beacon_df.columns else beacon_df.head(0)
+                )
+                total = len(beacon_df)
+                high_count = len(high_beacons)
 
-            stats = f"""
+                stats = f"""
         <div class="stats-grid">
             <div class="stat-box">
                 <span class="stat-value">{total}</span>
@@ -925,23 +968,23 @@ class PDFReportGenerator:
         </div>
         """
 
-            # Top beacon candidates table
-            top = beacon_df.head(15)
-            rows = []
-            for _, row in top.iterrows():
-                score = row.get("score", 0)
-                risk_cls = "risk-high" if score >= 0.5 else ""
-                rows.append(
-                    f"<tr class='{risk_cls}'>"
-                    f"<td>{self._escape(str(row.get('src', '')))}</td>"
-                    f"<td>{self._escape(str(row.get('dst', '')))}</td>"
-                    f"<td>{self._escape(str(row.get('dport', '')))}</td>"
-                    f"<td>{score:.2f}</td>"
-                    f"<td>{row.get('count', '')}</td>"
-                    f"</tr>"
-                )
+                # Top beacon candidates table
+                top = beacon_df.head(15)
+                rows = []
+                for _, row in top.iterrows():
+                    score = row.get("score", 0)
+                    risk_cls = "risk-high" if score >= 0.5 else ""
+                    rows.append(
+                        f"<tr class='{risk_cls}'>"
+                        f"<td>{self._escape(str(row.get('src', '')))}</td>"
+                        f"<td>{self._escape(str(row.get('dst', '')))}</td>"
+                        f"<td>{self._escape(str(row.get('dport', '')))}</td>"
+                        f"<td>{score:.2f}</td>"
+                        f"<td>{row.get('count', '')}</td>"
+                        f"</tr>"
+                    )
 
-            table_html = f"""
+                table_html = f"""
         <h3>Top Beacon Candidates</h3>
         <table class="data-table">
             <thead><tr><th>Source</th><th>Destination</th><th>Port</th>
@@ -949,12 +992,12 @@ class PDFReportGenerator:
             <tbody>{"".join(rows)}</tbody>
         </table>
         """
+                body = f"{stats}\n    {table_html}"
 
             return f"""
 <section id="beacons">
-    <h2>C2 Beacon Analysis</h2>
-    {stats}
-    {table_html}
+    {self._h2("beacons")}
+    {body}
 </section>
 <div class="page-break"></div>
 """
@@ -981,7 +1024,7 @@ class PDFReportGenerator:
 
         return f"""
 <section id="flows">
-    <h2>7. Network Flow Analysis</h2>
+    {self._h2("flows")}
     <p>Showing top {len(flows)} flows by packet count.</p>
     <table class="data-table flow-table">
         <thead>
@@ -1008,7 +1051,7 @@ class PDFReportGenerator:
 
         return f"""
 <section id="appendix">
-    <h2>8. Appendix</h2>
+    {self._h2("appendix")}
 
     <h3>Analysis Statistics</h3>
     <ul>
@@ -1021,7 +1064,7 @@ class PDFReportGenerator:
 
     <h3>Report Generation</h3>
     <ul>
-        <li>Generated: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}</li>
+        <li>Generated: {datetime.now().astimezone().strftime("%Y-%m-%d %H:%M:%S %Z")}</li>
         <li>Classification: {self._escape(self.config.classification)}</li>
         <li>Tool: PCAP Hunter</li>
     </ul>

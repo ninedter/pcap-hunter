@@ -255,11 +255,11 @@ def run_pipeline(
 
     def _run_dns(h) -> None:
         try:
-            outcomes["dns_analysis"] = {"result": analyze_dns(zeek_tables, features, phase=h) or {}}
+            outcomes["dns_analysis"] = {"result": analyze_dns(zeek_tables, phase=h) or {}}
             h.done("DNS analysis complete.")
         except Exception as exc:
             logger.error("DNS analysis failed: %s", exc)
-            outcomes["dns_analysis"] = {"warning": WARNING_DNS_ANALYSIS_FAILED}
+            outcomes.setdefault("dns_analysis", {"warning": WARNING_DNS_ANALYSIS_FAILED})
             h.done("DNS analysis failed.")
 
     def _run_tls(h) -> None:
@@ -270,7 +270,7 @@ def run_pipeline(
             h.done("TLS analysis complete.")
         except Exception as exc:
             logger.error("TLS analysis failed: %s", exc)
-            outcomes["tls_certs"] = {"warning": WARNING_TLS_CERTS_FAILED}
+            outcomes.setdefault("tls_certs", {"warning": WARNING_TLS_CERTS_FAILED})
             h.done("TLS analysis failed.")
 
     def _run_beacon(h) -> None:
@@ -284,7 +284,7 @@ def run_pipeline(
             h.done("Beaconing step complete.")
         except Exception as exc:
             logger.error("Beaconing failed: %s", exc)
-            outcomes["beacon"] = {"warning": WARNING_BEACON_FAILED}
+            outcomes.setdefault("beacon", {"warning": WARNING_BEACON_FAILED})
             h.done("Beaconing failed.")
 
     def _run_carve(h) -> None:
@@ -293,11 +293,11 @@ def run_pipeline(
             h.done("HTTP carving complete.")
         except CarveError as exc:
             logger.error("HTTP carving failed: %s", exc)
-            outcomes["carve"] = {"warning": WARNING_CARVE_FAILED}
+            outcomes.setdefault("carve", {"warning": WARNING_CARVE_FAILED})
             h.done("HTTP carving failed.")
         except Exception as exc:
             logger.error("HTTP carving raised unexpected error: %s", exc)
-            outcomes["carve"] = {"warning": WARNING_CARVE_FAILED}
+            outcomes.setdefault("carve", {"warning": WARNING_CARVE_FAILED})
             h.done("HTTP carving failed.")
 
     jobs = []

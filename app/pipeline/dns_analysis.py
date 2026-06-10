@@ -708,7 +708,8 @@ def analyze_dns(
 
     Args:
         zeek_tables: Dictionary of Zeek log DataFrames
-        features: Existing features dict (optional)
+        features: Unused; retained for backward compatibility. Must remain read-only —
+            callers run this concurrently with other stages.
         phase: PhaseHandle for progress updates
 
     Returns:

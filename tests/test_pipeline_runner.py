@@ -59,10 +59,10 @@ def test_pipeline_result_to_dict_is_json_serializable():
     assert restored["beacon_df_records"][0]["src"] == "10.0.0.1"
 
 
-def test_run_pipeline_executes_sequential_stages_against_fixture():
+def test_run_pipeline_executes_all_stages_against_fixture():
     """Smoke test: run the headless pipeline against the tiny.pcap fixture.
 
-    Confirms the lift wired the sequential path correctly. Stages like Zeek
+    Confirms the runner wires all stages correctly. Stages like Zeek
     depend on a system binary; if it's missing the stage records a warning
     and the pipeline keeps going — we assert that PyShark at minimum ran.
     """

@@ -282,6 +282,24 @@ def render_threat_summary(
                 st.markdown(f"- {r}")
 
 
+def _analysis_has_run() -> bool:
+    """True once a pipeline run (or case restore) has populated session state."""
+    feats = st.session_state.get("features") or {}
+    return bool(feats.get("flows") or st.session_state.get("zeek_tables"))
+
+
+def render_empty_state(
+    found_nothing_msg: str,
+    *,
+    not_run_msg: str = "Upload a PCAP and run analysis to populate this section.",
+) -> None:
+    """Empty-state that distinguishes 'ran, clean' from 'not run yet'."""
+    if _analysis_has_run():
+        st.success(f"✅ {found_nothing_msg}")
+    else:
+        st.info(f"📭 {not_run_msg}")
+
+
 def render_severity_legend() -> None:
     """One-line color legend so analysts calibrate once, not per-tab."""
     chips = " ".join(
@@ -1506,8 +1524,10 @@ def render_report(result_col, report_md):
         st.markdown("#### LLM Report")
         if report_md:
             st.markdown(report_md)
+        elif _analysis_has_run():
+            st.info("📝 No LLM report yet — generate one from the LLM Analysis tab.")
         else:
-            st.caption("No report yet.")
+            st.info("📭 Upload a PCAP and run analysis to populate this section.")
 
 
 def render_dns_analysis(result_col, dns_analysis: dict | None):
@@ -1522,8 +1542,11 @@ def render_dns_analysis(result_col, dns_analysis: dict | None):
             )
         )
         with st.expander("DNS Analysis", expanded=expanded):
-            if dns_analysis is None or dns_analysis.get("error") or dns_analysis.get("skipped"):
-                st.caption("No DNS analysis data available.")
+            if dns_analysis is None:
+                render_empty_state("DNS analysis ran — no DGA, tunneling, or fast-flux indicators found.")
+                return
+            if dns_analysis.get("error") or dns_analysis.get("skipped"):
+                st.info("📭 Upload a PCAP and run analysis to populate this section.")
                 return
 
             # Summary metrics
@@ -1632,8 +1655,11 @@ def render_tls_certificates(result_col, tls_analysis: dict | None):
             )
         )
         with st.expander("TLS Certificates", expanded=expanded):
-            if tls_analysis is None or tls_analysis.get("skipped"):
-                st.caption("No TLS certificate data available.")
+            if tls_analysis is None:
+                render_empty_state("TLS analysis ran — no certificate issues detected.")
+                return
+            if tls_analysis.get("skipped"):
+                st.info("📭 Upload a PCAP and run analysis to populate this section.")
                 return
 
             # Summary metrics
@@ -1838,8 +1864,11 @@ def render_yara_results(result_col, yara_results: dict | None):
     with result_col:
         expanded = bool(yara_results and yara_results.get("matched", 0) > 0)
         with st.expander("YARA Scan Results", expanded=expanded):
+            if yara_results is None:
+                render_empty_state("YARA scan ran — no rule matches in carved files.")
+                return
             if not yara_results:
-                st.caption("No YARA scan data available.")
+                render_empty_state("YARA scan ran — no rule matches in carved files.")
                 return
 
             if not yara_results.get("yara_available"):
@@ -2436,7 +2465,11 @@ def render_hunting_checklist(
 def render_correlation_results(result_col, correlations: list | None):
     """Render cross-indicator correlation results."""
     with result_col:
+        if correlations is None:
+            render_empty_state("Correlation ran — no cross-indicator threats found.")
+            return
         if not correlations:
+            render_empty_state("Correlation ran — no cross-indicator threats found.")
             return
 
         with st.expander("Cross-Indicator Correlations", expanded=True):
@@ -2474,7 +2507,11 @@ def render_correlation_results(result_col, correlations: list | None):
 def render_flow_asymmetry(result_col, asymmetry_results: list | None):
     """Render flow asymmetry (data exfiltration) detection results."""
     with result_col:
+        if asymmetry_results is None:
+            render_empty_state("Flow analysis ran — no asymmetric exfiltration patterns found.")
+            return
         if not asymmetry_results:
+            render_empty_state("Flow analysis ran — no asymmetric exfiltration patterns found.")
             return
 
         suspicious = [
@@ -2483,6 +2520,7 @@ def render_flow_asymmetry(result_col, asymmetry_results: list | None):
             if (hasattr(r, "is_suspicious") and r.is_suspicious) or (isinstance(r, dict) and r.get("is_suspicious"))
         ]
         if not suspicious:
+            render_empty_state("Flow analysis ran — no asymmetric exfiltration patterns found.")
             return
 
         expanded = len(suspicious) > 0
@@ -2520,7 +2558,11 @@ def render_flow_asymmetry(result_col, asymmetry_results: list | None):
 def render_port_anomalies(result_col, anomaly_results: list | None):
     """Render port/protocol anomaly detection results."""
     with result_col:
+        if anomaly_results is None:
+            render_empty_state("Flow analysis ran — no suspicious port usage found.")
+            return
         if not anomaly_results:
+            render_empty_state("Flow analysis ran — no suspicious port usage found.")
             return
 
         with st.expander(f"Port Anomalies ({len(anomaly_results)})", expanded=bool(anomaly_results)):

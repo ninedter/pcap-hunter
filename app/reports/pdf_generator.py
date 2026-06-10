@@ -410,6 +410,12 @@ class PDFReportGenerator:
         # Convert markdown to HTML
         html_content = self._markdown_to_html(report_md)
 
+        # Demote LLM-content headings below the registry's section level: h2 is
+        # reserved for numbered section headings (and the numbering relies on
+        # that), so content h1/h2 become h3/h4. Order matters — h2 first.
+        html_content = re.sub(r"<(/?)h2(\s|>)", r"<\1h4\2", html_content)
+        html_content = re.sub(r"<(/?)h1(\s|>)", r"<\1h3\2", html_content)
+
         return f"""
 <section id="summary">
     {self._h2("summary")}

@@ -233,7 +233,9 @@ def full_report_html(
     """
     gen = PDFReportGenerator(ReportConfig(title="Section Registry Test"))
     return gen._build_html(
-        report_md="# Test\n\nBody.",
+        # Realistic LLM output includes its own numbered headings — they must
+        # never collide with the registry's numbered section <h2>s.
+        report_md="# Test\n\n## 2. Key Findings\n\nBody.\n\n## 3. Recommendations\n\nMore.",
         features=realistic_features,
         osint=realistic_osint,
         yara_results=realistic_yara_results,
@@ -436,6 +438,13 @@ class TestSectionRegistry:
 
     def test_beacon_heading_appears_once(self, full_report_html):
         assert full_report_html.count("C2 Beacon Analysis</h2>") == 1
+
+    def test_llm_content_headings_demoted_below_section_level(self, full_report_html):
+        """LLM markdown headings (## N. Foo) must become h4 inside the summary,
+        never h2 — h2 is reserved for registry-numbered section headings."""
+        assert "<h4>2. Key Findings</h4>" in full_report_html
+        assert "<h2>2. Key Findings</h2>" not in full_report_html
+        assert "<h4>3. Recommendations</h4>" in full_report_html
 
     def test_beacon_heading_appears_once_with_empty_dataframe(self, realistic_features):
         """The empty-DataFrame path must emit the same single heading."""

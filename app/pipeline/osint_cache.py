@@ -109,7 +109,7 @@ class OSINTCache:
             try:
                 self._local.conn.close()
             except Exception as close_err:
-                logger.debug("osint cache operation failed: %s", close_err)
+                logger.debug("osint cache connection close failed: %s", close_err)
             self._local.conn = None
             raise
 
@@ -119,7 +119,7 @@ class OSINTCache:
             try:
                 self._local.conn.close()
             except Exception as e:
-                logger.debug("osint cache operation failed: %s", e)
+                logger.debug("osint cache connection close failed: %s", e)
             self._local.conn = None
 
     def __del__(self) -> None:

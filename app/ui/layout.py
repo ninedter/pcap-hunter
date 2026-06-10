@@ -195,6 +195,8 @@ def render_threat_summary(
             ]
         )
 
+        # If you add a branch here, add a matching reasons.append() in the
+        # explainability expander below so analysts can reconstruct the rating.
         if critical > 0:
             risk, color = "CRITICAL", severity_color("critical")
         elif high > 0 or yara_count > 0:
@@ -245,6 +247,8 @@ def render_threat_summary(
             st.caption("No high-severity indicators detected.")
 
         # --- Explainability expander ---
+        # Keep in sync with the risk-decision ladder above: every input to the
+        # decision gets a reasons.append() here.
         with st.expander("Why this risk level?", expanded=False):
             st.caption(
                 "Risk is the highest tier triggered below. Correlated, multi-signal findings "
@@ -258,9 +262,9 @@ def render_threat_summary(
             if medium:
                 reasons.append(f"🟡 {medium} medium-severity correlation finding(s)")
             if yara_count:
-                reasons.append(f"🦠 {yara_count} YARA match(es) in carved files")
+                reasons.append(f"🔍 {yara_count} YARA match(es) in carved files")
             if beacon_count:
-                reasons.append(f"📡 {beacon_count} beaconing candidate(s) (score ≥ 0.6; needs corroboration)")
+                reasons.append(f"📡 {beacon_count} beaconing candidate(s) (score ≥ 0.6; alone does not escalate risk)")
             if tls_issues:
                 reasons.append(f"🔒 {tls_issues} TLS certificate trust issue(s) (expired + self-signed)")
             if dns_alerts:
@@ -273,7 +277,7 @@ def render_threat_summary(
             if tls_issues > 0 and dns_alerts > 0:
                 reasons.append("⚠️ MEDIUM escalation: TLS trust issues corroborated by DNS anomalies")
             if not reasons:
-                reasons.append("✅ No threat signals fired — nothing exceeded thresholds.")
+                reasons.append("✅ No threat signals fired — nothing exceeded thresholds")
             for r in reasons:
                 st.markdown(f"- {r}")
 

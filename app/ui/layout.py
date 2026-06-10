@@ -2317,64 +2317,91 @@ def render_ioc_search(
         query_lower = query.lower().strip()
         results_found = False
 
-        # Search IPs
-        if features:
-            ips = features.get("artifacts", {}).get("ips", [])
-            matched_ips = [ip for ip in ips if query_lower in ip.lower()]
-            if matched_ips:
-                results_found = True
-                with st.expander(f"IPs ({len(matched_ips)} matches)", expanded=True):
-                    for ip in matched_ips[:10]:
-                        osint_ip = (osint or {}).get("ips", {}).get(ip, {})
-                        gn = osint_ip.get("greynoise", {}).get("classification", "n/a")
-                        ptr = osint_ip.get("ptr", "n/a")
-                        st.markdown(f"**{ip}** — PTR: {ptr}, GreyNoise: {gn}")
+        # --- Pre-compute full match lists so we can check whether any category exceeds 10
+        matched_ips: list[str] = []
+        matched_doms: list[str] = []
+        matched_ja3: list[str] = []
 
-        # Search domains
         if features:
-            domains = features.get("artifacts", {}).get("domains", [])
-            matched_doms = [d for d in domains if query_lower in d.lower()]
-            if matched_doms:
-                results_found = True
-                with st.expander(f"Domains ({len(matched_doms)} matches)", expanded=True):
-                    for dom in matched_doms[:10]:
-                        # Check DNS analysis
-                        dga_hit = ""
-                        if dns_analysis:
-                            for dga in dns_analysis.get("dga_detections", []):
-                                if dga.get("domain") == dom and dga.get("is_dga"):
-                                    dga_hit = " **[DGA]**"
-                                    break
-                        st.markdown(f"**{dom}**{dga_hit}")
-
-        # Search JA3 hashes
-        if features:
+            matched_ips = [ip for ip in features.get("artifacts", {}).get("ips", []) if query_lower in ip.lower()]
+            matched_doms = [d for d in features.get("artifacts", {}).get("domains", []) if query_lower in d.lower()]
             ja3s = features.get("artifacts", {}).get("ja3", [])
             if isinstance(ja3s, list):
                 matched_ja3 = [j for j in ja3s if isinstance(j, str) and query_lower in j.lower()]
-                if matched_ja3:
-                    results_found = True
-                    with st.expander(f"JA3 ({len(matched_ja3)} matches)", expanded=True):
-                        for j in matched_ja3[:10]:
-                            st.code(j)
 
-        # Search beacon destinations
+        # Beacon matches computed separately (DataFrame)
+        matched_beacon = None
         if beacon_df is not None and not beacon_df.empty:
             try:
                 mask = beacon_df["dst"].str.contains(query_lower, case=False, na=False)
-                matched = beacon_df[mask]
-                if not matched.empty:
-                    results_found = True
-                    with st.expander(
-                        f"Beacon Candidates ({len(matched)} matches)",
-                        expanded=True,
-                    ):
-                        st.dataframe(
-                            matched[["src", "dst", "dport", "score"]],
-                            hide_index=True,
-                        )
+                matched_beacon = beacon_df[mask]
+                if matched_beacon.empty:
+                    matched_beacon = None
             except Exception:
-                pass
+                matched_beacon = None
+
+        # Show-all checkbox only when at least one category has more than 10 matches
+        any_truncated = (
+            len(matched_ips) > 10
+            or len(matched_doms) > 10
+            or len(matched_ja3) > 10
+            or (matched_beacon is not None and len(matched_beacon) > 10)
+        )
+        if any_truncated:
+            st.checkbox("Show all results", key="ioc_search_show_all")
+        limit = None if st.session_state.get("ioc_search_show_all") else 10
+
+        # Search IPs
+        if matched_ips:
+            results_found = True
+            with st.expander(f"IPs ({len(matched_ips)} matches)", expanded=True):
+                for ip in matched_ips[:limit]:
+                    osint_ip = (osint or {}).get("ips", {}).get(ip, {})
+                    gn = osint_ip.get("greynoise", {}).get("classification", "n/a")
+                    ptr = osint_ip.get("ptr", "n/a")
+                    st.markdown(f"**{ip}** — PTR: {ptr}, GreyNoise: {gn}")
+                if limit is not None and len(matched_ips) > limit:
+                    st.caption(f"Showing 10 of {len(matched_ips)} — enable 'Show all results' above.")
+
+        # Search domains
+        if matched_doms:
+            results_found = True
+            with st.expander(f"Domains ({len(matched_doms)} matches)", expanded=True):
+                for dom in matched_doms[:limit]:
+                    # Check DNS analysis
+                    dga_hit = ""
+                    if dns_analysis:
+                        for dga in dns_analysis.get("dga_detections", []):
+                            if dga.get("domain") == dom and dga.get("is_dga"):
+                                dga_hit = " **[DGA]**"
+                                break
+                    st.markdown(f"**{dom}**{dga_hit}")
+                if limit is not None and len(matched_doms) > limit:
+                    st.caption(f"Showing 10 of {len(matched_doms)} — enable 'Show all results' above.")
+
+        # Search JA3 hashes
+        if matched_ja3:
+            results_found = True
+            with st.expander(f"JA3 ({len(matched_ja3)} matches)", expanded=True):
+                for j in matched_ja3[:limit]:
+                    st.code(j)
+                if limit is not None and len(matched_ja3) > limit:
+                    st.caption(f"Showing 10 of {len(matched_ja3)} — enable 'Show all results' above.")
+
+        # Search beacon destinations
+        if matched_beacon is not None:
+            results_found = True
+            with st.expander(
+                f"Beacon Candidates ({len(matched_beacon)} matches)",
+                expanded=True,
+            ):
+                display_beacon = matched_beacon if limit is None else matched_beacon.head(limit)
+                st.dataframe(
+                    display_beacon[["src", "dst", "dport", "score"]],
+                    hide_index=True,
+                )
+                if limit is not None and len(matched_beacon) > limit:
+                    st.caption(f"Showing 10 of {len(matched_beacon)} — enable 'Show all results' above.")
 
         if not results_found:
             st.caption(f"No results for '{query}'")

@@ -40,6 +40,7 @@ from app.ui.charts import (
 )
 from app.ui.config_ui import init_config_defaults, render_config_tab
 from app.ui.layout import (
+    _analysis_has_run,
     inject_css,
     make_progress_panel,
     make_results_panel,
@@ -360,6 +361,25 @@ for k, v in [
 # ---------------------- 1) Upload ----------------------
 with tab_upload:
     st.subheader("1) Load PCAP")
+
+    # --- Getting-started panel (first-run onboarding, dismissable) ---
+    if not st.session_state.get("_onboard_dismissed") and not _analysis_has_run():
+        with st.container(border=True):
+            st.markdown("##### 🚀 Getting started")
+            st.markdown(
+                "1. **Upload a PCAP** below (or type a container path).\n"
+                "2. Click **Extract & Analyze** — the 10-stage pipeline parses packets (tshark/PyShark), "
+                "runs Zeek, hunts DNS/TLS/beaconing anomalies, carves HTTP payloads, scans with YARA, "
+                "and enriches IOCs via OSINT.\n"
+                "3. Review findings in **📊 Dashboard** (verdict + visuals), **🕵️ OSINT** (per-IOC triage), and "
+                "**📋 Raw Data** (full evidence). Generate an AI report in **🤖 LLM Analysis**.\n\n"
+                "*Optional:* add OSINT API keys (**🔑 API Keys** tab) and an LM Studio endpoint (**⚙️ Config** tab) "
+                "to unlock enrichment and AI reports."
+            )
+            if st.button("Got it — don't show again", key="_onboard_dismiss_btn"):
+                st.session_state["_onboard_dismissed"] = True
+                st.rerun()
+
     col_a, col_b = st.columns([1, 1])
     with col_a:
         uploaded_files = st.file_uploader(
@@ -472,6 +492,7 @@ with tab_upload:
                 "__batch_result": None,
             }
         )
+        st.toast("Analysis started — follow progress in the Progress tab", icon="🚀")
         st.success("Analysis started. Switch to the **Progress** tab to monitor.")
         st.rerun()
 
@@ -1422,6 +1443,7 @@ with tab_llm:
                     if pdf_report:
                         st.session_state["pdf_report"] = pdf_report
                         st.success(f"PDF generated: {pdf_report.filename}")
+                        st.toast("PDF report ready for download", icon="📄")
                     else:
                         st.error("PDF generation failed. Check logs.")
 

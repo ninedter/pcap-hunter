@@ -3,6 +3,7 @@ from __future__ import annotations
 import pandas as pd
 import streamlit as st
 
+from app.ui.colors import SEVERITY_COLORS, SEVERITY_ORDER, severity_color
 from app.utils.common import is_public_ipv4
 from app.utils.export import (
     export_dataframe_to_csv,
@@ -195,15 +196,15 @@ def render_threat_summary(
         )
 
         if critical > 0:
-            risk, color = "CRITICAL", "#ff6b6b"
+            risk, color = "CRITICAL", severity_color("critical")
         elif high > 0 or yara_count > 0:
-            risk, color = "HIGH", "#ffa94d"
+            risk, color = "HIGH", severity_color("high")
         elif medium > 0 or (beacon_count >= 3 and corroboration >= 2) or (tls_issues > 0 and dns_alerts > 0):
-            risk, color = "MEDIUM", "#ffd43b"
+            risk, color = "MEDIUM", severity_color("medium")
         elif correlations or beacon_count > 0 or tls_issues > 0 or dns_alerts > 0:
-            risk, color = "LOW", "#51cf66"
+            risk, color = "LOW", severity_color("low")
         else:
-            risk, color = "N/A", "#adb5bd"
+            risk, color = "N/A", severity_color("unknown")
 
         # --- Render ---
         st.markdown(
@@ -242,6 +243,16 @@ def render_threat_summary(
             st.caption(" | ".join(parts))
         elif correlations:
             st.caption("No high-severity indicators detected.")
+
+
+def render_severity_legend() -> None:
+    """One-line color legend so analysts calibrate once, not per-tab."""
+    chips = " ".join(
+        f'<span style="background:{SEVERITY_COLORS[lvl]["bg"]};color:{SEVERITY_COLORS[lvl]["fg"]};'
+        f'padding:1px 8px;border-radius:8px;font-size:0.75rem;margin-right:4px;">{lvl.upper()}</span>'
+        for lvl in SEVERITY_ORDER
+    )
+    st.markdown(f'<div style="margin:4px 0 8px 0;">{chips}</div>', unsafe_allow_html=True)
 
 
 def render_overview(result_col, features):
@@ -361,15 +372,8 @@ def show_whois_dialog(target: str):
 
 def _verdict_badge(verdict: str) -> str:
     """Return a colored HTML badge for an IOC verdict."""
-    colors = {
-        "critical": ("#ff6b6b", "#fff"),
-        "high": ("#ffa94d", "#fff"),
-        "medium": ("#ffd43b", "#333"),
-        "low": ("#51cf66", "#fff"),
-        "clean": ("#4dabf7", "#fff"),
-        "unknown": ("#adb5bd", "#fff"),
-    }
-    bg, fg = colors.get(verdict.lower(), colors["unknown"])
+    bg = severity_color(verdict)
+    fg = severity_color(verdict, "fg")
     return (
         f'<span style="display:inline-block;padding:2px 10px;border-radius:12px;'
         f"background:{bg};color:{fg};font-weight:600;font-size:0.8rem;"
@@ -1113,19 +1117,12 @@ def render_osint(result_col, osint_data, *, correlations=None, features=None, be
                 # Color-code verdict column using Streamlit column_config
                 render_export_buttons(df_ips, "osint_ips", key_suffix="ips_v2", is_dataframe=True)
 
-                # Apply row coloring via HTML
-                verdict_colors = {
-                    "CRITICAL": "background-color: rgba(255,107,107,0.15);",
-                    "HIGH": "background-color: rgba(255,169,77,0.15);",
-                    "MEDIUM": "background-color: rgba(255,212,59,0.10);",
-                    "LOW": "",
-                    "CLEAN": "background-color: rgba(77,171,247,0.08);",
-                    "UNKNOWN": "",
-                }
-
+                # Apply row coloring via HTML (low/unknown rows stay untinted)
                 def _color_rows(row):
-                    color = verdict_colors.get(row.get("Verdict", ""), "")
-                    return [color] * len(row)
+                    v = (row.get("Verdict") or "").lower()
+                    if v in ("low", "unknown") or not v:
+                        return [""] * len(row)
+                    return [f"background-color: {severity_color(v, 'rgba')};"] * len(row)
 
                 styled = df_ips.style.apply(_color_rows, axis=1)
 
@@ -1237,17 +1234,11 @@ def render_osint(result_col, osint_data, *, correlations=None, features=None, be
                 df_doms = pd.DataFrame(dom_rows)
                 render_export_buttons(df_doms, "osint_domains", key_suffix="doms_v2", is_dataframe=True)
 
-                verdict_colors = {
-                    "CRITICAL": "background-color: rgba(255,107,107,0.15);",
-                    "HIGH": "background-color: rgba(255,169,77,0.15);",
-                    "MEDIUM": "background-color: rgba(255,212,59,0.10);",
-                    "LOW": "",
-                    "CLEAN": "background-color: rgba(77,171,247,0.08);",
-                }
-
                 def _color_dom_rows(row):
-                    color = verdict_colors.get(row.get("Verdict", ""), "")
-                    return [color] * len(row)
+                    v = (row.get("Verdict") or "").lower()
+                    if v in ("low", "unknown") or not v:
+                        return [""] * len(row)
+                    return [f"background-color: {severity_color(v, 'rgba')};"] * len(row)
 
                 styled = df_doms.style.apply(_color_dom_rows, axis=1)
 
@@ -1654,9 +1645,9 @@ def render_tls_certificates(result_col, tls_analysis: dict | None):
                 def highlight_risk(row):
                     risk = row.get("risk_score", 0)
                     if risk >= 0.5:
-                        return ["background-color: #ffcccb"] * len(row)  # Light red for high risk
+                        return [f"background-color: {severity_color('high', 'rgba')};"] * len(row)
                     elif risk >= 0.3:
-                        return ["background-color: #fff3cd"] * len(row)  # Light yellow for medium risk
+                        return [f"background-color: {severity_color('medium', 'rgba')};"] * len(row)
                     return [""] * len(row)
 
                 styled_df = df_certs[display_cols].style.apply(highlight_risk, axis=1)
@@ -1880,11 +1871,9 @@ def render_yara_results(result_col, yara_results: dict | None):
 
                         # Color-code by severity
                         def highlight_severity(row):
-                            sev = row.get("Severity", "")
-                            if sev == "critical":
-                                return ["background-color: #ffcccb"] * len(row)
-                            elif sev == "high":
-                                return ["background-color: #fff3cd"] * len(row)
+                            sev = (row.get("Severity") or "").lower()
+                            if sev in ("critical", "high"):
+                                return [f"background-color: {severity_color(sev, 'rgba')};"] * len(row)
                             return [""] * len(row)
 
                         styled_df = df_matches.style.apply(highlight_severity, axis=1)
@@ -1971,9 +1960,9 @@ def render_attack_mapping(result_col, attack_mapping):
                     conf_str = row.get("Confidence", "0%")
                     conf = float(conf_str.replace("%", "")) / 100
                     if conf >= 0.8:
-                        return ["background-color: #ffcccb"] * len(row)
+                        return [f"background-color: {severity_color('high', 'rgba')};"] * len(row)
                     elif conf >= 0.6:
-                        return ["background-color: #fff3cd"] * len(row)
+                        return [f"background-color: {severity_color('medium', 'rgba')};"] * len(row)
                     return [""] * len(row)
 
                 styled_df = df.style.apply(highlight_confidence, axis=1)
@@ -2122,12 +2111,8 @@ def render_ioc_scores(result_col, scored_iocs: list | None):
 
                 def highlight_priority(row):
                     priority = row.get("Priority", "").lower()
-                    if priority == "critical":
-                        return ["background-color: #ff6b6b"] * len(row)
-                    elif priority == "high":
-                        return ["background-color: #ffa94d"] * len(row)
-                    elif priority == "medium":
-                        return ["background-color: #ffd43b"] * len(row)
+                    if priority in ("critical", "high", "medium"):
+                        return [f"background-color: {severity_color(priority)};"] * len(row)
                     return [""] * len(row)
 
                 styled_df = df.style.apply(highlight_priority, axis=1)
@@ -2429,12 +2414,8 @@ def render_correlation_results(result_col, correlations: list | None):
 
                 def highlight_verdict(row):
                     v = row.get("Verdict", "").lower()
-                    if v == "critical":
-                        return ["background-color: #ff6b6b"] * len(row)
-                    elif v == "high":
-                        return ["background-color: #ffa94d"] * len(row)
-                    elif v == "medium":
-                        return ["background-color: #ffd43b"] * len(row)
+                    if v in ("critical", "high", "medium"):
+                        return [f"background-color: {severity_color(v)};"] * len(row)
                     return [""] * len(row)
 
                 styled_df = df.style.apply(highlight_verdict, axis=1)

@@ -63,6 +63,7 @@ from app.ui.layout import (
     render_port_anomalies,
     render_query_velocity,
     render_report,
+    render_severity_legend,
     render_threat_summary,
     render_tls_certificates,
     render_yara_results,
@@ -825,6 +826,7 @@ with tab_dashboard:
         tls_analysis=st.session_state.get("tls_analysis"),
         dns_analysis=st.session_state.get("dns_analysis"),
     )
+    render_severity_legend()
 
     feats = st.session_state.get("features") or {}
     all_flows = feats.get("flows") or []

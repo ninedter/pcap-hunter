@@ -8,6 +8,19 @@ import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 
+from app.ui.colors import severity_color
+
+
+def _threat_score_color(score: float) -> str:
+    """Map a 0-1 threat score onto the shared severity palette."""
+    if score >= 0.7:
+        return severity_color("critical")
+    elif score >= 0.4:
+        return severity_color("high")
+    elif score >= 0.2:
+        return severity_color("medium")
+    return severity_color("clean")
+
 
 def plot_world_map(
     ip_data: list[dict[str, Any]],
@@ -39,17 +52,7 @@ def plot_world_map(
     if not df.empty:
         # Add threat score to each IP for coloring
         df["threat"] = df["ip"].map(lambda ip: threat_scores.get(ip, 0))
-
-        def _threat_color(score):
-            if score >= 0.7:
-                return "red"
-            elif score >= 0.4:
-                return "orange"
-            elif score >= 0.2:
-                return "yellow"
-            return "cyan"
-
-        df["color"] = df["threat"].map(_threat_color)
+        df["color"] = df["threat"].map(_threat_score_color)
 
         df_agg = (
             df.groupby(["lat", "lon", "city", "country"])
@@ -57,7 +60,7 @@ def plot_world_map(
             .reset_index()
         )
         # Re-apply color based on max threat in cluster
-        df_agg["color"] = df_agg["threat"].map(_threat_color)
+        df_agg["color"] = df_agg["threat"].map(_threat_score_color)
 
         fig.add_trace(
             go.Scattergeo(
@@ -510,17 +513,7 @@ def plot_network_graph(
     node_x = [pos[n][0] for n in nodes]
     node_y = [pos[n][1] for n in nodes]
     node_sizes = [min(8 + (node_conns[n] / max(node_conns.values())) * 25, 35) for n in nodes]
-    node_colors = []
-    for n in nodes:
-        score = threat_scores.get(n, 0)
-        if score >= 0.7:
-            node_colors.append("#FF4444")
-        elif score >= 0.4:
-            node_colors.append("#FFA500")
-        elif score >= 0.2:
-            node_colors.append("#FFD700")
-        else:
-            node_colors.append("#4A90E2")
+    node_colors = [_threat_score_color(threat_scores.get(n, 0)) for n in nodes]
 
     node_text = [
         f"{n}<br>Connections: {node_conns[n]}" + (f"<br>Threat: {threat_scores[n]:.0%}" if n in threat_scores else "")

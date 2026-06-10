@@ -8,6 +8,7 @@ import pandas as pd
 import streamlit as st
 
 from app.database import Analysis, Case, CaseRepository, CaseStatus, IOCType, Severity
+from app.ui.colors import severity_color
 from app.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -166,10 +167,8 @@ def _render_case_list():
     # Color-code by severity
     def highlight_severity(row):
         sev = row.get("Severity", "").lower()
-        if sev == "critical":
-            return ["background-color: #ffcccb"] * len(row)
-        elif sev == "high":
-            return ["background-color: #fff3cd"] * len(row)
+        if sev in ("critical", "high"):
+            return [f"background-color: {severity_color(sev, 'rgba')};"] * len(row)
         return [""] * len(row)
 
     styled_df = df.style.apply(highlight_severity, axis=1)

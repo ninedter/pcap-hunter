@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     import pandas as pd
 
+from app.ui.colors import SEVERITY_COLORS, SEVERITY_ORDER, severity_color
 from app.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -1076,7 +1077,16 @@ class PDFReportGenerator:
 
     def _get_styles(self) -> str:
         """Get CSS styles for the PDF."""
-        return """
+        severity_badge_css = "\n".join(
+            f".severity.{lvl} {{ background-color: {SEVERITY_COLORS[lvl]['bg']}; "
+            f"color: {SEVERITY_COLORS[lvl]['fg']}; }}"
+            for lvl in SEVERITY_ORDER
+        )
+        severity_row_css = "\n".join(
+            f".severity-{lvl} {{ background-color: {SEVERITY_COLORS[lvl]['rgba']}; }}" for lvl in SEVERITY_ORDER
+        )
+        return (
+            """
 @page {
     size: A4;
     margin: 2cm;
@@ -1274,20 +1284,6 @@ tr:nth-child(even) {
     border-radius: 3px;
 }
 
-.alert-high {
-    background-color: #ffebee;
-    border-left: 4px solid #e94560;
-}
-
-.alert-medium {
-    background-color: #fff8e1;
-    border-left: 4px solid #ff9800;
-}
-
-.risk-high {
-    background-color: #ffebee;
-}
-
 .severity-breakdown {
     margin: 1em 0;
     display: flex;
@@ -1300,17 +1296,27 @@ tr:nth-child(even) {
     border-radius: 3px;
     font-size: 9pt;
 }
+"""
+            + f"""
+.alert-high {{
+    background-color: {severity_color("high", "rgba")};
+    border-left: 4px solid {severity_color("high")};
+}}
 
-.severity.critical { background-color: #d32f2f; color: white; }
-.severity.high { background-color: #f57c00; color: white; }
-.severity.medium { background-color: #fbc02d; color: black; }
-.severity.low { background-color: #7cb342; color: white; }
-.severity.clean { background-color: #4caf50; color: white; }
+.alert-medium {{
+    background-color: {severity_color("medium", "rgba")};
+    border-left: 4px solid {severity_color("medium")};
+}}
 
-.severity-critical { background-color: #ffebee; }
-.severity-high { background-color: #fff3e0; }
-.severity-medium { background-color: #fffde7; }
+.risk-high {{
+    background-color: {severity_color("high", "rgba")};
+}}
 
+{severity_badge_css}
+
+{severity_row_css}
+"""
+            + """
 code {
     font-family: 'Courier New', monospace;
     background-color: #f5f5f5;
@@ -1324,6 +1330,7 @@ code {
     border-radius: 5px;
 }
 """
+        )
 
 
 def generate_pdf_report(

@@ -1483,10 +1483,15 @@ def render_flows(result_col, flows: list[dict] | None):
                     col_cfg["count"] = st.column_config.NumberColumn("Packets", format="%d")
                 if "bytes" in display_df.columns:
                     col_cfg["bytes"] = st.column_config.NumberColumn("Bytes", format="%d")
+                # Epoch → naive UTC; label the columns so analysts don't read them as local time.
                 if "first_ts" in display_df.columns:
-                    col_cfg["first_ts"] = st.column_config.DatetimeColumn("First Seen", format="YYYY-MM-DD HH:mm:ss")
+                    col_cfg["first_ts"] = st.column_config.DatetimeColumn(
+                        "First Seen (UTC)", format="YYYY-MM-DD HH:mm:ss"
+                    )
                 if "last_ts" in display_df.columns:
-                    col_cfg["last_ts"] = st.column_config.DatetimeColumn("Last Seen", format="YYYY-MM-DD HH:mm:ss")
+                    col_cfg["last_ts"] = st.column_config.DatetimeColumn(
+                        "Last Seen (UTC)", format="YYYY-MM-DD HH:mm:ss"
+                    )
 
                 # Export uses the raw numeric df (no datetime conversion needed for CSV/JSON)
                 render_export_buttons(df[display_cols], "flows", key_suffix="flows", is_dataframe=True)

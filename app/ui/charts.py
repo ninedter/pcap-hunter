@@ -277,7 +277,7 @@ def plot_flow_timeline(flows: list[dict[str, Any]]) -> go.Figure:
         title="Analysis Timeline (Flows & Volume)",
         template="plotly_dark",
         height=500,
-        xaxis_title=None,
+        xaxis_title="Time (UTC)",
         yaxis_title="Flow Duration (s)",
         yaxis=dict(gridcolor="rgba(255,255,255,0.05)", zerolinecolor="rgba(255,255,255,0.1)"),
         yaxis2=dict(
@@ -298,7 +298,7 @@ def plot_flow_timeline(flows: list[dict[str, Any]]) -> go.Figure:
             font=dict(size=10),
             bgcolor="rgba(0,0,0,0)",
         ),
-        hovermode="closest",
+        hovermode="x unified",
         margin=dict(l=50, r=50, t=80, b=40),
         xaxis=dict(
             gridcolor="rgba(255,255,255,0.05)",
@@ -333,7 +333,7 @@ def plot_top_n_charts(data: dict[str, dict[str, int]], title: str) -> go.Figure:
         orientation="h",
         title=title,
         template="plotly_dark",
-        labels={"x": "Frequency", "y": ""},  # Hide redundant 'Indicator' label
+        labels={"x": "Flows", "y": ""},  # Hide redundant category label; x counts flows
         color_discrete_sequence=["#4A90E2"],  # Professional blue
     )
     fig.update_layout(
@@ -425,7 +425,7 @@ def plot_attack_timeline(timeline_events: list[dict[str, Any]]) -> go.Figure:
         title="Attack Timeline",
         template="plotly_dark",
         height=400,
-        xaxis_title="Time",
+        xaxis_title="Time (UTC)",
         yaxis=dict(
             title="Severity",
             tickvals=[0, 1, 2, 3, 4],
@@ -440,7 +440,7 @@ def plot_attack_timeline(timeline_events: list[dict[str, Any]]) -> go.Figure:
             x=0.5,
             font=dict(size=10),
         ),
-        hovermode="closest",
+        hovermode="x unified",
         margin=dict(l=60, r=20, t=50, b=40),
     )
     return fig
@@ -848,7 +848,7 @@ def plot_traffic_timeline_heatmap(flows: list[dict]) -> go.Figure | None:
     fig.update_layout(
         margin=dict(l=0, r=0, t=40, b=0),
         xaxis_title="Time (minutes from capture start)",
-        yaxis_title="",
+        yaxis_title="Destination IP",
     )
     return fig
 
@@ -883,7 +883,7 @@ def plot_packet_size_histogram(flows: list[dict]) -> go.Figure | None:
         x="Packet Size (bytes)",
         nbins=50,
         title="Packet Size Distribution",
-        labels={"count": "Frequency"},
+        labels={"Packet Size (bytes)": "Packet size (bytes)", "count": "Packet count"},
         height=350,
         color_discrete_sequence=["#4A90E2"],
     )
@@ -934,6 +934,7 @@ def plot_inter_arrival_histogram(flows: list[dict]) -> go.Figure | None:
         x="Inter-Arrival Time (seconds)",
         nbins=60,
         title="Inter-Arrival Time Distribution",
+        labels={"Inter-Arrival Time (seconds)": "Inter-arrival time (s)", "count": "Count"},
         height=350,
         color_discrete_sequence=["#51CF66"],
     )

@@ -21,7 +21,7 @@ Always run tests with `PYTHONPATH=.` — this is required for absolute imports t
 
 ```
 app/
-├── main.py              # Streamlit entry point (session state, 8-tab UI)
+├── main.py              # Streamlit entry point (session state, 9-tab UI)
 ├── config.py            # App defaults & constants (thresholds, paths)
 ├── analysis/            # Scoring, correlation, flow analysis, narration
 ├── database/            # SQLite case management (models.py, repository.py)
@@ -49,6 +49,11 @@ data/                    # Runtime artifacts (carved/, zeek/, *.db) — gitignor
 8. `yara_scan.py` — YARA rule-based file scanning
 9. `osint.py` — Multi-provider OSINT enrichment (VT, AbuseIPDB, Shodan, etc.)
 10. LLM synthesis — AI-powered threat report generation
+
+Stages 2–3 (PyShark, Zeek) run in parallel; after that parse join, stages 4–7
+(DNS, TLS, beaconing, carving) run concurrently. Zeek and carve write into
+per-run output dirs (`data/zeek|carved/<case>_<uuid8>/`) so concurrent runs
+never clobber each other; stale run dirs are pruned after 7 days.
 
 ## Tech Stack
 
@@ -173,6 +178,9 @@ GitHub Actions (`.github/workflows/ci.yml`):
 - C2 common ports: {4444, 5555, 6666, 7777, 8888, 9999, 1337, 31337}
 - Default PyShark limit: 200,000 packets
 - OSINT top IPs default: 50
+- `MAX_FLOW_SAMPLES`: 5,000 per-flow packet timestamps/lengths (true totals kept in `count`/`first_ts`/`last_ts`)
+- `RUN_DIR_RETENTION_SECONDS`: 7 days — per-run `data/zeek|carved/<run_id>/` dirs pruned on the next run
+- Subprocess timeouts: `ZEEK_TIMEOUT_SECONDS` 600, `PCAP_COUNT_TIMEOUT_SECONDS` 120, `CARVE_TIMEOUT_SECONDS` 300, `TLS_EXTRACT_TIMEOUT_SECONDS` 300, `LLM_PROBE_TIMEOUT_SECONDS` 15
 
 ## Git Conventions
 

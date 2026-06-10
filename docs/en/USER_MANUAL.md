@@ -181,7 +181,7 @@ PCAP Hunter automatically performs **bulk reverse DNS (rDNS) resolution** for al
   - **JA3 Fingerprinting**: Identifies client applications based on SSL hello packets.
   - **Certificate Hygiene**: Alerts on self-signed, expired, or unusual certificates.
 - **YARA Scanning**: Automatically scans files extracted from HTTP traffic.
-  - **Carved Files**: Stored in `./data/carved/`.
+  - **Carved Files**: Each run stores its files in a per-run folder under `./data/carved/<run_id>/`, auto-pruned after 7 days — export anything you need to keep.
   - **Rules**: Uses custom or standard YARA rules to detect known malware families.
 
 ---

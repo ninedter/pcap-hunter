@@ -669,7 +669,12 @@ PCAP analysis runs in a `ProcessPoolExecutor` (default 2 workers). Each worker:
 An hourly background task (`_gc_loop`) automatically cleans up:
 
 - Uploaded PCAPs older than `pcap_ttl_days` (default 7)
-- Carved artifacts older than `artifact_ttl_days` (default 30)
+- Carved artifacts older than `artifact_ttl_days` (default 30) — each pipeline
+  run writes into its own subdirectory (`data/carved/<run_id>/`), and GC removes
+  both expired loose files and expired run directories. Independently of GC, the
+  pipeline runner also prunes run directories older than 7 days
+  (`RUN_DIR_RETENTION_SECONDS`) at the start of each new run, so artifacts are
+  effectively retained for 7 days regardless of the API TTL.
 - Finished job records older than `job_ttl_days` (default 30)
 
 ### Usage Tracking

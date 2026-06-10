@@ -1519,5 +1519,6 @@ with st.expander("Notes & OPSEC"):
 - **Skip** is non-blocking; pipeline continues to next phase.
 - **OSINT limit**: configurable Top-N IPs by traffic; 0 = enrich all.
 - Zeek JSON-first with ASCII fallback; OSINT calls have safe timeouts.
-- Carved binaries stored locally in `/data/carved`; no uploads.
+- Carved binaries stored locally in per-run subfolders (`/data/carved/<run_id>/`); no uploads.
+  Run folders are auto-pruned after 7 days — export anything you need to keep.
 """)

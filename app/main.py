@@ -205,6 +205,8 @@ def _run_single_pcap_pipeline(
         features=features,
         zeek_tables=zeek_tables,
         zeek_log_paths=result.zeek_log_paths,
+        rdns_map=rdns_map,
+        carved_items=result.carved_items,
         osint=osint_data,
         beacon_df=beacon_df if isinstance(beacon_df, pd.DataFrame) else None,
         dns_analysis=result.dns_analysis or {},
@@ -591,6 +593,10 @@ with tab_progress:
             st.session_state["beacon_df"] = batch_result.merged_beacons
             st.session_state["dns_analysis"] = batch_result.aggregated_dns
             st.session_state["tls_analysis"] = batch_result.aggregated_tls
+            # Carved payloads concatenated across all successful files
+            st.session_state["carved"] = [
+                item for r in batch_result.pcap_results if not r.error for item in r.carved_items
+            ]
 
             # rDNS for merged IPs
             from app.utils.network_utils import bulk_resolve_ips
@@ -663,20 +669,18 @@ with tab_progress:
             zeek_tables = result.zeek_tables
             beacon_df = result.beacon_df if isinstance(result.beacon_df, pd.DataFrame) else pd.DataFrame()
             osint_data = result.osint
-            carved = []  # carved is handled inside the pipeline now
 
             st.session_state["features"] = features
             st.session_state["zeek_tables"] = zeek_tables
             st.session_state["beacon_df"] = beacon_df
             st.session_state["osint"] = osint_data
+            st.session_state["carved"] = result.carved_items
             st.session_state["dns_analysis"] = result.dns_analysis or None
             st.session_state["tls_analysis"] = result.tls_analysis or None
 
-            # rDNS map for dashboard hostname display
-            from app.utils.network_utils import bulk_resolve_ips
-
-            _pub = [ip for ip in features.get("artifacts", {}).get("ips", []) if is_public_ipv4(ip)]
-            st.session_state["rdns_map"] = bulk_resolve_ips(_pub, max_workers=C.RDNS_MAX_WORKERS)
+            # rDNS map for dashboard hostname display — already resolved once
+            # inside the pipeline; reuse it instead of re-resolving.
+            st.session_state["rdns_map"] = result.rdns_map
 
             # Extract JA3 from this run's actual log paths (per-run ZEEK_DIR subdir)
             from app.pipeline.zeek import extract_ja3_from_zeek_tables
@@ -731,7 +735,8 @@ with tab_progress:
                     try:
                         if isinstance(beacon_df, pd.DataFrame):
                             beacon_rows = beacon_df.to_dict(orient="records")
-                    except Exception:
+                    except Exception as e:
+                        logger.debug("beacon rows conversion for LLM context failed: %s", e)
                         beacon_rows = []
 
                     context = {
@@ -757,7 +762,7 @@ with tab_progress:
 
                     # Include batch context if in batch mode
                     if batch_mode and st.session_state.get("__batch_result"):
-                        br = st.session_state["__batch_result"]
+                        br = st.session_state.get("__batch_result")
                         context["batch_summary"] = br.summary
                         context["cross_file_indicators"] = [ind for ind in br.correlation.common_indicators[:20]]
 
@@ -1216,8 +1221,8 @@ with tab_dashboard:
                 use_container_width=True,
             )
             render_chart_hint("Diamond markers show events by severity and time.")
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug("chart rendering failed: %s", e)
 
     # --- Traffic profiling charts ---
     if filtered_flows:

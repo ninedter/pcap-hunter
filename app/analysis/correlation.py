@@ -253,11 +253,11 @@ def correlate_indicators(
     beacon_lookup: dict[str, float] = {}
     if beacon_df is not None:
         try:
-            for _, row in beacon_df.iterrows():
-                dst = row.get("dst", "")
-                score = row.get("score", 0)
-                if dst and score > 0:
-                    beacon_lookup[dst] = max(beacon_lookup.get(dst, 0), score)
+            # Vectorized max-score-per-dst (rank_beaconing emits "dst"/"score";
+            # dst can repeat across src/port combos). Keeps only truthy dsts
+            # with positive scores, same as the previous row-by-row loop.
+            valid = beacon_df[beacon_df["dst"].astype(bool) & (beacon_df["score"] > 0)]
+            beacon_lookup = valid.groupby("dst")["score"].max().to_dict()
         except Exception:
             pass
 

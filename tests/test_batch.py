@@ -100,7 +100,7 @@ class TestCorrelateResults:
 
 
 class TestPCAPResultShape:
-    """PCAPResult carries the per-run zeek log paths for downstream JA3 extraction."""
+    """PCAPResult carries per-run zeek log paths, rDNS results, and carved items downstream."""
 
     def test_zeek_log_paths_defaults_empty(self):
         result = PCAPResult(path="/data/test.pcap", filename="test.pcap")
@@ -110,6 +110,33 @@ class TestPCAPResultShape:
         paths = {"ssl.log": "/data/zeek/run_ab12cd34/ssl.log"}
         result = PCAPResult(path="/data/test.pcap", filename="test.pcap", zeek_log_paths=paths)
         assert result.zeek_log_paths == paths
+
+    def test_rdns_map_defaults_empty(self):
+        result = PCAPResult(path="/data/test.pcap", filename="test.pcap")
+        assert result.rdns_map == {}
+
+    def test_rdns_map_accepts_mapping(self):
+        rdns = {"8.8.8.8": "dns.google"}
+        result = PCAPResult(path="/data/test.pcap", filename="test.pcap", rdns_map=rdns)
+        assert result.rdns_map == rdns
+
+    def test_carved_items_defaults_empty(self):
+        result = PCAPResult(path="/data/test.pcap", filename="test.pcap")
+        assert result.carved_items == []
+
+    def test_carved_items_accepts_records(self):
+        carved = [
+            {
+                "time": "2026-01-01 00:00:00",
+                "tcp_stream": 3,
+                "content_type": "application/octet-stream",
+                "content_length": 1024,
+                "sha256": "a" * 64,
+                "path": "/data/carved/run_ab12cd34/stream3.bin",
+            }
+        ]
+        result = PCAPResult(path="/data/test.pcap", filename="test.pcap", carved_items=carved)
+        assert result.carved_items == carved
 
 
 class TestMergeZeekTables:

@@ -37,6 +37,18 @@ class TestIsPublicIPv4:
     def test_ipv6(self):
         assert is_public_ipv4("::1") is False
 
+    def test_lru_cached(self):
+        """is_public_ipv4 is lru_cache-decorated and stays correct on repeat calls."""
+        is_public_ipv4.cache_clear()
+        assert is_public_ipv4("8.8.8.8") is True
+        assert is_public_ipv4("10.0.0.1") is False
+        info = is_public_ipv4.cache_info()
+        assert info.currsize >= 2
+        # Repeat calls hit the cache and return the same results
+        assert is_public_ipv4("8.8.8.8") is True
+        assert is_public_ipv4("10.0.0.1") is False
+        assert is_public_ipv4.cache_info().hits > info.hits
+
 
 class TestValidateDomain:
     def test_valid_domain(self):

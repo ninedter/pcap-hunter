@@ -536,7 +536,10 @@ def extract_from_zeek_ssl(zeek_tables: dict[str, pd.DataFrame]) -> list[dict[str
         return []
 
     certs = []
-    for _, row in ssl_df.iterrows():
+    # to_dict("records") is much faster than iterrows(); the body only uses
+    # row.get(...), which behaves identically on dicts (NaN values still
+    # stringify to "nan" and non-numeric ports still raise into the except).
+    for row in ssl_df.to_dict(orient="records"):
         try:
             cert = {
                 "src": str(row.get("id.orig_h", row.get("id_orig_h", ""))),

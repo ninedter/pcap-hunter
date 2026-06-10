@@ -74,6 +74,13 @@ class PCAPResult:
     # Actual on-disk zeek log paths for this run (per-run subdir of ZEEK_DIR) —
     # used for JA3 extraction instead of reconstructing paths from the shared base.
     zeek_log_paths: dict[str, str] = field(default_factory=dict)
+    # rDNS results ({ip: hostname}) resolved once inside the pipeline —
+    # reused for the dashboard hostname display instead of re-resolving.
+    rdns_map: dict[str, str] = field(default_factory=dict)
+    # Carved HTTP payload metadata dicts (time/tcp_stream/content_type/
+    # content_length/sha256/path) — feeds the carved-files UI panel and the
+    # LLM report context.
+    carved_items: list[dict] = field(default_factory=list)
     osint: dict[str, Any] = field(default_factory=dict)
     beacon_df: pd.DataFrame | None = None
     dns_analysis: dict[str, Any] = field(default_factory=dict)

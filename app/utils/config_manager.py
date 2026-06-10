@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import json
+import logging
 import os
 import platform
 from pathlib import Path
@@ -12,6 +13,8 @@ from typing import Any
 from cryptography.fernet import Fernet
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
+
+logger = logging.getLogger(__name__)
 
 # Keys that should be encrypted
 SENSITIVE_KEYS = {
@@ -116,7 +119,8 @@ class ConfigManager:
         try:
             encrypted = value[4:-1]  # Remove "ENC[" and "]"
             return self._fernet.decrypt(encrypted.encode()).decode()
-        except Exception:
+        except Exception as e:
+            logger.warning("config operation failed: %s", e)
             return ""  # Return empty on decryption failure
 
     def load(self) -> dict[str, Any]:

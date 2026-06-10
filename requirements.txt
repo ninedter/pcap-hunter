@@ -13,7 +13,6 @@ openai>=1.30.0,<3.0
 
 # HTTP / API requests
 requests>=2.32,<3.0
-httpx>=0.27,<1.0
 
 # Data handling
 tqdm>=4.66,<5.0

@@ -1173,5 +1173,6 @@ def fetch_models(base_url: str, api_key: str) -> list[str]:
         client = OpenAI(base_url=base_url, api_key=api_key or "lm-studio", timeout=C.LLM_PROBE_TIMEOUT_SECONDS)
         models = client.models.list()
         return [m.id for m in models]
-    except Exception:
+    except Exception as e:
+        logger.warning("failed to fetch models from %s: %s", base_url, e)
         return []

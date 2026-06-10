@@ -100,6 +100,15 @@ def get_df_state(key: str) -> pd.DataFrame:
     return val if isinstance(val, pd.DataFrame) else pd.DataFrame()
 
 
+def _precompute_dash_aggregates(flows: list | None) -> None:
+    """Cache dashboard top-N aggregates for the unfiltered fast path.
+
+    Flow-count semantics — one increment per flow row, matching the legacy
+    dashboard behaviour.
+    """
+    st.session_state["dash_aggregates"] = compute_flow_aggregates(flows, top_n=10, weight="flows")
+
+
 def _ss_default(key: str, value):
     if key not in st.session_state:
         st.session_state[key] = value
@@ -599,10 +608,7 @@ with tab_progress:
                 item for r in batch_result.pcap_results if not r.error for item in r.carved_items
             ]
 
-            # Precompute dashboard top-N aggregates (flow-count semantics — one
-            # increment per flow row, matching legacy dashboard behaviour).
-            _batch_flows = (st.session_state.get("features") or {}).get("flows")
-            st.session_state["dash_aggregates"] = compute_flow_aggregates(_batch_flows, top_n=10, weight="flows")
+            _precompute_dash_aggregates((st.session_state.get("features") or {}).get("flows"))
 
             # rDNS for merged IPs
             from app.utils.network_utils import bulk_resolve_ips
@@ -684,11 +690,7 @@ with tab_progress:
             st.session_state["dns_analysis"] = result.dns_analysis or None
             st.session_state["tls_analysis"] = result.tls_analysis or None
 
-            # Precompute dashboard top-N aggregates (flow-count semantics — one
-            # increment per flow row, matching legacy dashboard behaviour).
-            st.session_state["dash_aggregates"] = compute_flow_aggregates(
-                features.get("flows"), top_n=10, weight="flows"
-            )
+            _precompute_dash_aggregates(features.get("flows"))
 
             # rDNS map for dashboard hostname display — already resolved once
             # inside the pipeline; reuse it instead of re-resolving.

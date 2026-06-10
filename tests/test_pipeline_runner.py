@@ -166,6 +166,135 @@ def test_streamlit_to_options_mapping():
     assert opts.osint_top_n == 50
 
 
+def test_stages_4_to_7_run_concurrently(monkeypatch, tmp_path):
+    """Stages 4 (DNS), 5 (TLS), 6 (beacon), 7 (carve) must overlap in time.
+
+    All upstream stages are stubbed so only the post-parse fan-out is exercised.
+    Each of the four stage functions increments a lock-protected counter, sleeps,
+    then decrements — if they run sequentially the observed max concurrency is 1.
+    """
+    import threading
+    import time
+
+    import pandas as pd
+
+    import app.pipeline.runner as R
+    from app.pipeline.progress import CallbackProgress
+    from app.pipeline.runner import PipelineOptions, run_pipeline
+
+    pcap = tmp_path / "fake.pcap"
+    pcap.write_bytes(b"")
+
+    features = {
+        "flows": [
+            {
+                "src": "1.1.1.1",
+                "dst": "2.2.2.2",
+                "sport": "1",
+                "dport": "2",
+                "proto": "tcp",
+                "count": 1,
+                "pkt_times": [1.0],
+                "pkt_lens": [60],
+            }
+        ],
+        "artifacts": {"ips": [], "domains": [], "urls": [], "hashes": [], "ja3": [], "macs": []},
+    }
+
+    monkeypatch.setattr(R, "count_packets_fast", lambda p: 10)
+    monkeypatch.setattr(R, "parse_pcap_pyshark", lambda p, **kw: features)
+    monkeypatch.setattr(R, "run_zeek", lambda p, d, phase=None: {"dns.log": str(tmp_path / "d.log")})
+    monkeypatch.setattr(R, "load_zeek_any", lambda p: pd.DataFrame({"query": ["a.com"]}))
+    monkeypatch.setattr(R, "merge_zeek_dns", lambda zt, f: f)
+
+    lock = threading.Lock()
+    state = {"current": 0, "max": 0}
+
+    def _tracked(return_value):
+        def _fn(*args, **kwargs):
+            with lock:
+                state["current"] += 1
+                state["max"] = max(state["max"], state["current"])
+            time.sleep(0.2)
+            with lock:
+                state["current"] -= 1
+            return return_value
+
+        return _fn
+
+    monkeypatch.setattr(R, "analyze_dns", _tracked({}))
+    monkeypatch.setattr(R, "analyze_certificates", _tracked({}))
+    monkeypatch.setattr(R, "rank_beaconing", _tracked(pd.DataFrame()))
+    monkeypatch.setattr(R, "carve_http_payloads", _tracked([]))
+
+    result = run_pipeline(
+        pcap_path=str(pcap),
+        case_id="concurrency_test",
+        options=PipelineOptions(osint_enabled=False, llm_enabled=False),
+        progress=CallbackProgress(callback=lambda _e: None, total_phases=0),
+    )
+
+    for stage in ("dns_analysis", "tls_certs", "beacon", "carve"):
+        assert stage in result.stages_run, f"{stage} did not run"
+    assert state["max"] >= 2, f"stages 4-7 ran sequentially (max concurrency observed: {state['max']})"
+
+
+def test_stage_order_deterministic_and_carve_hashes_backfilled(monkeypatch, tmp_path):
+    """stages_run keeps the canonical dns→tls→beacon→carve order and carve hashes land in features.
+
+    Regression guard for the fan-out: workers record outcomes per stage, the main
+    thread assembles stages_run in canonical order and backfills carved sha256
+    hashes into features["artifacts"]["hashes"] after the join.
+    """
+    import pandas as pd
+
+    import app.pipeline.runner as R
+    from app.pipeline.progress import CallbackProgress
+    from app.pipeline.runner import PipelineOptions, run_pipeline
+
+    pcap = tmp_path / "fake.pcap"
+    pcap.write_bytes(b"")
+
+    features = {
+        "flows": [
+            {
+                "src": "1.1.1.1",
+                "dst": "2.2.2.2",
+                "sport": "1",
+                "dport": "2",
+                "proto": "tcp",
+                "count": 1,
+                "pkt_times": [1.0],
+                "pkt_lens": [60],
+            }
+        ],
+        "artifacts": {"ips": [], "domains": [], "urls": [], "hashes": [], "ja3": [], "macs": []},
+    }
+    carved_sha = "ff" * 32
+
+    monkeypatch.setattr(R, "count_packets_fast", lambda p: 10)
+    monkeypatch.setattr(R, "parse_pcap_pyshark", lambda p, **kw: features)
+    monkeypatch.setattr(R, "run_zeek", lambda p, d, phase=None: {"dns.log": str(tmp_path / "d.log")})
+    monkeypatch.setattr(R, "load_zeek_any", lambda p: pd.DataFrame({"query": ["a.com"]}))
+    monkeypatch.setattr(R, "merge_zeek_dns", lambda zt, f: f)
+    monkeypatch.setattr(R, "analyze_dns", lambda *a, **kw: {})
+    monkeypatch.setattr(R, "analyze_certificates", lambda *a, **kw: {})
+    monkeypatch.setattr(R, "rank_beaconing", lambda *a, **kw: pd.DataFrame())
+    monkeypatch.setattr(R, "carve_http_payloads", lambda *a, **kw: [{"sha256": carved_sha, "path": "x"}])
+
+    result = run_pipeline(
+        pcap_path=str(pcap),
+        case_id="order_test",
+        options=PipelineOptions(osint_enabled=False, llm_enabled=False),
+        progress=CallbackProgress(callback=lambda _e: None, total_phases=0),
+    )
+
+    canonical = ["dns_analysis", "tls_certs", "beacon", "carve"]
+    observed = [s for s in result.stages_run if s in set(canonical)]
+    assert observed == canonical, f"stage order not deterministic: {result.stages_run}"
+    assert carved_sha in result.features["artifacts"]["hashes"], "carve sha256 backfill missing post-join"
+
+
 def test_run_pipeline_parallel_pyshark_zeek():
     """When both PyShark and Zeek are enabled, they run concurrently via ThreadPoolExecutor.
 

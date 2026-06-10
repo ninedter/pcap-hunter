@@ -244,6 +244,39 @@ def render_threat_summary(
         elif correlations:
             st.caption("No high-severity indicators detected.")
 
+        # --- Explainability expander ---
+        with st.expander("Why this risk level?", expanded=False):
+            st.caption(
+                "Risk is the highest tier triggered below. Correlated, multi-signal findings "
+                "outrank isolated heuristics."
+            )
+            reasons: list[str] = []
+            if critical:
+                reasons.append(f"🔴 {critical} critical correlation finding(s)")
+            if high:
+                reasons.append(f"🟠 {high} high-severity correlation finding(s)")
+            if medium:
+                reasons.append(f"🟡 {medium} medium-severity correlation finding(s)")
+            if yara_count:
+                reasons.append(f"🦠 {yara_count} YARA match(es) in carved files")
+            if beacon_count:
+                reasons.append(f"📡 {beacon_count} beaconing candidate(s) (score ≥ 0.6; needs corroboration)")
+            if tls_issues:
+                reasons.append(f"🔒 {tls_issues} TLS certificate trust issue(s) (expired + self-signed)")
+            if dns_alerts:
+                reasons.append(f"🌐 {dns_alerts} DNS anomaly signal(s) (DGA + tunneling)")
+            if corroboration >= 2 and beacon_count >= 3:
+                reasons.append(
+                    f"⚠️ MEDIUM escalation: {beacon_count} beacon candidate(s) corroborated "
+                    f"by {corroboration} distinct signal categories"
+                )
+            if tls_issues > 0 and dns_alerts > 0:
+                reasons.append("⚠️ MEDIUM escalation: TLS trust issues corroborated by DNS anomalies")
+            if not reasons:
+                reasons.append("✅ No threat signals fired — nothing exceeded thresholds.")
+            for r in reasons:
+                st.markdown(f"- {r}")
+
 
 def render_severity_legend() -> None:
     """One-line color legend so analysts calibrate once, not per-tab."""
@@ -1610,9 +1643,21 @@ def render_tls_certificates(result_col, tls_analysis: dict | None):
             with col4:
                 high_risk = tls_analysis.get("high_risk", 0)
                 if high_risk:
-                    st.metric("High Risk", high_risk, delta="Warning", delta_color="inverse")
+                    st.metric(
+                        "Trust Issues",
+                        high_risk,
+                        delta="Warning",
+                        delta_color="inverse",
+                        help="Certificates with a composite risk score ≥ 0.5 (expired, self-signed, weak keys, "
+                        "suspicious CN patterns, etc.). Neither proves malice; all warrant review.",
+                    )
                 else:
-                    st.metric("High Risk", 0)
+                    st.metric(
+                        "Trust Issues",
+                        0,
+                        help="Certificates with a composite risk score ≥ 0.5 (expired, self-signed, weak keys, "
+                        "suspicious CN patterns, etc.). Neither proves malice; all warrant review.",
+                    )
 
             # Alerts
             alerts = tls_analysis.get("alerts", {})

@@ -48,6 +48,9 @@ yara-python>=4.3.0,<5.0
 
 # Phase 3: PDF Generation (optional — requires system libcairo/pango)
 weasyprint>=60.0,<63.0
+# pydyf 0.11+ breaks weasyprint <63 ("'super' object has no attribute 'transform'") —
+# pip resolves the broken pair on fresh installs without this pin.
+pydyf>=0.10,<0.11
 Jinja2>=3.1.0,<4.0
 markdown>=3.5.0,<4.0
 

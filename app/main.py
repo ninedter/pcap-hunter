@@ -204,6 +204,7 @@ def _run_single_pcap_pipeline(
         filename=filename,
         features=features,
         zeek_tables=zeek_tables,
+        zeek_log_paths=result.zeek_log_paths,
         osint=osint_data,
         beacon_df=beacon_df if isinstance(beacon_df, pd.DataFrame) else None,
         dns_analysis=result.dns_analysis or {},
@@ -598,10 +599,15 @@ with tab_progress:
             _pub = [ip for ip in merged_feats.get("artifacts", {}).get("ips", []) if is_public_ipv4(ip)]
             st.session_state["rdns_map"] = bulk_resolve_ips(_pub, max_workers=C.RDNS_MAX_WORKERS)
 
-            # Extract JA3 from merged Zeek
+            # Extract JA3 from merged Zeek. Each run writes logs into its own
+            # ZEEK_DIR/<run_id> subdir, so use the per-result paths (last file
+            # with an ssl.log wins, matching the pre-existing merge behavior).
             from app.pipeline.zeek import extract_ja3_from_zeek_tables
 
-            zeek_log_paths = {name: str(C.ZEEK_DIR / name) for name in batch_result.merged_zeek.keys()}
+            zeek_log_paths: dict[str, str] = {}
+            for r in batch_result.pcap_results:
+                if not r.error:
+                    zeek_log_paths.update(r.zeek_log_paths)
             ja3_df, ja3_analysis = extract_ja3_from_zeek_tables(zeek_log_paths)
             st.session_state["ja3_df"] = ja3_df
             st.session_state["ja3_analysis"] = ja3_analysis
@@ -674,11 +680,10 @@ with tab_progress:
             _pub = [ip for ip in features.get("artifacts", {}).get("ips", []) if is_public_ipv4(ip)]
             st.session_state["rdns_map"] = bulk_resolve_ips(_pub, max_workers=C.RDNS_MAX_WORKERS)
 
-            # Extract JA3
+            # Extract JA3 from this run's actual log paths (per-run ZEEK_DIR subdir)
             from app.pipeline.zeek import extract_ja3_from_zeek_tables
 
-            zeek_log_paths = {name: str(C.ZEEK_DIR / name) for name in zeek_tables.keys()}
-            ja3_df, ja3_analysis = extract_ja3_from_zeek_tables(zeek_log_paths)
+            ja3_df, ja3_analysis = extract_ja3_from_zeek_tables(result.zeek_log_paths)
             st.session_state["ja3_df"] = ja3_df
             st.session_state["ja3_analysis"] = ja3_analysis
 

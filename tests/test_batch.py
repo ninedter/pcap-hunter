@@ -99,6 +99,19 @@ class TestCorrelateResults:
         assert ip_indicator["file_count"] == 3
 
 
+class TestPCAPResultShape:
+    """PCAPResult carries the per-run zeek log paths for downstream JA3 extraction."""
+
+    def test_zeek_log_paths_defaults_empty(self):
+        result = PCAPResult(path="/data/test.pcap", filename="test.pcap")
+        assert result.zeek_log_paths == {}
+
+    def test_zeek_log_paths_accepts_mapping(self):
+        paths = {"ssl.log": "/data/zeek/run_ab12cd34/ssl.log"}
+        result = PCAPResult(path="/data/test.pcap", filename="test.pcap", zeek_log_paths=paths)
+        assert result.zeek_log_paths == paths
+
+
 class TestMergeZeekTables:
     """Test merging Zeek tables from multiple PCAPs."""
 

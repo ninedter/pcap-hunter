@@ -71,6 +71,9 @@ class PCAPResult:
     filename: str
     features: dict[str, Any] = field(default_factory=dict)
     zeek_tables: dict[str, pd.DataFrame] = field(default_factory=dict)
+    # Actual on-disk zeek log paths for this run (per-run subdir of ZEEK_DIR) —
+    # used for JA3 extraction instead of reconstructing paths from the shared base.
+    zeek_log_paths: dict[str, str] = field(default_factory=dict)
     osint: dict[str, Any] = field(default_factory=dict)
     beacon_df: pd.DataFrame | None = None
     dns_analysis: dict[str, Any] = field(default_factory=dict)

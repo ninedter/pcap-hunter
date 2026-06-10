@@ -10,6 +10,11 @@ DATA_DIR = pathlib.Path(os.getenv("PCAP_HUNTER_DATA_DIR", "data")).resolve()
 CARVE_DIR = DATA_DIR / "carved"
 ZEEK_DIR = DATA_DIR / "zeek"
 
+# Each pipeline run writes Zeek logs and carved payloads into its own subdirectory
+# (CARVE_DIR/<run_id>, ZEEK_DIR/<run_id>) so concurrent jobs never clobber each other.
+# Run dirs older than this window are pruned at the start of the next run.
+RUN_DIR_RETENTION_SECONDS = 7 * 24 * 3600  # 7 days
+
 # LM Studio defaults
 LM_BASE_URL = os.getenv("LM_BASE_URL", "http://localhost:1234/v1")
 LM_API_KEY = os.getenv("LM_API_KEY", "lm-studio")

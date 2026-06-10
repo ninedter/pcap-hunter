@@ -24,7 +24,10 @@ from __future__ import annotations
 
 import logging
 import pathlib
+import re
+import shutil
 import time
+import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from typing import Callable
@@ -55,6 +58,38 @@ WARNING_DNS_ANALYSIS_FAILED = "dns_analysis_failed"
 WARNING_TLS_CERTS_FAILED = "tls_certs_failed"
 WARNING_BEACON_FAILED = "beacon_failed"
 WARNING_CARVE_FAILED = "carve_failed"
+
+
+def _derive_run_id(case_id: str) -> str:
+    """Unique, path-safe directory name for one pipeline run.
+
+    The API job queue runs up to two pipeline processes concurrently, and Zeek
+    writes fixed-name logs (conn.log, dns.log, ...) into its output cwd — so
+    runs must never share an output directory or they silently clobber each
+    other's logs. The uuid suffix keeps concurrent and repeated runs of the
+    same case distinct; sanitization keeps hostile case_ids inside the base dir.
+    """
+    safe = re.sub(r"[^A-Za-z0-9._-]", "_", case_id or "")[:40].lstrip(".") or "run"
+    return f"{safe}_{uuid.uuid4().hex[:8]}"
+
+
+def _prune_stale_run_dirs(base_dir: pathlib.Path, max_age_seconds: float) -> None:
+    """Best-effort removal of per-run subdirectories older than the retention window.
+
+    Only directories are touched — loose files from the old flat layout are left
+    alone. Errors are swallowed: pruning must never break an analysis run.
+    """
+    try:
+        entries = list(base_dir.iterdir())
+    except OSError:
+        return
+    cutoff = time.time() - max_age_seconds
+    for entry in entries:
+        try:
+            if entry.is_dir() and not entry.is_symlink() and entry.stat().st_mtime < cutoff:
+                shutil.rmtree(entry, ignore_errors=True)
+        except OSError:
+            continue
 
 
 @dataclass
@@ -89,10 +124,13 @@ class PipelineResult:
     beacon_df_records: list[dict] = field(default_factory=list)
 
     # Intermediate state — available to callers (e.g. Streamlit) that need to run
-    # further stages (YARA, OSINT) on top of the runner output.  Not serialized by
-    # to_dict() since the API constructs its response from the fields above.
+    # further stages (YARA, OSINT, JA3) on top of the runner output.  Not serialized
+    # by to_dict() since the API constructs its response from the fields above.
+    # zeek_log_paths points at this run's private output dir (ZEEK_DIR/<run_id>) —
+    # consumers must use it instead of reconstructing paths from the shared base dir.
     features: dict = field(default_factory=dict)
     zeek_tables: dict = field(default_factory=dict)
+    zeek_log_paths: dict[str, str] = field(default_factory=dict)
     carved_items: list[dict] = field(default_factory=list)
 
     def to_dict(self) -> dict:
@@ -135,6 +173,16 @@ def run_pipeline(
     stages_run: list[str] = []
     warnings: list[str] = []
 
+    # Per-run output dirs: concurrent jobs (API queue, max_workers=2) must never
+    # share Zeek/carve output or they clobber each other's fixed-name artifacts.
+    run_id = _derive_run_id(case_id)
+    zeek_run_dir = C.ZEEK_DIR / run_id
+    carve_run_dir = C.CARVE_DIR / run_id
+    if options.do_zeek:
+        _prune_stale_run_dirs(C.ZEEK_DIR, C.RUN_DIR_RETENTION_SECONDS)
+    if options.do_carve:
+        _prune_stale_run_dirs(C.CARVE_DIR, C.RUN_DIR_RETENTION_SECONDS)
+
     # Working state accumulated across stages — declared up front so analyzer
     # returns always have safe defaults even when their stage is skipped or fails.
     features: dict = {
@@ -142,6 +190,7 @@ def run_pipeline(
         "artifacts": {"ips": [], "domains": [], "urls": [], "hashes": [], "ja3": []},
     }
     zeek_tables: dict = {}
+    zeek_log_paths: dict[str, str] = {}
     total_pkts: int | None = None
     dns_result: dict = {}
     tls_result: dict = {}
@@ -199,12 +248,13 @@ def run_pipeline(
     def _run_zeek(h) -> None:
         nonlocal zeek_tables
         try:
-            logs = run_zeek(pcap_path, str(C.ZEEK_DIR), phase=h)
+            logs = run_zeek(pcap_path, str(zeek_run_dir), phase=h)
         except Exception as exc:
             logger.error("Zeek failed for %s: %s", filename, exc)
             logs = {}
             warnings.append(WARNING_ZEEK_FAILED)
         if logs:
+            zeek_log_paths.update(logs)
             for name, log_path in logs.items():
                 try:
                     df = load_zeek_any(log_path)
@@ -289,7 +339,7 @@ def run_pipeline(
 
     def _run_carve(h) -> None:
         try:
-            outcomes["carve"] = {"result": carve_http_payloads(pcap_path, str(C.CARVE_DIR), phase=h)}
+            outcomes["carve"] = {"result": carve_http_payloads(pcap_path, str(carve_run_dir), phase=h)}
             h.done("HTTP carving complete.")
         except CarveError as exc:
             logger.error("HTTP carving failed: %s", exc)
@@ -354,5 +404,6 @@ def run_pipeline(
         beacon_df_records=beacon_records,
         features=features,
         zeek_tables=zeek_tables,
+        zeek_log_paths=zeek_log_paths,
         carved_items=carved if options.do_carve else [],
     )

@@ -66,7 +66,18 @@ def _restore_analysis_to_session(analysis: Analysis) -> None:
     st.session_state["osint"] = analysis.osint or {}
     st.session_state["dns_analysis"] = analysis.dns_analysis
     st.session_state["tls_analysis"] = analysis.tls_analysis
+    # Everything below isn't persisted on Analysis — reset it all, otherwise the
+    # dashboard mixes this case's data with leftovers from the previous live run.
     st.session_state["beacon_df"] = pd.DataFrame()
+    st.session_state["ja3_df"] = pd.DataFrame()
+    st.session_state["ja3_analysis"] = {}
+    st.session_state["zeek_tables"] = {}
+    st.session_state["carved"] = []
+    st.session_state["yara_results"] = None
+    st.session_state["correlations"] = []
+    st.session_state["flow_asymmetry"] = []
+    st.session_state["port_anomalies"] = []
+    st.session_state["rdns_map"] = {}
     st.session_state["filter_ips"] = set()
     st.session_state["filter_protos"] = set()
     st.session_state["filter_time"] = None

@@ -38,6 +38,8 @@ def _make_analysis(**overrides) -> Analysis:
         osint={"8.8.8.8": {"abuse_score": 0}},
         dns_analysis={"top_queried": [{"domain": "example.com", "count": 7}]},
         tls_analysis={"certificates": []},
+        yara_results={"matches": [{"rule": "apt_beacon", "file": "carved_1.bin"}]},
+        report="# Threat Report\n\nSuspicious beaconing observed.",
     )
     base.update(overrides)
     return Analysis(**base)

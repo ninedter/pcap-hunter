@@ -123,5 +123,23 @@ class TestStripDuplicateHeading(unittest.TestCase):
         self.assertEqual(self.strip("## Executive Summary", self.aliases), "")
 
 
+class TestProbeTimeouts:
+    def test_test_connection_sets_timeout(self):
+        from app.llm import client as llm_client
+
+        with patch.object(llm_client, "OpenAI") as mock_openai:
+            mock_openai.return_value.chat.completions.create.return_value = MagicMock()
+            llm_client.test_connection("http://localhost:1234/v1", "", "test-model")
+        assert mock_openai.call_args.kwargs.get("timeout") == 15.0
+
+    def test_fetch_models_sets_timeout(self):
+        from app.llm import client as llm_client
+
+        with patch.object(llm_client, "OpenAI") as mock_openai:
+            mock_openai.return_value.models.list.return_value = type("R", (), {"data": []})()
+            llm_client.fetch_models("http://localhost:1234/v1", "")
+        assert mock_openai.call_args.kwargs.get("timeout") == 15.0
+
+
 if __name__ == "__main__":
     unittest.main()

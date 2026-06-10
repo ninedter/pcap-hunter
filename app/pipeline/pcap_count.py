@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import subprocess
 
+from app import config as C
 from app.utils.common import find_bin
 from app.utils.logger import log_runtime_error
 
@@ -18,6 +19,7 @@ def count_packets_fast(pcap_path: str) -> int | None:
                 stderr=subprocess.PIPE,
                 text=True,
                 check=True,
+                timeout=C.PCAP_COUNT_TIMEOUT_SECONDS,
             )
             val = proc.stdout.strip()
             if val.isdigit():
@@ -39,6 +41,7 @@ def count_packets_fast(pcap_path: str) -> int | None:
                 stderr=subprocess.PIPE,
                 text=True,
                 check=True,
+                timeout=C.PCAP_COUNT_TIMEOUT_SECONDS,
             )
             return len(proc.stdout.splitlines())
         except subprocess.CalledProcessError as e:

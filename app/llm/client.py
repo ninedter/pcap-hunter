@@ -5,6 +5,8 @@ from typing import Any
 
 from openai import OpenAI
 
+from app import config as C
+
 logger = logging.getLogger(__name__)
 
 # Patterns that indicate prompt injection attempts in IOC data
@@ -1148,7 +1150,7 @@ def test_connection(base_url: str, api_key: str, model: str) -> str:
         return "Missing Base URL."
 
     try:
-        client = OpenAI(base_url=base_url, api_key=api_key or "lm-studio")
+        client = OpenAI(base_url=base_url, api_key=api_key or "lm-studio", timeout=C.LLM_PROBE_TIMEOUT_SECONDS)
         client.chat.completions.create(
             model=model,
             messages=[{"role": "user", "content": "ping"}],
@@ -1168,7 +1170,7 @@ def fetch_models(base_url: str, api_key: str) -> list[str]:
         return []
 
     try:
-        client = OpenAI(base_url=base_url, api_key=api_key or "lm-studio")
+        client = OpenAI(base_url=base_url, api_key=api_key or "lm-studio", timeout=C.LLM_PROBE_TIMEOUT_SECONDS)
         models = client.models.list()
         return [m.id for m in models]
     except Exception:

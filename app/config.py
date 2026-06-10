@@ -39,6 +39,12 @@ OSINT_CACHE_TTL_HOURS = 24  # OSINT response cache TTL
 PARALLEL_PARSE_ENABLED = True  # Run PyShark + Zeek in parallel
 MAX_PARALLEL_WORKERS = 3  # Max worker threads for pipeline stages
 
+# Subprocess wall-clock timeouts (seconds). A malformed PCAP must never hang the pipeline.
+ZEEK_TIMEOUT_SECONDS = 600
+PCAP_COUNT_TIMEOUT_SECONDS = 120
+CARVE_TIMEOUT_SECONDS = 300
+LLM_PROBE_TIMEOUT_SECONDS = 15.0  # test_connection / fetch_models quick probes
+
 # Reverse DNS
 RDNS_CACHE_TTL_HOURS = 168  # 7 days
 RDNS_MAX_WORKERS = 10  # Concurrent rDNS lookups

@@ -6,6 +6,7 @@ import subprocess
 
 import pandas as pd
 
+from app import config as C
 from app.pipeline.state import PhaseHandle
 from app.utils.common import ensure_dir, find_bin
 from app.utils.logger import log_runtime_error
@@ -32,7 +33,15 @@ def run_zeek(pcap_path: str, out_dir: str, phase: PhaseHandle | None = None) -> 
     if phase:
         phase.set(5, "Launching Zeek (JSON logs)…")
     try:
-        subprocess.run(cmd_json, cwd=out_dir, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        subprocess.run(
+            cmd_json,
+            cwd=out_dir,
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=C.ZEEK_TIMEOUT_SECONDS,
+        )
         if phase:
             phase.set(60, "Zeek (JSON) completed, collecting logs…")
     except subprocess.CalledProcessError as e:
@@ -41,7 +50,13 @@ def run_zeek(pcap_path: str, out_dir: str, phase: PhaseHandle | None = None) -> 
             phase.set(20, "Retrying Zeek with ASCII logs…")
         try:
             subprocess.run(
-                cmd_ascii, cwd=out_dir, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
+                cmd_ascii,
+                cwd=out_dir,
+                check=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                timeout=C.ZEEK_TIMEOUT_SECONDS,
             )
             if phase:
                 phase.set(60, "Zeek (ASCII) completed, collecting logs…")

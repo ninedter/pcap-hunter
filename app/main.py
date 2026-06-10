@@ -599,16 +599,14 @@ with tab_progress:
             _pub = [ip for ip in merged_feats.get("artifacts", {}).get("ips", []) if is_public_ipv4(ip)]
             st.session_state["rdns_map"] = bulk_resolve_ips(_pub, max_workers=C.RDNS_MAX_WORKERS)
 
-            # Extract JA3 from merged Zeek. Each run writes logs into its own
-            # ZEEK_DIR/<run_id> subdir, so use the per-result paths (last file
-            # with an ssl.log wins, matching the pre-existing merge behavior).
-            from app.pipeline.zeek import extract_ja3_from_zeek_tables
+            # Extract JA3 from every successful run's own zeek logs (each run
+            # writes into its own ZEEK_DIR/<run_id> subdir) and combine them,
+            # so batch JA3 reflects all files instead of only the last ssl.log.
+            from app.pipeline.ja3 import extract_ja3_from_multiple_runs
 
-            zeek_log_paths: dict[str, str] = {}
-            for r in batch_result.pcap_results:
-                if not r.error:
-                    zeek_log_paths.update(r.zeek_log_paths)
-            ja3_df, ja3_analysis = extract_ja3_from_zeek_tables(zeek_log_paths)
+            ja3_df, ja3_analysis = extract_ja3_from_multiple_runs(
+                [r.zeek_log_paths for r in batch_result.pcap_results if not r.error]
+            )
             st.session_state["ja3_df"] = ja3_df
             st.session_state["ja3_analysis"] = ja3_analysis
 

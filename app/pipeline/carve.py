@@ -107,7 +107,7 @@ def carve_http_payloads(pcap_path: str, out_dir: str, phase=None) -> list[dict]:
             processed += 1
             if phase:
                 # Total line count is unknown while streaming: capped monotone progression.
-                phase.set(min(90, 10 + processed // 25), f"Carved {processed}")
+                phase.set(min(90, 10 + processed), f"Carved {processed}")
         if not skipped_early:
             # Watchdog is still armed here, so a child that closed stdout but
             # refuses to exit is killed rather than hanging the pool thread.

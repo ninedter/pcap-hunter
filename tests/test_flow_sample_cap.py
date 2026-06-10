@@ -4,6 +4,10 @@ Task 4: Per-flow cap — ensures that pkt_times/pkt_lens lists are bounded to
 MAX_FLOW_SAMPLES entries (keep-first semantics), while flow["count"] keeps
 counting all packets. Also guards that runner._run_beacon strips pkt_times and
 pkt_lens from the serialized beacon records.
+
+Cap regression guards: true flow totals (bytes/first_ts/last_ts) must be
+tracked as scalars beyond the cap, and downstream consumers (flow asymmetry,
+beacon pkts display) must use them instead of the capped sample lists.
 """
 
 from __future__ import annotations
@@ -15,6 +19,7 @@ import pandas as pd
 import pytest
 
 from app import config as C
+from app.analysis.flow_analysis import detect_flow_asymmetry
 from app.pipeline.beacon import rank_beaconing
 
 # ---------------------------------------------------------------------------
@@ -179,6 +184,137 @@ class TestFlowSampleCapRealParsePath:
         assert flow["count"] == 30
         assert len(flow["pkt_times"]) == 30
         assert len(flow["pkt_lens"]) == 30
+
+
+# ---------------------------------------------------------------------------
+# Test A2 — true totals: bytes / first_ts / last_ts stay correct beyond the cap
+# ---------------------------------------------------------------------------
+
+
+class TestFlowTrueTotalsBeyondCap:
+    """Scalar totals must keep tracking ALL packets after sampling stops."""
+
+    def test_bytes_and_timestamps_track_all_packets(self, monkeypatch):
+        """200 packets of 120 bytes with cap=50: bytes/first_ts/last_ts cover all 200."""
+        monkeypatch.setattr(C, "MAX_FLOW_SAMPLES", 50)
+
+        lines = [_make_tshark_line(i) for i in range(200)]
+        fake = FakePopen(lines)
+
+        with (
+            patch("app.utils.common.find_bin", return_value="/usr/bin/tshark"),
+            patch("subprocess.Popen", return_value=fake),
+        ):
+            from app.pipeline.pyshark_pass import parse_pcap_pyshark
+
+            result = parse_pcap_pyshark(
+                "/dev/null",
+                limit_packets=None,
+                phase=None,
+                total_packets=None,
+            )
+
+        flow = result["flows"][0]
+        assert flow["count"] == 200
+        # True byte total: 200 packets x 120 bytes, NOT capped at 50 samples
+        assert flow["bytes"] == 200 * 120
+        # first_ts is the very first packet, last_ts the very last (i=199),
+        # even though pkt_times stops at i=49.
+        assert flow["first_ts"] == float("1700000000.000000")
+        assert flow["last_ts"] == float("1700000000.000199")
+        assert max(flow["pkt_times"]) < flow["last_ts"]
+
+
+# ---------------------------------------------------------------------------
+# Test A3 — flow asymmetry must use the true byte total, not the capped sum
+# ---------------------------------------------------------------------------
+
+
+class TestFlowAsymmetryUsesTrueBytes:
+    """detect_flow_asymmetry prefers flow['bytes'] over sum of capped pkt_lens."""
+
+    def test_capped_flow_bytes_field_triggers_detection(self):
+        """A 16 MB exfil flow whose capped pkt_lens sum to only 80 KB must still flag."""
+        flows = [
+            {
+                # 20,000 packets x 800 bytes = 16 MB true outbound volume,
+                # but only 100 sampled pkt_lens survived the cap (80 KB —
+                # far below the 1 MB ASYMMETRY_MIN_BYTES threshold).
+                "src": "10.0.0.5",
+                "dst": "203.0.113.9",
+                "sport": "50000",
+                "dport": "443",
+                "proto": "tcp",
+                "count": 20000,
+                "bytes": 20000 * 800,
+                "pkt_times": [float(i) for i in range(100)],
+                "pkt_lens": [800] * 100,
+            },
+            {
+                # Tiny inbound direction
+                "src": "203.0.113.9",
+                "dst": "10.0.0.5",
+                "sport": "443",
+                "dport": "50000",
+                "proto": "tcp",
+                "count": 10,
+                "bytes": 10 * 100,
+                "pkt_times": [float(i) for i in range(10)],
+                "pkt_lens": [100] * 10,
+            },
+        ]
+
+        results = detect_flow_asymmetry(flows)
+        assert len(results) >= 1, "true 16 MB outbound volume must be detected despite capped pkt_lens"
+        top = results[0]
+        assert top.outbound_bytes == 16_000_000
+        assert top.is_suspicious
+        assert top.ratio > 10
+
+    def test_fallback_to_pkt_lens_when_bytes_missing(self):
+        """Legacy flows without the bytes field keep the old sum(pkt_lens) path."""
+        flows = [
+            {"src": "10.0.0.1", "dst": "1.2.3.4", "count": 2000, "pkt_lens": [1000] * 2000},
+            {"src": "1.2.3.4", "dst": "10.0.0.1", "count": 10, "pkt_lens": [100] * 10},
+        ]
+        results = detect_flow_asymmetry(flows)
+        assert len(results) >= 1
+        assert results[0].outbound_bytes == 2_000_000
+
+
+# ---------------------------------------------------------------------------
+# Test A4 — beacon pkts column shows the true packet total, not sample length
+# ---------------------------------------------------------------------------
+
+
+class TestBeaconPktsShowsTrueCount:
+    """rank_beaconing displays flow['count'] in pkts; scoring stays on samples."""
+
+    def _make_flow(self, count: int | None, n_samples: int) -> dict:
+        flow = {
+            "src": "10.0.0.5",
+            "dst": "203.0.113.9",
+            "sport": "50000",
+            "dport": "80",
+            "proto": "tcp",
+            "pkt_times": [float(i * 30) for i in range(n_samples)],
+            "pkt_lens": [120] * n_samples,
+        }
+        if count is not None:
+            flow["count"] = count
+        return flow
+
+    def test_pkts_equals_flow_count_on_capped_flow(self):
+        """count=8000 with 5000 sampled timestamps must display pkts == 8000."""
+        df = rank_beaconing([self._make_flow(count=8000, n_samples=5000)], top_n=5)
+        assert not df.empty
+        assert int(df.iloc[0]["pkts"]) == 8000
+
+    def test_pkts_falls_back_to_sample_len_without_count(self):
+        """Flows without a count key (legacy/test data) fall back to len(pkt_times)."""
+        df = rank_beaconing([self._make_flow(count=None, n_samples=50)], top_n=5)
+        assert not df.empty
+        assert int(df.iloc[0]["pkts"]) == 50
 
 
 # ---------------------------------------------------------------------------

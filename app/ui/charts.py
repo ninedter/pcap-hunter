@@ -196,8 +196,13 @@ def plot_flow_timeline(flows: list[dict[str, Any]]) -> go.Figure:
     for f in flows:
         if not f.get("pkt_times"):
             continue
-        start_ts = min(f["pkt_times"])
-        duration = max(f["pkt_times"]) - start_ts
+        # Prefer the true flow extent (first_ts/last_ts survive the per-flow
+        # sample cap); fall back to sampled timestamps for legacy data.
+        first_ts = f.get("first_ts")
+        last_ts = f.get("last_ts")
+        start_ts = first_ts if first_ts is not None else min(f["pkt_times"])
+        end_ts = last_ts if last_ts is not None else max(f["pkt_times"])
+        duration = end_ts - start_ts
         proto = f.get("proto", "Unknown")
         size = f.get("count", 1)
         data.append(

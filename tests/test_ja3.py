@@ -7,6 +7,7 @@ from app.pipeline.ja3 import (
     KNOWN_JA3_FINGERPRINTS,
     analyze_ja3_results,
     calculate_ja3,
+    extract_ja3_from_multiple_runs,
     extract_ja3_from_zeek,
     lookup_ja3,
 )
@@ -201,6 +202,63 @@ class TestExtractJA3FromZeek:
 
         df = extract_ja3_from_zeek(ssl_log)
         assert df.empty
+
+
+class TestExtractJA3FromMultipleRuns:
+    """Batch mode: JA3 must be combined across every run's own ssl.log."""
+
+    @staticmethod
+    def _write_ssl_log(run_dir, src: str, ja3_hash: str) -> str:
+        run_dir.mkdir(parents=True, exist_ok=True)
+        ssl_log = run_dir / "ssl.log"
+        ssl_log.write_text(
+            f'{{"id.orig_h":"{src}","id.resp_h":"8.8.8.8",'
+            f'"id.orig_p":54321,"id.resp_p":443,"ja3":"{ja3_hash}",'
+            f'"ja3s":"efgh5678efgh5678efgh5678efgh5678","server_name":"example.com"}}\n'
+        )
+        return str(ssl_log)
+
+    def test_combines_ja3_across_runs(self, tmp_path):
+        """Two runs with distinct ssl.logs: combined frame covers both files."""
+        # Malware JA3 (Cobalt Strike) in the FIRST run — under the old
+        # last-ssl.log-wins merge this row would be dropped entirely.
+        log1 = self._write_ssl_log(tmp_path / "run1", "192.168.1.1", "72a589da586844d7f0818ce684948eea")
+        log2 = self._write_ssl_log(tmp_path / "run2", "192.168.1.2", "abcd1234abcd1234abcd1234abcd1234")
+
+        df, analysis = extract_ja3_from_multiple_runs(
+            [
+                {"ssl.log": log1, "conn.log": str(tmp_path / "run1" / "conn.log")},
+                {"ssl.log": log2},
+            ]
+        )
+
+        assert len(df) == 2
+        assert set(df["src"]) == {"192.168.1.1", "192.168.1.2"}
+        assert analysis["total_tls_sessions"] == 2
+        assert analysis["unique_ja3"] == 2
+        assert analysis["malware_detected"] is True
+
+    def test_drops_duplicate_rows_across_runs(self, tmp_path):
+        """Identical TLS rows in two runs are de-duplicated in the combined frame."""
+        log1 = self._write_ssl_log(tmp_path / "run1", "192.168.1.1", "abcd1234abcd1234abcd1234abcd1234")
+        log2 = self._write_ssl_log(tmp_path / "run2", "192.168.1.1", "abcd1234abcd1234abcd1234abcd1234")
+
+        df, analysis = extract_ja3_from_multiple_runs([{"ssl.log": log1}, {"ssl.log": log2}])
+
+        assert len(df) == 1
+        assert analysis["total_tls_sessions"] == 1
+
+    def test_empty_paths_list(self):
+        """No runs at all: empty DataFrame and empty analysis dict."""
+        df, analysis = extract_ja3_from_multiple_runs([])
+        assert df.empty
+        assert analysis == {}
+
+    def test_runs_without_ssl_log(self, tmp_path):
+        """Runs that produced no ssl.log are skipped; empty result preserved."""
+        df, analysis = extract_ja3_from_multiple_runs([{"conn.log": str(tmp_path / "conn.log")}, {}])
+        assert df.empty
+        assert analysis == {}
 
 
 class TestKnownFingerprints:

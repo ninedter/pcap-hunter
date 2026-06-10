@@ -233,7 +233,9 @@ def rank_beaconing(flows: list[dict[str, object]], top_n: int = 20) -> pd.DataFr
                 "sport": f.get("sport"),
                 "dport": dport,
                 "proto": f.get("proto"),
-                "pkts": stats["count"],
+                # True packet total (survives the per-flow sample cap); all
+                # scoring statistics above remain computed on the sampled ts.
+                "pkts": f.get("count", len(ts)),
                 "mean_gap": stats["mean_gap"],
                 "std_gap": stats["std_gap"],
                 "cv": stats["cv"],

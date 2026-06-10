@@ -143,6 +143,11 @@ def parse_pcap_pyshark(
                         "dport": str(dport),
                         "proto": proto,
                         "count": 0,
+                        # True totals tracked as scalars — these stay correct
+                        # beyond the MAX_FLOW_SAMPLES cap on the lists below.
+                        "bytes": 0,
+                        "first_ts": ts,
+                        "last_ts": ts,
                         "pkt_times": [],
                         "pkt_lens": [],
                         "mac_src": eth_src,
@@ -154,6 +159,8 @@ def parse_pcap_pyshark(
 
                 flow = out["flows"][idx]
                 flow["count"] += 1
+                flow["bytes"] += pkt_len
+                flow["last_ts"] = ts
                 if len(flow["pkt_times"]) < C.MAX_FLOW_SAMPLES:
                     flow["pkt_times"].append(ts)
                     flow["pkt_lens"].append(pkt_len)

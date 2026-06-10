@@ -71,6 +71,19 @@ class TestRestoreAnalysisToSession:
         assert st.session_state["dns_analysis"] == {"top_queried": [{"domain": "example.com", "count": 7}]}
         assert st.session_state["tls_analysis"] == {"certificates": []}
 
+    def test_persisted_yara_and_report_restored(self):
+        """yara_results and report ARE persisted on Analysis — restore them
+        instead of resetting, so the Results/Report tabs match the case."""
+        analysis = _make_analysis()
+        _restore_analysis_to_session(analysis)
+        assert st.session_state["yara_results"] == {"matches": [{"rule": "apt_beacon", "file": "carved_1.bin"}]}
+        assert st.session_state["report"] == "# Threat Report\n\nSuspicious beaconing observed."
+
+    def test_empty_report_normalized_to_none(self):
+        """Model default is "" but the app's no-report sentinel is None."""
+        _restore_analysis_to_session(_make_analysis(report=""))
+        assert st.session_state["report"] is None
+
     def test_stale_beacon_df_reset(self):
         """beacon_df is not persisted on Analysis — stale rows from a previously
         analyzed capture must not survive a restore."""
@@ -78,6 +91,27 @@ class TestRestoreAnalysisToSession:
         _restore_analysis_to_session(_make_analysis())
         assert isinstance(st.session_state["beacon_df"], pd.DataFrame)
         assert st.session_state["beacon_df"].empty
+
+    def test_stale_non_persisted_keys_reset(self):
+        """Keys with no column on Analysis must not leak data from the previous
+        live run into a restored case."""
+        st.session_state["ja3_df"] = pd.DataFrame([{"ja3": "abc"}])
+        st.session_state["ja3_analysis"] = {"suspicious": ["abc"]}
+        st.session_state["zeek_tables"] = {"dns.log": pd.DataFrame([{"query": "old.example"}])}
+        st.session_state["carved"] = [{"sha256": "deadbeef"}]
+        st.session_state["correlations"] = [{"signal": "old"}]
+        st.session_state["flow_asymmetry"] = [{"src": "9.9.9.9"}]
+        st.session_state["port_anomalies"] = [{"port": 31337}]
+        st.session_state["rdns_map"] = {"9.9.9.9": "old.host"}
+        _restore_analysis_to_session(_make_analysis())
+        assert st.session_state["ja3_df"].empty
+        assert st.session_state["ja3_analysis"] == {}
+        assert st.session_state["zeek_tables"] == {}
+        assert st.session_state["carved"] == []
+        assert st.session_state["correlations"] == []
+        assert st.session_state["flow_asymmetry"] == []
+        assert st.session_state["port_anomalies"] == []
+        assert st.session_state["rdns_map"] == {}
 
     def test_stale_dashboard_filters_cleared(self):
         """Filters reference IPs/time ranges from the prior capture; leaving them

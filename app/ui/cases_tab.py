@@ -49,11 +49,12 @@ def _get_repo() -> CaseRepository:
 def _restore_analysis_to_session(analysis: Analysis) -> None:
     """Load a saved analysis back into session state for the Dashboard/Results tabs.
 
-    Mirrors the session keys the pipeline populates after a live run. beacon_df
-    is not persisted on Analysis, so it is reset instead of leaving stale rows
-    from a previously analyzed capture. Dashboard filters are cleared because
-    they reference IPs/time ranges from the prior capture and would otherwise
-    filter the restored flows down to nothing.
+    Mirrors the session keys the pipeline populates after a live run. Keys that
+    are not persisted on Analysis (beacon_df, zeek_tables, carved files, JA3,
+    correlation/anomaly results) are reset instead of leaving stale data from a
+    previously analyzed capture. Dashboard filters are cleared because they
+    reference IPs/time ranges from the prior capture and would otherwise filter
+    the restored flows down to nothing.
 
     Args:
         analysis: The saved analysis to load into the current session.
@@ -66,6 +67,9 @@ def _restore_analysis_to_session(analysis: Analysis) -> None:
     st.session_state["osint"] = analysis.osint or {}
     st.session_state["dns_analysis"] = analysis.dns_analysis
     st.session_state["tls_analysis"] = analysis.tls_analysis
+    st.session_state["yara_results"] = analysis.yara_results
+    # Model default for report is "" but the app's no-report sentinel is None.
+    st.session_state["report"] = analysis.report or None
     # Everything below isn't persisted on Analysis — reset it all, otherwise the
     # dashboard mixes this case's data with leftovers from the previous live run.
     st.session_state["beacon_df"] = pd.DataFrame()
@@ -73,7 +77,6 @@ def _restore_analysis_to_session(analysis: Analysis) -> None:
     st.session_state["ja3_analysis"] = {}
     st.session_state["zeek_tables"] = {}
     st.session_state["carved"] = []
-    st.session_state["yara_results"] = None
     st.session_state["correlations"] = []
     st.session_state["flow_asymmetry"] = []
     st.session_state["port_anomalies"] = []

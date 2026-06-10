@@ -14,6 +14,7 @@ import pandas as pd
 import streamlit as st
 
 from app import config as C
+from app.analysis.flow_aggregates import compute_flow_aggregates
 from app.llm.client import generate_report
 from app.pipeline.batch import BatchProcessor, PCAPResult
 from app.pipeline.geoip import GeoIP
@@ -598,6 +599,11 @@ with tab_progress:
                 item for r in batch_result.pcap_results if not r.error for item in r.carved_items
             ]
 
+            # Precompute dashboard top-N aggregates (flow-count semantics — one
+            # increment per flow row, matching legacy dashboard behaviour).
+            _batch_flows = (st.session_state.get("features") or {}).get("flows")
+            st.session_state["dash_aggregates"] = compute_flow_aggregates(_batch_flows, top_n=10, weight="flows")
+
             # rDNS for merged IPs
             from app.utils.network_utils import bulk_resolve_ips
 
@@ -677,6 +683,12 @@ with tab_progress:
             st.session_state["carved"] = result.carved_items
             st.session_state["dns_analysis"] = result.dns_analysis or None
             st.session_state["tls_analysis"] = result.tls_analysis or None
+
+            # Precompute dashboard top-N aggregates (flow-count semantics — one
+            # increment per flow row, matching legacy dashboard behaviour).
+            st.session_state["dash_aggregates"] = compute_flow_aggregates(
+                features.get("flows"), top_n=10, weight="flows"
+            )
 
             # rDNS map for dashboard hostname display — already resolved once
             # inside the pipeline; reuse it instead of re-resolving.
@@ -1031,11 +1043,8 @@ with tab_dashboard:
             )
 
         if filtered_flows:
-            # Calculate Top 10s
-            top_src_ips = {}
-            top_dst_ips = {}
-            top_dst_ports = {}
-            top_protos = {}
+            # Calculate Top 10s — use precomputed aggregates when no filters
+            # are active (avoid rescanning all flows on every Streamlit rerun).
             top_domains = {}
             top_src_domains = {}
             top_dst_domains = {}
@@ -1043,22 +1052,29 @@ with tab_dashboard:
             # Use the global toggle from session state
             exclude_private = st.session_state.get("dashboard_exclude_private", False)
 
-            for f in filtered_flows:
-                src = f.get("src")
-                dst = f.get("dst")
-                dport = str(f.get("dport", "N/A"))
-                proto = f.get("proto", "Unknown")
+            _any_filter_active = bool(
+                st.session_state.get("filter_ips")
+                or st.session_state.get("filter_protos")
+                or st.session_state.get("filter_time")
+            )
+            _precomputed = st.session_state.get("dash_aggregates") if not _any_filter_active else None
 
-                if src:
-                    if not exclude_private or is_public_ipv4(src):
-                        top_src_ips[src] = top_src_ips.get(src, 0) + 1
-                if dst:
-                    if not exclude_private or is_public_ipv4(dst):
-                        top_dst_ips[dst] = top_dst_ips.get(dst, 0) + 1
-                if dport:
-                    top_dst_ports[dport] = top_dst_ports.get(dport, 0) + 1
-                if proto:
-                    top_protos[proto] = top_protos.get(proto, 0) + 1
+            if _precomputed and not exclude_private:
+                # Fast path: convert list-of-tuples back to dict for chart calls
+                top_src_ips = dict(_precomputed["top_src_ips"])
+                top_dst_ips = dict(_precomputed["top_dst_ips"])
+                top_dst_ports = dict(_precomputed["top_dst_ports"])
+                top_protos = dict(_precomputed["top_protos"])
+            else:
+                # Slow path: live one-pass scan (used when filters are active or
+                # when exclude_private changes the IP set mid-session).
+                _agg = compute_flow_aggregates(
+                    filtered_flows, top_n=10, weight="flows", exclude_private=exclude_private
+                )
+                top_src_ips = dict(_agg["top_src_ips"])
+                top_dst_ips = dict(_agg["top_dst_ips"])
+                top_dst_ports = dict(_agg["top_dst_ports"])
+                top_protos = dict(_agg["top_protos"])
 
             # Domains from DNS analysis or Zeek logs
             dns_data = st.session_state.get("dns_analysis")

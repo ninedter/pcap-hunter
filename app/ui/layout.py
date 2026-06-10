@@ -1188,6 +1188,11 @@ def render_osint(result_col, osint_data, *, correlations=None, features=None, be
                     on_select="rerun",
                     selection_mode="single-row",
                     key=f"osint_ips_v2_{len(ip_rows)}",
+                    column_config={
+                        "Verdict": st.column_config.TextColumn("Verdict", width="small"),
+                        "IP": st.column_config.TextColumn("IP Address"),
+                        "PTR": st.column_config.TextColumn("PTR / rDNS"),
+                    },
                 )
 
                 current_sel = event.selection.rows
@@ -1460,15 +1465,32 @@ def render_flows(result_col, flows: list[dict] | None):
         with st.expander("Flow Data", expanded=False):
             if flows:
                 df = pd.DataFrame(flows)
-                # Select key columns if available
-                display_cols = ["src", "dst", "sport", "dport", "proto", "count"]
+                # Core display columns; add timestamps/bytes when present
+                display_cols = ["src", "dst", "sport", "dport", "proto", "count", "bytes", "first_ts", "last_ts"]
                 display_cols = [c for c in display_cols if c in df.columns]
-                if display_cols:
-                    render_export_buttons(df[display_cols], "flows", key_suffix="flows", is_dataframe=True)
-                    st.dataframe(df[display_cols], width="stretch", hide_index=True)
-                else:
-                    render_export_buttons(df, "flows", key_suffix="flows_all", is_dataframe=True)
-                    st.dataframe(df, width="stretch", hide_index=True)
+                if not display_cols:
+                    display_cols = list(df.columns)
+
+                display_df = df[display_cols].copy()
+
+                # Convert epoch float timestamps to datetime for DatetimeColumn
+                for ts_col in ("first_ts", "last_ts"):
+                    if ts_col in display_df.columns:
+                        display_df[ts_col] = pd.to_datetime(display_df[ts_col], unit="s", errors="coerce")
+
+                col_cfg: dict = {}
+                if "count" in display_df.columns:
+                    col_cfg["count"] = st.column_config.NumberColumn("Packets", format="%d")
+                if "bytes" in display_df.columns:
+                    col_cfg["bytes"] = st.column_config.NumberColumn("Bytes", format="%d")
+                if "first_ts" in display_df.columns:
+                    col_cfg["first_ts"] = st.column_config.DatetimeColumn("First Seen", format="YYYY-MM-DD HH:mm:ss")
+                if "last_ts" in display_df.columns:
+                    col_cfg["last_ts"] = st.column_config.DatetimeColumn("Last Seen", format="YYYY-MM-DD HH:mm:ss")
+
+                # Export uses the raw numeric df (no datetime conversion needed for CSV/JSON)
+                render_export_buttons(df[display_cols], "flows", key_suffix="flows", is_dataframe=True)
+                st.dataframe(display_df, width="stretch", hide_index=True, column_config=col_cfg or None)
             else:
                 st.caption("No flow data available.")
 
@@ -2539,10 +2561,10 @@ def render_flow_asymmetry(result_col, asymmetry_results: list | None):
                     {
                         "Source": d.get("src", ""),
                         "Destination": d.get("dst", ""),
-                        "Outbound": f"{out_mb:.1f} MB",
-                        "Inbound": f"{in_mb:.1f} MB",
-                        "Ratio": f"{d.get('ratio', 0):.1f}:1",
-                        "Score": f"{d.get('score', 0):.1%}",
+                        "Outbound MB": out_mb,
+                        "Inbound MB": in_mb,
+                        "Ratio": float(d.get("ratio", 0)),
+                        "Score": float(d.get("score", 0)),
                         "Reason": d.get("reason", ""),
                     }
                 )
@@ -2555,7 +2577,19 @@ def render_flow_asymmetry(result_col, asymmetry_results: list | None):
                     key_suffix="asymm",
                     is_dataframe=True,
                 )
-                st.dataframe(df, width="stretch", hide_index=True)
+                st.dataframe(
+                    df,
+                    width="stretch",
+                    hide_index=True,
+                    column_config={
+                        "Outbound MB": st.column_config.NumberColumn("Outbound", format="%.1f MB"),
+                        "Inbound MB": st.column_config.NumberColumn("Inbound", format="%.1f MB"),
+                        "Ratio": st.column_config.NumberColumn("Ratio (:1)", format="%.1f"),
+                        "Score": st.column_config.ProgressColumn(
+                            "Score", min_value=0.0, max_value=1.0, format="%.0f%%"
+                        ),
+                    },
+                )
 
 
 def render_port_anomalies(result_col, anomaly_results: list | None):
@@ -2580,7 +2614,7 @@ def render_port_anomalies(result_col, anomaly_results: list | None):
                         "Port": d.get("port", ""),
                         "Proto": d.get("proto", ""),
                         "Type": d.get("anomaly_type", "").replace("_", " ").title(),
-                        "Score": f"{d.get('score', 0):.1%}",
+                        "Score": float(d.get("score", 0)),
                         "Reason": d.get("reason", ""),
                     }
                 )
@@ -2593,7 +2627,16 @@ def render_port_anomalies(result_col, anomaly_results: list | None):
                     key_suffix="port",
                     is_dataframe=True,
                 )
-                st.dataframe(df, width="stretch", hide_index=True)
+                st.dataframe(
+                    df,
+                    width="stretch",
+                    hide_index=True,
+                    column_config={
+                        "Score": st.column_config.ProgressColumn(
+                            "Score", min_value=0.0, max_value=1.0, format="%.0f%%"
+                        ),
+                    },
+                )
 
 
 def render_nxdomain_analysis(result_col, dns_analysis: dict | None):

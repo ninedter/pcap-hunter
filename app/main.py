@@ -1280,11 +1280,23 @@ with tab_dashboard:
                 if high_beacons.empty:
                     st.caption("No high-confidence beacon candidates.")
                 else:
-                    show_cols = [c for c in ["dst", "score", "count"] if c in high_beacons.columns]
+                    show_cols = [c for c in ["dst", "score", "pkts", "mean_gap"] if c in high_beacons.columns]
+                    # Fallback: older DataFrames may use "count" instead of "pkts"
+                    if "pkts" not in show_cols and "count" in high_beacons.columns:
+                        show_cols = [c for c in ["dst", "score", "count", "mean_gap"] if c in high_beacons.columns]
                     display_df = high_beacons[show_cols].head(10).copy()
                     if "dst" in display_df.columns:
                         display_df["Hostname"] = display_df["dst"].map(lambda ip: rdns.get(ip, ""))
-                    st.dataframe(display_df, hide_index=True, use_container_width=True)
+                    beacon_col_cfg: dict = {
+                        "score": st.column_config.ProgressColumn("Score", min_value=0.0, max_value=1.0, format="%.2f"),
+                    }
+                    if "pkts" in display_df.columns:
+                        beacon_col_cfg["pkts"] = st.column_config.NumberColumn("Packets", format="%d")
+                    if "count" in display_df.columns:
+                        beacon_col_cfg["count"] = st.column_config.NumberColumn("Packets", format="%d")
+                    if "mean_gap" in display_df.columns:
+                        beacon_col_cfg["mean_gap"] = st.column_config.NumberColumn("Avg Gap (s)", format="%.1f")
+                    st.dataframe(display_df, hide_index=True, use_container_width=True, column_config=beacon_col_cfg)
 
     with detail_col2:
         if _yara and isinstance(_yara, dict) and _yara.get("matched", 0) > 0:

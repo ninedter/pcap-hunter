@@ -33,10 +33,10 @@ class TestSubprocessTimeouts:
     def test_run_zeek_passes_timeout(self, tmp_path):
         from app.pipeline import zeek as zeek_mod
 
-        captured = {}
+        captured = []
 
         def fake_run(cmd, **kwargs):
-            captured.update(kwargs)
+            captured.append(kwargs)
             raise subprocess.CalledProcessError(1, cmd, stderr="boom")
 
         with (
@@ -47,7 +47,8 @@ class TestSubprocessTimeouts:
                 zeek_mod.run_zeek("dummy.pcap", str(tmp_path))
             except subprocess.CalledProcessError:
                 pass
-        assert captured.get("timeout") == 600
+        assert len(captured) == 2
+        assert all(k.get("timeout") == 600 for k in captured)
 
     def test_run_zeek_timeout_expired_raises(self, tmp_path):
         import pytest

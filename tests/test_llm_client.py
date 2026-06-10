@@ -135,10 +135,14 @@ class TestProbeTimeouts:
     def test_fetch_models_sets_timeout(self):
         from app.llm import client as llm_client
 
+        mock_model = MagicMock()
+        mock_model.id = "model-a"
+
         with patch.object(llm_client, "OpenAI") as mock_openai:
-            mock_openai.return_value.models.list.return_value = type("R", (), {"data": []})()
-            llm_client.fetch_models("http://localhost:1234/v1", "")
+            mock_openai.return_value.models.list.return_value = [mock_model]
+            result = llm_client.fetch_models("http://localhost:1234/v1", "")
         assert mock_openai.call_args.kwargs.get("timeout") == 15.0
+        assert result == ["model-a"]
 
 
 if __name__ == "__main__":

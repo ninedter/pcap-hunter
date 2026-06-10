@@ -330,7 +330,12 @@ def run_pipeline(
             if not isinstance(beacon_df, pd.DataFrame):
                 beacon_df = pd.DataFrame()
             h.set(90, "Sorting top candidates…")
-            outcomes["beacon"] = {"result": beacon_df.to_dict("records") if not beacon_df.empty else []}
+            records = beacon_df.to_dict("records") if not beacon_df.empty else []
+            # pkt_times/pkt_lens are analysis inputs, not outputs — keep records lean for session state
+            for rec in records:
+                rec.pop("pkt_times", None)
+                rec.pop("pkt_lens", None)
+            outcomes["beacon"] = {"result": records}
             h.done("Beaconing step complete.")
         except Exception as exc:
             logger.error("Beaconing failed: %s", exc)

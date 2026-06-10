@@ -51,6 +51,10 @@ CARVE_TIMEOUT_SECONDS = 300
 TLS_EXTRACT_TIMEOUT_SECONDS = 300
 LLM_PROBE_TIMEOUT_SECONDS = 15.0  # test_connection / fetch_models quick probes
 
+# Per-flow cap on stored packet timestamps/lengths. Beacon statistics are stable far
+# below this; keep-first preserves true inter-arrival deltas (sampling would not).
+MAX_FLOW_SAMPLES = 5000
+
 # Reverse DNS
 RDNS_CACHE_TTL_HOURS = 168  # 7 days
 RDNS_MAX_WORKERS = 10  # Concurrent rDNS lookups

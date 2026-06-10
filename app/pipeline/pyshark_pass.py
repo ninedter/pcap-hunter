@@ -154,8 +154,9 @@ def parse_pcap_pyshark(
 
                 flow = out["flows"][idx]
                 flow["count"] += 1
-                flow["pkt_times"].append(ts)
-                flow["pkt_lens"].append(pkt_len)
+                if len(flow["pkt_times"]) < C.MAX_FLOW_SAMPLES:
+                    flow["pkt_times"].append(ts)
+                    flow["pkt_lens"].append(pkt_len)
 
                 out["artifacts"]["ips"].add(src)
                 out["artifacts"]["ips"].add(dst)

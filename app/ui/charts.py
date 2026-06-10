@@ -308,10 +308,12 @@ def plot_flow_timeline(flows: list[dict[str, Any]]) -> go.Figure:
     return fig
 
 
-def plot_top_n_charts(data: dict[str, dict[str, int]], title: str) -> go.Figure:
+def plot_top_n_charts(data: dict[str, dict[str, int]], title: str, count_label: str = "Flows") -> go.Figure:
     """
     Plots horizontal bar charts for TopN analysis.
     data: { "category": { "label": count, ... }, ... }
+    count_label: what the values count — the dashboard passes flow counts
+    ("Flows"), the PDF passes packet sums ("Packets").
     Refined with 'premium' styling.
     """
     if not data:
@@ -333,7 +335,7 @@ def plot_top_n_charts(data: dict[str, dict[str, int]], title: str) -> go.Figure:
         orientation="h",
         title=title,
         template="plotly_dark",
-        labels={"x": "Flows", "y": ""},  # Hide redundant category label; x counts flows
+        labels={"x": count_label, "y": ""},  # Hide redundant category label
         color_discrete_sequence=["#4A90E2"],  # Professional blue
     )
     fig.update_layout(

@@ -446,7 +446,8 @@ class PDFReportGenerator:
             ):
                 if not counts:
                     continue
-                fig = plot_top_n_charts(counts, subtitle)
+                # These dicts sum f["count"] per flow — packet totals, not flow counts.
+                fig = plot_top_n_charts(counts, subtitle, count_label="Packets")
                 tag = figure_to_img_tag(fig, alt=subtitle, width=900, height=360)
                 if tag:
                     chart_blocks.append(f'<div class="chart-block"><h3>{subtitle}</h3>{tag}</div>')

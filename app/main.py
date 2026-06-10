@@ -40,7 +40,7 @@ from app.ui.charts import (
 )
 from app.ui.config_ui import init_config_defaults, render_config_tab
 from app.ui.layout import (
-    _analysis_has_run,
+    analysis_has_run,
     inject_css,
     make_progress_panel,
     make_results_panel,
@@ -363,7 +363,7 @@ with tab_upload:
     st.subheader("1) Load PCAP")
 
     # --- Getting-started panel (first-run onboarding, dismissable) ---
-    if not st.session_state.get("_onboard_dismissed") and not _analysis_has_run():
+    if not st.session_state.get("_onboard_dismissed") and not analysis_has_run():
         with st.container(border=True):
             st.markdown("##### 🚀 Getting started")
             st.markdown(
@@ -631,6 +631,8 @@ with tab_progress:
             ]
 
             _precompute_dash_aggregates((st.session_state.get("features") or {}).get("flows"))
+            # a fresh run supersedes any restored case
+            st.session_state.pop("restored_analysis_id", None)
 
             # rDNS for merged IPs
             from app.utils.network_utils import bulk_resolve_ips
@@ -713,6 +715,8 @@ with tab_progress:
             st.session_state["tls_analysis"] = result.tls_analysis or None
 
             _precompute_dash_aggregates(features.get("flows"))
+            # a fresh run supersedes any restored case
+            st.session_state.pop("restored_analysis_id", None)
 
             # rDNS map for dashboard hostname display — already resolved once
             # inside the pipeline; reuse it instead of re-resolving.

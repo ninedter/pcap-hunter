@@ -83,6 +83,30 @@ class TestCorrelateResults:
         assert correlation.total_packets == 100
         assert len(correlation.shared_ips) == 0  # No sharing (error file excluded)
 
+    def test_time_range_prefers_true_flow_extent(self):
+        """Capped flows: first_ts/last_ts survive the per-flow sample cap, so the
+        batch time range must prefer them over the sampled pkt_times."""
+        capped_flow = {
+            "src": "10.0.0.1",
+            "dst": "1.2.3.4",
+            "proto": "tcp",
+            "count": 9000,
+            # Sampled timestamps stop early; the flow really ran 50.0 → 2000.0.
+            "pkt_times": [100.0, 150.0, 200.0],
+            "first_ts": 50.0,
+            "last_ts": 2000.0,
+        }
+        results = [create_pcap_result("file1.pcap", flows=[capped_flow])]
+        correlation = correlate_results(results)
+        assert correlation.time_range == (50.0, 2000.0)
+
+    def test_time_range_falls_back_to_pkt_times(self):
+        """Legacy flows without first_ts/last_ts still produce a time range."""
+        legacy_flow = {"src": "10.0.0.1", "dst": "1.2.3.4", "pkt_times": [100.0, 300.0]}
+        results = [create_pcap_result("file1.pcap", flows=[legacy_flow])]
+        correlation = correlate_results(results)
+        assert correlation.time_range == (100.0, 300.0)
+
     def test_common_indicators(self):
         results = [
             create_pcap_result("file1.pcap", ips=["1.2.3.4"], domains=["c2.evil.com"]),

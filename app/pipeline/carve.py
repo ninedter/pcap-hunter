@@ -52,7 +52,9 @@ def carve_http_payloads(pcap_path: str, out_dir: str, phase=None) -> list[dict]:
     try:
         # Stream stdout line by line instead of buffering every carved body in
         # RAM at once — this is a full-file tshark pass with no upfront size cap.
-        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        # stderr is never read here: DEVNULL it so a chatty tshark can't fill the
+        # OS pipe buffer and deadlock the stage.
+        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
     except Exception as e:
         if phase:
             phase.done("tshark failed.")

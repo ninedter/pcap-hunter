@@ -12,12 +12,14 @@ mode, so these tests exercise the real helper without a script run context.
 from __future__ import annotations
 
 from datetime import datetime
+from unittest.mock import patch
 
 import pandas as pd
 import streamlit as st
 
-from app.database.models import Analysis
-from app.ui.cases_tab import _restore_analysis_to_session
+from app.database.models import Analysis, Case
+from app.database.repository import CaseRepository
+from app.ui.cases_tab import _render_case_detail, _restore_analysis_to_session
 
 
 def _make_analysis(**overrides) -> Analysis:
@@ -149,3 +151,49 @@ class TestRestoreAnalysisToSession:
         _restore_analysis_to_session(_make_analysis(dns_analysis=None, tls_analysis=None))
         assert st.session_state["dns_analysis"] is None
         assert st.session_state["tls_analysis"] is None
+
+
+class TestDetailViewAutoRestoreGuard:
+    """The case-detail auto-restore must be a one-shot keyed on restored_analysis_id.
+
+    Saving the live session into a case sets ``restored_analysis_id`` to the new
+    analysis id, so navigating to the detail view must NOT re-restore it — the
+    restore resets non-persisted keys (beacon_df, zeek_tables, carved, JA3,
+    correlations) and would wipe live results that were never written to disk.
+    """
+
+    def setup_method(self):
+        st.session_state.clear()
+
+    def _repo_with_case(self, tmp_path) -> tuple[str, str]:
+        """Create a tmp-db repo holding one case with one saved analysis."""
+        repo = CaseRepository(db_path=str(tmp_path / "cases.db"))
+        case_id = repo.create_case(Case(title="guard-case"))
+        analysis = _make_analysis(id="", case_id=case_id)
+        repo.save_analysis(analysis)  # assigns analysis.id, as production does
+        st.session_state["case_repo"] = repo
+        return case_id, analysis.id
+
+    def test_no_restore_when_marker_matches_latest(self, tmp_path):
+        """Matching ids (the just-saved live analysis) must skip the restore."""
+        case_id, analysis_id = self._repo_with_case(tmp_path)
+        st.session_state["restored_analysis_id"] = analysis_id
+        with (
+            patch("app.ui.cases_tab._restore_analysis_to_session") as restore_mock,
+            patch("app.ui.cases_tab.st.rerun") as rerun_mock,
+        ):
+            _render_case_detail(case_id)
+        restore_mock.assert_not_called()
+        rerun_mock.assert_not_called()
+
+    def test_restore_invoked_when_ids_differ(self, tmp_path):
+        """A different (or absent) marker still auto-restores the latest analysis."""
+        case_id, analysis_id = self._repo_with_case(tmp_path)
+        st.session_state["restored_analysis_id"] = "some-other-analysis"
+        with (
+            patch("app.ui.cases_tab._restore_analysis_to_session") as restore_mock,
+            patch("app.ui.cases_tab.st.rerun"),
+        ):
+            _render_case_detail(case_id)
+        restore_mock.assert_called_once()
+        assert restore_mock.call_args[0][0].id == analysis_id

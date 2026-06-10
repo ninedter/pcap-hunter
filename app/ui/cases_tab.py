@@ -608,6 +608,8 @@ def _quick_save_analysis():
     # Extract IOCs
     analysis.iocs = repo.extract_iocs(analysis)
     repo.save_analysis(analysis)
+    # the live session already holds this analysis — block the auto-restore from wiping non-persisted results
+    st.session_state["restored_analysis_id"] = analysis.id
 
     st.success(f"Created case {case_id} with analysis.")
     st.session_state["selected_case_id"] = case_id
@@ -638,6 +640,8 @@ def _add_current_analysis_to_case(case: Case):
 
     analysis.iocs = repo.extract_iocs(analysis)
     repo.save_analysis(analysis)
+    # the live session already holds this analysis — block the auto-restore from wiping non-persisted results
+    st.session_state["restored_analysis_id"] = analysis.id
 
     st.success(f"Added analysis to case {case.id}")
     st.rerun()

@@ -986,7 +986,8 @@ class PDFReportGenerator:
                         f"<td>{self._escape(str(row.get('dst', '')))}</td>"
                         f"<td>{self._escape(str(row.get('dport', '')))}</td>"
                         f"<td>{score:.2f}</td>"
-                        f"<td>{row.get('count', '')}</td>"
+                        # rank_beaconing emits "pkts" (true packet total); "count" kept for legacy frames
+                        f"<td>{row.get('pkts', row.get('count', ''))}</td>"
                         f"</tr>"
                     )
 

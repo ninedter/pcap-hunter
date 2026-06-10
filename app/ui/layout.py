@@ -282,10 +282,14 @@ def render_threat_summary(
                 st.markdown(f"- {r}")
 
 
-def _analysis_has_run() -> bool:
+def analysis_has_run() -> bool:
     """True once a pipeline run (or case restore) has populated session state."""
     feats = st.session_state.get("features") or {}
     return bool(feats.get("flows") or st.session_state.get("zeek_tables"))
+
+
+# Backward-compatible alias for internal call sites that predate the public name.
+_analysis_has_run = analysis_has_run
 
 
 def render_empty_state(
@@ -293,7 +297,15 @@ def render_empty_state(
     *,
     not_run_msg: str = "Upload a PCAP and run analysis to populate this section.",
 ) -> None:
-    """Empty-state that distinguishes 'ran, clean' from 'not run yet'."""
+    """Empty-state that distinguishes 'ran, clean' from 'not run yet'.
+
+    Only call this for results that genuinely ran and came back empty (e.g.
+    correlations/flow-asymmetry/port-anomalies hold ``[]`` after a clean run;
+    their ``None`` means "not computed" and is handled inline). DNS/TLS/YARA
+    engines always return a truthy dict when they execute, so for those a
+    session value of ``None`` means skipped-or-failed and must never render
+    as a green success — their renderers handle empty paths inline too.
+    """
     if _analysis_has_run():
         st.success(f"✅ {found_nothing_msg}")
     else:
@@ -1569,11 +1581,18 @@ def render_dns_analysis(result_col, dns_analysis: dict | None):
             )
         )
         with st.expander("DNS Analysis", expanded=expanded):
+            # analyze_dns always returns a truthy dict when it executes, so
+            # None means the stage was skipped or failed — never "ran clean".
             if dns_analysis is None:
-                render_empty_state("DNS analysis ran — no DGA, tunneling, or fast-flux indicators found.")
+                st.info(
+                    "📭 DNS analysis didn't run in this session (stage skipped or failed) — re-run with Zeek enabled."
+                )
                 return
-            if dns_analysis.get("error") or dns_analysis.get("skipped"):
-                st.info("📭 Upload a PCAP and run analysis to populate this section.")
+            if dns_analysis.get("skipped"):
+                st.info("📭 DNS analysis was skipped for this run.")
+                return
+            if dns_analysis.get("error"):
+                st.info(f"📭 DNS analysis: {dns_analysis['error']}")
                 return
 
             # Summary metrics
@@ -1682,11 +1701,19 @@ def render_tls_certificates(result_col, tls_analysis: dict | None):
             )
         )
         with st.expander("TLS Certificates", expanded=expanded):
+            # analyze_certificates always returns a truthy dict when it executes,
+            # so None means the stage was skipped or failed — never "ran clean".
             if tls_analysis is None:
-                render_empty_state("TLS analysis ran — no certificate issues detected.")
+                st.info(
+                    "📭 TLS certificate analysis didn't run in this session (stage skipped or failed) — "
+                    "re-run with Zeek enabled."
+                )
                 return
             if tls_analysis.get("skipped"):
-                st.info("📭 Upload a PCAP and run analysis to populate this section.")
+                st.info("📭 TLS certificate analysis was skipped for this run.")
+                return
+            if tls_analysis.get("error"):
+                st.info(f"📭 TLS certificate analysis: {tls_analysis['error']}")
                 return
 
             # Summary metrics
@@ -1891,11 +1918,13 @@ def render_yara_results(result_col, yara_results: dict | None):
     with result_col:
         expanded = bool(yara_results and yara_results.get("matched", 0) > 0)
         with st.expander("YARA Scan Results", expanded=expanded):
-            if yara_results is None:
-                render_empty_state("YARA scan ran — no rule matches in carved files.")
-                return
+            # scan_carved_files always returns a truthy dict when it executes, so
+            # None/empty means the stage was skipped or failed — never "ran clean".
             if not yara_results:
-                render_empty_state("YARA scan ran — no rule matches in carved files.")
+                st.info(
+                    "📭 YARA scan didn't run in this session (stage skipped or failed) — "
+                    "re-run with the YARA phase enabled."
+                )
                 return
 
             if not yara_results.get("yara_available"):
@@ -1903,7 +1932,7 @@ def render_yara_results(result_col, yara_results: dict | None):
                 return
 
             if yara_results.get("error"):
-                st.error(f"YARA Error: {yara_results['error']}")
+                st.info(f"📭 YARA scan: {yara_results['error']}")
                 return
 
             # Summary metrics

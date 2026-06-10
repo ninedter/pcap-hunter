@@ -74,6 +74,32 @@ def test_gc_deletes_old_job_rows(tmp_path):
     assert repo.get_job(job_id) is None
 
 
+def test_gc_removes_old_run_dirs_keeps_fresh(tmp_path):
+    """Carve output lives in per-run subdirs (data/carved/<run_id>/) — GC must
+    remove expired top-level directories, not only loose files."""
+    artifacts = tmp_path / "artifacts"
+    artifacts.mkdir()
+    old_dir = artifacts / "case1_deadbeef"
+    old_dir.mkdir()
+    (old_dir / "stream1_aaaa.bin").write_bytes(b"x" * 100)
+    fresh_dir = artifacts / "case2_cafef00d"
+    fresh_dir.mkdir()
+    (fresh_dir / "stream2_bbbb.bin").write_bytes(b"y" * 100)
+
+    # Backdate the old run dir past artifact_ttl_days (2 in _settings)
+    ten_days_ago = (datetime.now() - timedelta(days=10)).timestamp()
+    os.utime(old_dir, (ten_days_ago, ten_days_ago))
+
+    repo = CaseRepository(db_path=str(tmp_path / "t.db"))
+    settings = _settings(tmp_path)
+
+    stats = gc_sweep(repo=repo, settings=settings, uploads_dir=tmp_path / "uploads", artifacts_dir=artifacts)
+    assert stats["artifacts_deleted"] == 1
+    assert not old_dir.exists()
+    assert fresh_dir.exists()
+    assert (fresh_dir / "stream2_bbbb.bin").exists()
+
+
 def test_gc_keeps_fresh_files(tmp_path):
     uploads = tmp_path / "uploads"
     uploads.mkdir()

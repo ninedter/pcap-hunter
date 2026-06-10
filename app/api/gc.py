@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import pathlib
+import shutil
 import time
 from datetime import datetime, timedelta
 
@@ -33,14 +34,25 @@ def gc_sweep(
 
 
 def _gc_files(dir_path: pathlib.Path, ttl_days: int) -> int:
+    """Remove expired entries directly under ``dir_path``.
+
+    Handles both loose files (legacy flat layout) and top-level per-run
+    directories (carve output now lives in ``data/carved/<run_id>/``).
+    Symlinks are skipped so GC never follows a link out of the data dir.
+    """
     if not dir_path.exists():
         return 0
     cutoff = time.time() - (ttl_days * 86400)
     count = 0
     for entry in dir_path.iterdir():
         try:
+            if entry.is_symlink():
+                continue
             if entry.is_file() and entry.stat().st_mtime < cutoff:
                 entry.unlink()
+                count += 1
+            elif entry.is_dir() and entry.stat().st_mtime < cutoff:
+                shutil.rmtree(entry, ignore_errors=True)
                 count += 1
         except OSError as exc:
             logger.warning("gc: failed to remove %s: %s", entry, exc)

@@ -55,3 +55,5 @@ markdown>=3.5.0,<4.0
 fastapi>=0.110,<1.0
 uvicorn[standard]>=0.27,<1.0
 python-multipart>=0.0.9,<1.0
+# required by fastapi.testclient (starlette) — test-time transitive dep
+httpx>=0.27,<1.0

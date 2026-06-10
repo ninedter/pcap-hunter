@@ -188,6 +188,22 @@ def extract_certificates_tshark(pcap_path: str | Path, phase: PhaseHandle | None
     watchdog = threading.Timer(C.TLS_EXTRACT_TIMEOUT_SECONDS, _kill)
     watchdog.start()
 
+    # Drain stderr on a daemon thread so a chatty tshark can't fill the OS pipe
+    # buffer and stall the stdout loop; the collected text feeds the rc!=0 warning.
+    stderr_lines: list[str] = []
+
+    def _drain_stderr() -> None:
+        try:
+            for err_line in proc.stderr:
+                stderr_lines.append(err_line)
+        except (OSError, ValueError):  # pragma: no cover - pipe closed during kill
+            pass
+
+    stderr_thread: threading.Thread | None = None
+    if proc.stderr is not None:
+        stderr_thread = threading.Thread(target=_drain_stderr, name="tls-stderr-drain", daemon=True)
+        stderr_thread.start()
+
     certificates = []
     i = -1
     try:
@@ -263,6 +279,11 @@ def extract_certificates_tshark(pcap_path: str | Path, phase: PhaseHandle | None
             proc.kill()
             proc.wait()
 
+    # The process is dead here (waited or killed), so stderr has hit EOF and the
+    # drain thread is finishing; the timeout is a guard against pathological pipes.
+    if stderr_thread is not None:
+        stderr_thread.join(timeout=5)
+
     if timed_out.is_set():
         logger.error("tshark timed out during certificate extraction")
         return []
@@ -271,8 +292,7 @@ def extract_certificates_tshark(pcap_path: str | Path, phase: PhaseHandle | None
     # stderr with rc=0, so only treat a non-zero rc as failure when it produced
     # no parseable certificates at all.
     if proc.returncode != 0 and not certificates:
-        stderr_output = proc.stderr.read() if proc.stderr else ""
-        logger.warning("tshark returned %s: %s", proc.returncode, stderr_output)
+        logger.warning("tshark returned %s: %s", proc.returncode, "".join(stderr_lines).strip())
         return []
 
     if phase:

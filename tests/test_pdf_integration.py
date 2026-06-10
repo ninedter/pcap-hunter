@@ -129,12 +129,12 @@ def realistic_correlations() -> list[CorrelationResult]:
 
 @pytest.fixture
 def realistic_beacon_df() -> pd.DataFrame:
-    """beacon_df shape matching rank_beaconing output."""
+    """beacon_df shape matching rank_beaconing output (emits "pkts", not "count")."""
     return pd.DataFrame(
         [
-            {"src": "10.0.0.5", "dst": "34.12.37.224", "dport": 6888, "score": 0.964, "cv": 0.106, "count": 120},
-            {"src": "54.254.33.127", "dst": "10.0.0.5", "dport": 58663, "score": 0.949, "cv": 0.052, "count": 85},
-            {"src": "10.0.0.5", "dst": "142.250.204.110", "dport": 443, "score": 0.542, "cv": 0.312, "count": 42},
+            {"src": "10.0.0.5", "dst": "34.12.37.224", "dport": 6888, "score": 0.964, "cv": 0.106, "pkts": 120},
+            {"src": "54.254.33.127", "dst": "10.0.0.5", "dport": 58663, "score": 0.949, "cv": 0.052, "pkts": 85},
+            {"src": "10.0.0.5", "dst": "142.250.204.110", "dport": 443, "score": 0.542, "cv": 0.312, "pkts": 42},
         ]
     )
 
@@ -353,6 +353,8 @@ class TestFullPDFGeneration:
 
         # Beacon DataFrame rendering
         assert "0.964" in html or "0.96" in html  # beacon score
+        # Packets column must read the "pkts" key emitted by rank_beaconing
+        assert "<td>120</td>" in html
 
         # YARA match rendering
         assert "CobaltStrike_Beacon" in html

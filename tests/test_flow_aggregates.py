@@ -62,3 +62,22 @@ class TestComputeFlowAggregates:
         assert "10.0.0.1" not in src_keys
         dst_keys = [k for k, _ in agg["top_dst_ips"]]
         assert "8.8.8.8" in dst_keys
+
+    def test_legacy_sentinel_buckets(self):
+        """Missing dport/proto keys count under N/A/Unknown; empty strings are skipped.
+
+        Mirrors the legacy dashboard loop exactly: ``str(f.get("dport", "N/A"))``
+        and ``f.get("proto", "Unknown")`` followed by truthiness checks.
+        """
+        flows = [
+            {"src": "1.2.3.4", "dst": "5.6.7.8", "count": 1},  # no dport/proto keys
+            {"src": "1.2.3.4", "dst": "5.6.7.8", "dport": "", "proto": "", "count": 1},  # empty values
+        ]
+        agg = compute_flow_aggregates(flows, top_n=10, weight="flows")
+        assert ("N/A", 1) in agg["top_dst_ports"]
+        assert ("Unknown", 1) in agg["top_protos"]
+        # empty-string values are skipped, not bucketed
+        port_keys = [k for k, _ in agg["top_dst_ports"]]
+        proto_keys = [k for k, _ in agg["top_protos"]]
+        assert "" not in port_keys
+        assert "" not in proto_keys

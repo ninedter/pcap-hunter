@@ -58,8 +58,10 @@ def compute_flow_aggregates(
 
         s = f.get("src")
         d = f.get("dst")
-        dport = f.get("dport")
-        proto = f.get("proto")
+        # Sentinel buckets mirror the legacy dashboard loop exactly: a missing key
+        # counts under "N/A"/"Unknown", while a present-but-empty value is skipped.
+        dport = str(f.get("dport", "N/A"))
+        proto = f.get("proto", "Unknown")
 
         if s:
             if not exclude_private or is_public_ipv4(str(s)):
@@ -68,7 +70,7 @@ def compute_flow_aggregates(
             if not exclude_private or is_public_ipv4(str(d)):
                 dst[str(d)] += n
         if dport:
-            ports[str(dport)] += n
+            ports[dport] += n
         if proto:
             protos[str(proto)] += n
 

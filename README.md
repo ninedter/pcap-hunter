@@ -229,7 +229,7 @@ PCAP Hunter ships a FastAPI-based REST API alongside the Streamlit UI so SOAR pl
 
 ```bash
 # Start the API server (port 8000)
-PCAP_HUNTER_API_KEY=changeme uvicorn app.api.app:app --host 0.0.0.0 --port 8000
+PCAP_HUNTER_API_KEY=changeme uvicorn app.api.app:create_app --factory --host 0.0.0.0 --port 8000
 
 # Submit a PCAP for analysis
 curl -X POST http://localhost:8000/api/v1/pcaps \

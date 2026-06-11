@@ -33,13 +33,15 @@ The Integrations API lets external platforms (SOAR, SIEM, log analysis tools, cu
 
 ```bash
 export PCAP_HUNTER_API_KEY=your-secret-key-here
-uvicorn app.api.app:app --host 127.0.0.1 --port 8000
+uvicorn app.api.app:create_app --factory --host 127.0.0.1 --port 8000
 ```
 
-Or with the Makefile (if available):
+> The module exposes only the `create_app()` factory — the `--factory` flag is required. `uvicorn app.api.app:app` will not start.
+
+Or with the Makefile:
 
 ```bash
-PCAP_HUNTER_API_KEY=changeme make api
+PCAP_HUNTER_API_KEY=changeme make run-api
 ```
 
 ### 2. Verify the server is healthy
@@ -66,15 +68,17 @@ Response (202 Accepted):
 ```json
 {
   "job_id": "j_a1b2c3d4",
-  "case_id": "c_e5f6a7b8",
+  "case_id": "e5f6a7b8",
   "status": "queued",
   "links": {
     "status": "/api/v1/jobs/j_a1b2c3d4",
     "result": "/api/v1/jobs/j_a1b2c3d4/result",
-    "case": "/api/v1/cases/c_e5f6a7b8"
+    "case": "/api/v1/cases/e5f6a7b8"
   }
 }
 ```
+
+> Job IDs carry a `j_` prefix; case IDs are bare 8-character hex strings (no `c_` prefix).
 
 ### 4. Poll for completion
 
@@ -94,7 +98,7 @@ curl "http://localhost:8000/api/v1/iocs.json?min_score=50" \
 
 ## Authentication
 
-Every request (except `/healthz` and `/readyz`) requires a Bearer token in the `Authorization` header:
+Every request (except `/healthz`, `/readyz`, and the documentation endpoints) requires a Bearer token in the `Authorization` header:
 
 ```
 Authorization: Bearer <token>
@@ -124,6 +128,15 @@ Environment-variable keys are checked first using constant-time comparison (no d
 ### Startup Requirement
 
 The API **refuses to start** if no authentication source is configured (no env vars and no DB keys). This prevents accidentally running an unauthenticated API.
+
+Two softer conditions log a **startup warning** instead of refusing to boot:
+
+- **No full-scope source** — no `PCAP_HUNTER_API_KEY` env var and no active full-scope DB key. The server starts (feed keys may still work), but ingress and admin endpoints reject every request until a full-scope source exists. The warning includes recovery instructions.
+- **Keyless boot** — neither env var is set and auth relies entirely on DB-backed keys. This is a common symptom of re-upping a compose stack without re-exporting the key env vars; check the warning if clients suddenly start receiving 401s after a restart.
+
+### Unauthenticated Documentation Endpoints
+
+`/docs` (Swagger UI), `/redoc`, and the OpenAPI JSON (`/api/v1/openapi.json`) are **intentionally unauthenticated** — front the API with a reverse proxy if exposing it beyond localhost.
 
 ---
 
@@ -222,21 +235,25 @@ Submit a PCAP file for background analysis.
 | `name` | string | No | filename | Case title |
 | `tags` | string | No | `[]` | JSON array or comma-separated list |
 | `severity_hint` | string | No | | `low`, `medium`, `high`, or `critical` |
-| `osint_enabled` | boolean | No | `true` | Run OSINT enrichment stage |
-| `llm_enabled` | boolean | No | `true` | Run LLM report generation |
+| `osint_enabled` | boolean | No | `true` | Run OSINT enrichment after analysis (see below) |
+| `llm_enabled` | boolean | No | `true` | Accepted for forward compatibility — LLM reports are **not yet supported headless** (see below) |
 | `pyshark_packet_limit` | integer | No | 200000 | Cap on packets to deep-parse |
+
+**OSINT enrichment (`osint_enabled`):** when enabled, the worker enriches the top public IPs after analysis using provider keys from the saved Streamlit config (`cfg_*_key` values) or, as a fallback, the environment (`OTX_KEY`, `VT_KEY`, `ABUSEIPDB_KEY`, `GREYNOISE_KEY`, `SHODAN_KEY`). If no provider keys are configured, the job still completes — with the warning code `osint_not_configured` in the result. Note: the API path always queries providers fresh; the OSINT response cache is not used headless.
+
+**LLM reports (`llm_enabled`):** LLM report generation is not yet supported on the API path. The field is accepted so existing clients keep working, but jobs complete with the warning code `llm_unsupported_on_api_path` in the result — including default submissions, since the field defaults to `true`.
 
 **Response:** 202 Accepted
 
 ```json
 {
-  "job_id": "j_...",
-  "case_id": "c_...",
+  "job_id": "j_a1b2c3d4",
+  "case_id": "e5f6a7b8",
   "status": "queued",
   "links": {
-    "status": "/api/v1/jobs/j_...",
-    "result": "/api/v1/jobs/j_.../result",
-    "case": "/api/v1/cases/c_..."
+    "status": "/api/v1/jobs/j_a1b2c3d4",
+    "result": "/api/v1/jobs/j_a1b2c3d4/result",
+    "case": "/api/v1/cases/e5f6a7b8"
   }
 }
 ```
@@ -261,8 +278,8 @@ Submit a PCAP file for background analysis.
 
 ```json
 {
-  "job_id": "j_...",
-  "case_id": "c_...",
+  "job_id": "j_a1b2c3d4",
+  "case_id": "e5f6a7b8",
   "status": "running",
   "progress": {
     "stage": "Zeek processing",
@@ -277,7 +294,9 @@ Submit a PCAP file for background analysis.
 }
 ```
 
-**Job statuses:** `queued` | `running` | `done` | `failed`
+**Job statuses:** `queued` | `running` | `done` | `failed` | `cancelled`
+
+Finished jobs always report `progress.percent = 100` and `stage = "Complete"` — progress is reconciled atomically with the status flip at completion, so a job whose optional stages were skipped never freezes at a partial percentage.
 
 #### `GET /api/v1/jobs/{job_id}/result`
 
@@ -289,6 +308,38 @@ Returns the full pipeline result as JSON once the job completes.
 | 404 | Job not found |
 | 409 | Job not finished yet |
 | 410 | Result expired (GC'd per retention policy) |
+
+**Response body** (abridged):
+
+```json
+{
+  "case_id": "e5f6a7b8",
+  "analysis_id": "9c2d1e0f-4a7",
+  "packet_count": 4821,
+  "duration_seconds": 12.4,
+  "stages_run": ["pcap_count", "pyshark_pass", "zeek", "dns_analysis", "tls_certs", "beacon", "carve", "yara_scan", "osint"],
+  "warnings": ["llm_unsupported_on_api_path"],
+  "summary_narrative": "...",
+  "mitre_techniques": [],
+  "dns_analysis": {},
+  "tls_analysis": {},
+  "beacon_df_records": []
+}
+```
+
+**`analysis_id` is always set on success.** The worker persists the analysis and its extracted IOCs to the case database after the pipeline finishes — this is what feeds the [IOC Feed](#ioc-feed) endpoints. If persistence fails, the job still completes (`status: done`) but with the warning `analysis_persistence_failed` and a null `analysis_id`; the raw pipeline result remains available from this endpoint.
+
+**Worker warning codes** (in `warnings`):
+
+| Code | Meaning |
+|------|---------|
+| `analysis_persistence_failed` | Pipeline succeeded but the analysis could not be saved; `analysis_id` is null and the IOC feed will not include this run |
+| `osint_not_configured` | `osint_enabled` was true but no OSINT provider keys are configured (saved config or env) |
+| `osint_failed` | OSINT enrichment raised an error; analysis completed without enrichment |
+| `yara_failed` | YARA scan over carved files raised an error |
+| `llm_unsupported_on_api_path` | `llm_enabled` was true; LLM report generation is not yet supported headless |
+
+Stage-level pipeline warnings may also appear (`pcap_count_unavailable`, `pyshark_failed`, `pyshark_no_data`, `zeek_failed`, `zeek_no_logs`, `dns_analysis_failed`, `tls_certs_failed`, `beacon_failed`, `carve_failed`) — each marks a stage that failed or produced no data without aborting the run.
 
 ---
 
@@ -304,13 +355,36 @@ Returns the case record including IOCs, severity, tags, and analysis metadata.
 
 **Auth:** `full` scope required
 
-Downloads the generated PDF report as `application/pdf`.
+Renders the case's PDF report **on demand** from its most recent persisted analysis and returns it as `application/pdf`.
+
+- Rendered PDFs are cached under `PCAP_HUNTER_REPORTS_DIR` (default `data/reports/`) and served from cache on subsequent requests.
+- The cache is regenerated automatically when a newer analysis lands on the case (file mtime is compared against the latest analysis's `analyzed_at`).
+
+| Status | Code | Meaning |
+|--------|------|---------|
+| 200 | | PDF rendered (or served from cache) |
+| 404 | `case_not_found` | Case ID does not exist |
+| 404 | `report_no_analysis` | Case exists but has no persisted analysis to render |
+| 503 | `pdf_unavailable` | PDF rendering libraries (weasyprint/pango) are not installed on this host |
+| 500 | `pdf_render_failed` | Rendering raised an error |
 
 #### `DELETE /api/v1/cases/{case_id}`
 
 **Auth:** `full` scope required
 
-Deletes a case and its associated data. Returns 204 No Content on success. Rejects with 409 if the case has running jobs.
+Deletes a case and **all** of its associated data — a full cascade:
+
+- Database rows: analyses, IOCs, notes, tag links, and jobs belonging to the case
+- Files: the uploaded PCAP, the cached PDF report, and the case's per-run Zeek/carve output directories
+
+Returns 204 No Content on success. Queued jobs are cancelled as part of the delete; running jobs block it:
+
+| Status | Code | Meaning |
+|--------|------|---------|
+| 204 | | Case and all associated data deleted |
+| 404 | `case_not_found` | Case ID does not exist |
+| 409 | `case_has_running_job` | A job is running — also returned when a *queued* job slips into `running` mid-delete (the cancel loses the race) |
+| 500 | `case_delete_failed` | Database deletion failed; file cleanup is aborted and no files are removed |
 
 ---
 
@@ -347,7 +421,7 @@ Returns IOCs as a JSON array.
       "tags": ["malware", "c2-beacon"],
       "first_seen": "2026-05-20T10:00:00Z",
       "last_seen": "2026-05-25T14:30:00Z",
-      "case_ids": ["c_abc123"],
+      "case_ids": ["e5f6a7b8"],
       "mitre_techniques": []
     }
   ],
@@ -356,7 +430,13 @@ Returns IOCs as a JSON array.
 }
 ```
 
-**Caching:** Responses include `ETag` and `Cache-Control: private, max-age=60`. Send `If-None-Match` to receive 304 Not Modified when data hasn't changed.
+**Feed semantics:**
+
+- **Deduplication:** the same indicator appearing in multiple analyses collapses to a single row carrying the **maximum** severity/score observed across them; `first_seen`/`last_seen` span all sightings and `case_ids` lists every contributing case.
+- **Filtering:** `min_score` is applied in SQL (not post-filtered), so it composes correctly with `limit`/`cursor` — pages are always full up to `limit` and no matching rows are dropped at page boundaries.
+- **Ordering:** deterministic — `last_seen` descending, then indicator value ascending as a tie-breaker. Stable ordering makes cursor pagination reliable.
+
+**Caching:** Responses include `ETag`, `Cache-Control: private, max-age=60`, and `Last-Modified` (RFC 7231 IMF-fixdate, e.g. `Thu, 11 Jun 2026 14:30:00 GMT`, derived from the newest `last_seen` in the response). Send `If-None-Match` to receive 304 Not Modified when data hasn't changed.
 
 #### `GET /api/v1/iocs.csv`
 
@@ -427,6 +507,18 @@ Update key properties (name, scope, description, rate_limit_rpm, expires_at). Se
 
 Revoke a key (soft delete). The key immediately stops working.
 
+**Lockout warning:** if a PATCH (e.g. scope change to `feed`, or setting an immediate expiry) or DELETE removes the **last full-scope auth source** (no `PCAP_HUNTER_API_KEY` env var and no remaining active full-scope DB key), the mutation still succeeds but the response gains an additive `"warning"` field with recovery instructions:
+
+```json
+{
+  "status": "revoked",
+  "id": "k_a1b2c3d4e5f6",
+  "warning": "No full-scope auth source remains — ingress and admin endpoints (including key creation) will reject every request. Recover by setting PCAP_HUNTER_API_KEY and restarting, or by creating a full-scope key in the Streamlit 'API Keys' tab."
+}
+```
+
+The same condition is logged server-side. Feed endpoints keep working for feed-scope keys; everything else rejects until a full-scope source exists again.
+
 #### `GET /api/v1/admin/keys/{key_id}/usage`
 
 Per-key daily request counts. Add `?days=7` to control the lookback window (1-365, default 30).
@@ -478,7 +570,7 @@ Content-Type: application/problem+json
 
 ## Error Handling
 
-All errors use RFC 7807 `application/problem+json` format:
+**All** errors use RFC 7807 `application/problem+json` format — including framework-generated ones: request validation failures (422), method-not-allowed (405), and unknown routes (404) are converted to problem documents, never bare FastAPI/Starlette JSON.
 
 ```json
 {
@@ -489,6 +581,25 @@ All errors use RFC 7807 `application/problem+json` format:
   "instance": "/api/v1/pcaps",
   "code": "invalid_key",
   "request_id": "req_a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+}
+```
+
+- **401 responses carry `WWW-Authenticate: Bearer`** (RFC 6750 §3).
+- **Routing-derived codes are snake_case** — e.g. a 405 yields `code: method_not_allowed`.
+- **Validation errors (422)** use `code: validation_error` and add an `errors` array of `{loc, msg, type}` entries. The raw submitted input values are deliberately omitted so secrets never echo back into error bodies:
+
+```json
+{
+  "type": "https://pcap-hunter.io/errors/validation_error",
+  "title": "Unprocessable Entity",
+  "status": 422,
+  "detail": "Request validation failed.",
+  "instance": "/api/v1/admin/keys",
+  "code": "validation_error",
+  "request_id": "...",
+  "errors": [
+    { "loc": ["body", "scope"], "msg": "String should match pattern '^(full|feed)$'", "type": "string_pattern_mismatch" }
+  ]
 }
 ```
 
@@ -507,9 +618,14 @@ All errors use RFC 7807 `application/problem+json` format:
 | `result_not_ready` | 409 | Job has not finished yet |
 | `result_expired` | 410 | Result removed by retention policy |
 | `case_not_found` | 404 | Case ID does not exist |
-| `report_not_found` | 404 | PDF report not yet generated |
-| `case_has_running_job` | 409 | Cannot delete case with active jobs |
+| `report_no_analysis` | 404 | Case exists but has no persisted analysis to render a PDF from |
+| `pdf_unavailable` | 503 | PDF rendering libraries (weasyprint/pango) not installed |
+| `pdf_render_failed` | 500 | PDF rendering raised an error |
+| `case_has_running_job` | 409 | Cannot delete a case with a running job (including a queued job that started mid-delete) |
+| `case_delete_failed` | 500 | Database deletion failed; file cleanup aborted |
 | `key_not_found` | 404 | API key ID does not exist |
+| `validation_error` | 422 | Request body/query validation failed (see `errors` array) |
+| `method_not_allowed` | 405 | HTTP method not supported on this route |
 
 ### Request Tracing
 
@@ -563,6 +679,18 @@ All settings are read from environment variables. Defaults are suitable for loca
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `PCAP_HUNTER_API_DB_PATH` | `data/api_keys.db` | API key + case database path |
+| `PCAP_HUNTER_API_UPLOADS_DIR` | `data/api_uploads` | Where submitted PCAPs are stored |
+| `PCAP_HUNTER_API_ARTIFACTS_DIR` | `data/carved` | Carved-artifact root swept by GC |
+| `PCAP_HUNTER_REPORTS_DIR` | `data/reports` | Cache directory for on-demand PDF reports |
+
+### Logging
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `PCAP_HUNTER_LOG_FORMAT` | `text` | Set to `json` for structured log lines (one JSON object per line) |
+| `PCAP_HUNTER_LOG_LEVEL` | `INFO` | Standard Python level names (`DEBUG`, `WARNING`, ...) |
+
+Application logs — including the per-request audit line (`method path -> status (ms) request_id=... key_name=...`) — are emitted by the `app.*` loggers, which the app wires up at startup so they stay visible under uvicorn and in Docker (uvicorn configures only its own loggers by default).
 
 ---
 
@@ -676,6 +804,7 @@ An hourly background task (`_gc_loop`) automatically cleans up:
   (`RUN_DIR_RETENTION_SECONDS`) at the start of each new run, so artifacts are
   effectively retained for 7 days regardless of the API TTL.
 - Finished job records older than `job_ttl_days` (default 30)
+- **Orphaned case rows** — analyses (plus their IOCs and notes), case-level notes, tag links, and jobs whose case no longer exists are reconciled out of the database on every sweep (`orphaned_rows_deleted` counter in the GC log line). This heals historical deletes that removed only the case row and would otherwise leave stale indicators serving in the IOC feed forever.
 
 ### Usage Tracking
 

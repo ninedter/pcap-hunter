@@ -221,3 +221,44 @@ def test_cors_enabled_when_origins_set(monkeypatch, tmp_path):
     get_settings.cache_clear()
     get_repo.cache_clear()
     get_queue.cache_clear()
+
+
+def test_create_app_no_full_scope_warning_when_db_full_key_exists(monkeypatch, tmp_path, caplog):
+    """No env keys but one active FULL-scope DB key → 'DB-backed' warning fires, 'full-scope' does NOT."""
+    monkeypatch.delenv("PCAP_HUNTER_API_KEY", raising=False)
+    monkeypatch.delenv("PCAP_HUNTER_FEED_KEY", raising=False)
+    monkeypatch.setenv("PCAP_HUNTER_API_DB_PATH", str(tmp_path / "t.db"))
+
+    from app.api.auth import Scope
+    from app.api.key_models import APIKey, generate_api_key
+    from app.api.key_repository import KeyRepository
+
+    _, key_hash, prefix = generate_api_key()
+    KeyRepository(db_path=str(tmp_path / "t.db")).create_key(
+        APIKey(key_hash=key_hash, key_prefix=prefix, name="db-full", scope=Scope.FULL)
+    )
+
+    from app.api.deps import get_key_repo, get_queue, get_rate_limiter, get_repo, get_settings, get_usage_tracker
+
+    get_settings.cache_clear()
+    get_repo.cache_clear()
+    get_queue.cache_clear()
+    get_key_repo.cache_clear()
+    get_rate_limiter.cache_clear()
+    get_usage_tracker.cache_clear()
+
+    from app.api.app import create_app
+
+    with caplog.at_level(logging.WARNING, logger="app.api.app"):
+        create_app()
+
+    messages = [r.message for r in caplog.records]
+    # DB-backed warning fires (no env keys at all)
+    assert any("DB-backed" in m for m in messages), f"expected DB-backed warning, got: {messages}"
+    # full-scope warning must NOT fire (there IS an active full-scope DB key)
+    assert not any("full-scope" in m for m in messages), f"unexpected full-scope warning, got: {messages}"
+
+    get_settings.cache_clear()
+    get_repo.cache_clear()
+    get_queue.cache_clear()
+    get_key_repo.cache_clear()

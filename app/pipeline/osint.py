@@ -59,6 +59,15 @@ def _j(url, headers=None, params=None):
                 return r.json()
             except Exception:
                 return {"_raw": r.text}
+        if r.status_code == 404:
+            # Normal negative result — Shodan returns 404 for IPs it has never
+            # scanned, VT/OTX return 404 for unknown domains. The provider is
+            # working; it simply knows nothing about this indicator.
+            return {"_nodata": True, "_url": url}
+        if r.status_code in (401, 403):
+            return {"_error": f"auth failed (HTTP {r.status_code})", "_url": url}
+        if r.status_code == 429:
+            return {"_error": "rate limited", "_detail": _rate_limit_detail(r), "_url": url}
         return {"_error": f"HTTP {r.status_code}", "_url": url}
     except Exception as e:
         return {"_error": str(e), "_url": url}
@@ -87,11 +96,50 @@ def _cached_query(indicator: str, provider: str, query_fn) -> dict:
     # Cache miss - make API call
     result = query_fn()
 
-    # Only cache successful responses
+    # Cache successful payloads AND clean negative results (_nodata) — the
+    # provider will answer 404 for the same unknown indicator every time, so
+    # re-querying only burns quota. Transient failures (_error: auth, rate
+    # limit, network) stay uncached so they retry on the next run.
     if "_error" not in result:
         cache.set(indicator, provider, result)
 
     return result
+
+
+def provider_status(results: list[dict | None]) -> str:
+    """Classify a provider's health from all its per-indicator results.
+
+    Returns one of: "ok" (any successful payload), "rate_limited", "auth_failed",
+    "error", "nodata" (queried, every answer was a clean 404), "none" (never queried).
+    Precedence: ok > rate_limited > auth_failed > error > nodata > none.
+    """
+    seen_rate_limited = seen_auth_failed = seen_error = seen_nodata = False
+    for r in results or []:
+        if not isinstance(r, dict):
+            continue
+        err = r.get("_error")
+        if err:
+            err_text = str(err).lower()
+            if "rate limited" in err_text:
+                seen_rate_limited = True
+            elif "auth failed" in err_text:
+                seen_auth_failed = True
+            else:
+                seen_error = True
+        elif r.get("_nodata"):
+            seen_nodata = True
+        else:
+            # Any successful payload proves the provider works.
+            return "ok"
+    if seen_rate_limited:
+        return "rate_limited"
+    if seen_auth_failed:
+        return "auth_failed"
+    if seen_error:
+        return "error"
+    if seen_nodata:
+        return "nodata"
+    return "none"
 
 
 def _query_provider(

@@ -449,19 +449,25 @@ def _verdict_badge(verdict: str) -> str:
 
 
 def _provider_pill(name: str, status: str) -> str:
-    """Return a small pill showing provider status."""
-    if status == "ok":
-        bg, icon = "rgba(81,207,102,0.18)", "✅"
-    elif status == "error":
-        bg, icon = "rgba(255,107,107,0.18)", "❌"
-    elif status == "cached":
-        bg, icon = "rgba(77,171,247,0.18)", "💾"
-    else:  # not configured
-        bg, icon = "rgba(173,181,189,0.18)", "⚪"
+    """Return a small pill showing provider status.
+
+    Statuses: ok, error, cached, rate_limited (amber), auth_failed (red),
+    nodata (neutral gray — provider answered, nothing known), none (not configured).
+    """
+    styles = {
+        "ok": ("rgba(81,207,102,0.18)", "✅", ""),
+        "error": ("rgba(255,107,107,0.18)", "❌", ""),
+        "cached": ("rgba(77,171,247,0.18)", "💾", ""),
+        "rate_limited": (severity_color("medium", "rgba"), "⏳", " rate limited"),
+        "auth_failed": (severity_color("critical", "rgba"), "🔑", " key rejected"),
+        "nodata": (severity_color("unknown", "rgba"), "➖", " no data"),
+        "none": ("rgba(173,181,189,0.18)", "⚪", ""),
+    }
+    bg, icon, suffix = styles.get(status, styles["none"])
     return (
         f'<span style="display:inline-block;padding:2px 8px;margin:2px;'
         f'border-radius:10px;background:{bg};font-size:0.75rem;">'
-        f"{icon} {name}</span>"
+        f"{icon} {name}{suffix}</span>"
     )
 
 
@@ -639,6 +645,9 @@ def _render_ip_detail_card(ip: str, obj: dict, vt: dict, abuse: dict, gn: dict, 
             raw = obj.get(data_key)
             if raw is None:
                 providers_html += _provider_pill(name, "none")
+            elif raw.get("_nodata"):
+                # Clean 404 — provider answered, knows nothing about this IP
+                providers_html += _provider_pill(name, "nodata")
             elif raw.get("_error"):
                 providers_html += _provider_pill(name, "error")
             elif raw.get("_cached"):
@@ -710,46 +719,37 @@ def _render_ip_detail_card(ip: str, obj: dict, vt: dict, abuse: dict, gn: dict, 
 
 
 def _render_provider_status_bar(osint_data: dict):
-    """Render provider configuration and response status indicators."""
+    """Render provider health pills aggregated across ALL queried indicators.
+
+    Sampling a single indicator used to paint a provider ❌ when that one
+    answer happened to be a clean 404 (Shodan unscanned IP, VT/OTX unknown
+    domain) even though every other indicator returned data. Aggregating via
+    provider_status keeps one negative answer from masking a working provider.
+    """
+    from app.pipeline.osint import provider_status
+
     ips_data = osint_data.get("ips") or {}
-    if not ips_data:
+    doms_data = osint_data.get("domains") or {}
+    if not ips_data and not doms_data:
         return
 
-    # Sample first IP to determine provider status
-    sample = next(iter(ips_data.values()), {})
-    providers = {
-        "VirusTotal": "vt",
-        "AbuseIPDB": "abuseipdb",
-        "GreyNoise": "greynoise",
-        "Shodan": "shodan",
-    }
-
     pills = []
-    for name, key in providers.items():
-        raw = sample.get(key)
-        if raw is None:
-            pills.append(_provider_pill(name, "none"))
-        elif raw.get("_error"):
-            pills.append(_provider_pill(name, "error"))
-        elif raw.get("_cached"):
-            pills.append(_provider_pill(name, "cached"))
-        else:
-            pills.append(_provider_pill(name, "ok"))
+    if ips_data:
+        ip_providers = [
+            ("VirusTotal", "vt"),
+            ("AbuseIPDB", "abuseipdb"),
+            ("GreyNoise", "greynoise"),
+            ("Shodan", "shodan"),
+        ]
+        for name, key in ip_providers:
+            status = provider_status([obj.get(key) for obj in ips_data.values()])
+            pills.append(_provider_pill(name, status))
 
     # Domain providers
-    doms_data = osint_data.get("domains") or {}
     if doms_data:
-        sample_dom = next(iter(doms_data.values()), {})
         for name, key in [("VT (Domain)", "vt"), ("OTX", "otx")]:
-            raw = sample_dom.get(key)
-            if raw is None:
-                pills.append(_provider_pill(name, "none"))
-            elif raw.get("_error"):
-                pills.append(_provider_pill(name, "error"))
-            elif raw.get("_cached"):
-                pills.append(_provider_pill(name, "cached"))
-            else:
-                pills.append(_provider_pill(name, "ok"))
+            status = provider_status([obj.get(key) for obj in doms_data.values()])
+            pills.append(_provider_pill(name, status))
 
     st.markdown("**Provider Status:** " + " ".join(pills), unsafe_allow_html=True)
 
@@ -761,10 +761,15 @@ def _render_osint_coverage_heatmap(osint_data: dict):
     if not ips_data and not doms_data:
         return
 
+    def _has_data(raw) -> bool:
+        # _error = provider failed; _nodata = provider answered "nothing known" —
+        # neither counts as actual data for this IOC.
+        return bool(raw) and not raw.get("_error") and not raw.get("_nodata")
+
     full = partial = none_count = 0
     ip_providers = ["vt", "abuseipdb", "greynoise", "shodan"]
     for obj in ips_data.values():
-        has = sum(1 for p in ip_providers if obj.get(p) and not obj.get(p, {}).get("_error"))
+        has = sum(1 for p in ip_providers if _has_data(obj.get(p)))
         if has == len(ip_providers):
             full += 1
         elif has > 0:
@@ -774,7 +779,7 @@ def _render_osint_coverage_heatmap(osint_data: dict):
 
     dom_providers = ["vt", "otx"]
     for obj in doms_data.values():
-        has = sum(1 for p in dom_providers if obj.get(p) and not obj.get(p, {}).get("_error"))
+        has = sum(1 for p in dom_providers if _has_data(obj.get(p)))
         if has == len(dom_providers):
             full += 1
         elif has > 0:

@@ -23,7 +23,9 @@ SENSITIVE_KEYS = {
     "cfg_shodan_key",
     "cfg_abuseipdb_key",
     "cfg_otx_key",
-    "cfg_openai_key",
+    "cfg_openai_key",  # LM Studio API key (legacy name, encrypted at rest)
+    "cfg_openai_cloud_key",  # OpenAI cloud provider key
+    "cfg_anthropic_key",  # Anthropic provider key
 }
 
 # Default configuration values
@@ -31,6 +33,10 @@ DEFAULT_CONFIG = {
     "cfg_llm_endpoint": "http://localhost:11434/v1",
     "cfg_llm_model": "llama3.1:8b",
     "cfg_llm_language": "US English",
+    "cfg_llm_provider": "lmstudio",
+    "cfg_openai_model": "gpt-4o",
+    "cfg_openai_base_url": "",
+    "cfg_anthropic_model": "claude-opus-4-8",
     "cfg_pyshark_limit": 200000,
     "cfg_osint_top_ips": 50,
     "cfg_osint_cache_enabled": False,  # Enable/disable OSINT response caching
@@ -40,6 +46,8 @@ DEFAULT_CONFIG = {
     "cfg_abuseipdb_key": "",
     "cfg_otx_key": "",
     "cfg_openai_key": "",
+    "cfg_openai_cloud_key": "",
+    "cfg_anthropic_key": "",
 }
 
 

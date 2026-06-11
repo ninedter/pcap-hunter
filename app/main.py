@@ -15,7 +15,7 @@ import streamlit as st
 
 from app import config as C
 from app.analysis.flow_aggregates import compute_flow_aggregates
-from app.llm.client import generate_report
+from app.llm import providers as llm_providers
 from app.pipeline.batch import BatchProcessor, PCAPResult
 from app.pipeline.geoip import GeoIP
 from app.pipeline.osint import enrich as osint_enrich
@@ -504,10 +504,23 @@ with tab_progress:
         pcap_paths = st.session_state.get("__pcap_paths") or ([pcap_path] if pcap_path else [])
         batch_mode = st.session_state.get("__batch_mode", False) and len(pcap_paths) > 1
 
-        base_url = cfg_get("cfg_lm_base_url", "LMSTUDIO_BASE_URL", C.LM_BASE_URL)
-        api_key = cfg_get("cfg_lm_api_key", "LMSTUDIO_API_KEY", C.LM_API_KEY)
-        model = cfg_get("cfg_lm_model", "LMSTUDIO_MODEL", C.LM_MODEL)
+        llm_provider = cfg_get("cfg_llm_provider", "LLM_PROVIDER", C.LLM_PROVIDER_DEFAULT)
+        if llm_provider not in llm_providers.PROVIDERS:
+            llm_provider = C.LLM_PROVIDER_DEFAULT
+        if llm_provider == llm_providers.PROVIDER_OPENAI:
+            base_url = cfg_get("cfg_openai_base_url", "OPENAI_BASE_URL", "")
+            api_key = cfg_get("cfg_openai_api_key", "OPENAI_API_KEY", "")
+            model = cfg_get("cfg_openai_model", "OPENAI_MODEL", C.OPENAI_MODEL_DEFAULT)
+        elif llm_provider == llm_providers.PROVIDER_ANTHROPIC:
+            base_url = ""  # Anthropic SDK ignores base_url
+            api_key = cfg_get("cfg_anthropic_api_key", "ANTHROPIC_API_KEY", "")
+            model = cfg_get("cfg_anthropic_model", "ANTHROPIC_MODEL", C.ANTHROPIC_MODEL_DEFAULT)
+        else:  # LM Studio
+            base_url = cfg_get("cfg_lm_base_url", "LMSTUDIO_BASE_URL", C.LM_BASE_URL)
+            api_key = cfg_get("cfg_lm_api_key", "LMSTUDIO_API_KEY", C.LM_API_KEY)
+            model = cfg_get("cfg_lm_model", "LMSTUDIO_MODEL", C.LM_MODEL)
         language = cfg_get("cfg_lm_language", "LMSTUDIO_LANGUAGE", C.LM_LANGUAGE)
+        provider_label = llm_providers.provider_label(llm_provider)
 
         try:
             limit_packets = int(st.session_state.get("cfg_limit_packets", C.DEFAULT_PYSHARK_LIMIT)) or None
@@ -758,7 +771,9 @@ with tab_progress:
         report_md = st.session_state.get("report")
 
         llm_tracker = PhaseTracker(1, progress_container=progress_panel)
-        p = llm_tracker.next_phase("LLM report")
+        # Keep the phase KEY "LLM report" (stable slug / skip-state) but show a
+        # generic, provider-agnostic label to the user.
+        p = llm_tracker.next_phase("LLM report", display_title="LLM Report Analysis")
 
         llm_slug = make_slug("LLM report")
         llm_done = st.session_state.get(f"done_{llm_slug}", False)
@@ -766,7 +781,7 @@ with tab_progress:
 
         if not llm_done:
             if not llm_skip:
-                with st.spinner("Generating LLM report via LM Studio\u2026"):
+                with st.spinner(f"Generating LLM report via {provider_label}\u2026"):
                     zeek_json = {
                         name: (df.to_dict(orient="records") if isinstance(df, pd.DataFrame) else [])
                         for name, df in zeek_tables.items()
@@ -812,10 +827,17 @@ with tab_progress:
 
                     try:
                         current_lang = st.session_state.get("cfg_lm_language", "US English")
-                        logger.debug("Generating report with language='%s'", current_lang)
+                        logger.debug("Generating report via provider='%s' language='%s'", llm_provider, current_lang)
                         st.toast(f"Generating report in {current_lang}...", icon="\U0001f4dd")
 
-                        report_md = generate_report(base_url, api_key, model, context, language=current_lang)
+                        report_md = llm_providers.synthesize_report(
+                            llm_provider,
+                            base_url=base_url,
+                            api_key=api_key,
+                            model=model,
+                            context=context,
+                            language=current_lang,
+                        )
                     except Exception as e:
                         st.error(f"LLM call failed: {e}")
                         report_md = "_LLM generation failed. Check server/model settings._"

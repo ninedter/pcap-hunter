@@ -22,6 +22,13 @@ LM_MODEL = "local"
 LM_LANGUAGE = "US English"
 LM_TIMEOUT_SECONDS = 120  # Per-section API call timeout
 
+# Multi-provider LLM defaults. The active provider selects which backend
+# synthesize_report() dispatches to: LM Studio (local, chunked), OpenAI cloud,
+# or Anthropic (official SDK). See app/llm/providers.py.
+LLM_PROVIDER_DEFAULT = "lmstudio"  # one of providers.PROVIDERS
+OPENAI_MODEL_DEFAULT = "gpt-4o"
+ANTHROPIC_MODEL_DEFAULT = "claude-opus-4-8"
+
 # OSINT keys (empty defaults, override with env or config UI)
 OTX_KEY = os.getenv("OTX_KEY", "")
 VT_KEY = os.getenv("VT_KEY", "")

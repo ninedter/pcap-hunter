@@ -446,5 +446,26 @@ class TestNormalizeBaseUrl:
         assert mock_openai.call_args.kwargs.get("base_url") == "http://localhost:1234/v1"
 
 
+class TestProviderConfigDefaults(unittest.TestCase):
+    """Multi-provider config defaults must be present in app.config."""
+
+    def test_provider_and_model_defaults(self):
+        from app import config as C
+
+        self.assertEqual(C.LLM_PROVIDER_DEFAULT, "lmstudio")
+        self.assertEqual(C.OPENAI_MODEL_DEFAULT, "gpt-4o")
+        self.assertEqual(C.ANTHROPIC_MODEL_DEFAULT, "claude-opus-4-8")
+
+    def test_config_manager_seeds_provider_keys(self):
+        from app.utils.config_manager import DEFAULT_CONFIG, SENSITIVE_KEYS
+
+        self.assertEqual(DEFAULT_CONFIG.get("cfg_llm_provider"), "lmstudio")
+        self.assertEqual(DEFAULT_CONFIG.get("cfg_openai_model"), "gpt-4o")
+        self.assertEqual(DEFAULT_CONFIG.get("cfg_anthropic_model"), "claude-opus-4-8")
+        # New cloud keys are encrypted at rest
+        self.assertIn("cfg_openai_cloud_key", SENSITIVE_KEYS)
+        self.assertIn("cfg_anthropic_key", SENSITIVE_KEYS)
+
+
 if __name__ == "__main__":
     unittest.main()

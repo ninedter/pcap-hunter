@@ -11,6 +11,10 @@ scapy>=2.5.0,<3.0
 # OpenAI / LM Studio client
 openai>=1.30.0,<3.0
 
+# Anthropic (Claude) — official SDK, used for the Anthropic provider's
+# single-shot frontier report path. MUST NOT be routed through the OpenAI shim.
+anthropic>=0.49,<1.0
+
 # HTTP / API requests
 requests>=2.32,<3.0
 

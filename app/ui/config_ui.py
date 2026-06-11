@@ -6,7 +6,8 @@ import streamlit as st
 
 from app import config as C
 from app.database.repository import CaseRepository
-from app.llm.client import fetch_models, test_connection
+from app.llm import providers as llm_providers
+from app.llm.client import fetch_models
 from app.pipeline.osint import (
     PROBE_RESULT_INVALID_KEY,
     PROBE_RESULT_OK,
@@ -30,6 +31,13 @@ PERSIST_KEYS = {
     "cfg_lm_api_key": "cfg_openai_key",
     "cfg_lm_model": "cfg_llm_model",
     "cfg_lm_language": "cfg_llm_language",
+    # Multi-provider LLM settings
+    "cfg_llm_provider": "cfg_llm_provider",
+    "cfg_openai_api_key": "cfg_openai_cloud_key",
+    "cfg_openai_model": "cfg_openai_model",
+    "cfg_openai_base_url": "cfg_openai_base_url",
+    "cfg_anthropic_api_key": "cfg_anthropic_key",
+    "cfg_anthropic_model": "cfg_anthropic_model",
     "cfg_otx": "cfg_otx_key",
     "cfg_vt": "cfg_vt_key",
     "cfg_abuseipdb": "cfg_abuseipdb_key",
@@ -61,6 +69,32 @@ def init_config_defaults():
     _ss_default("cfg_lm_model", saved_config.get("cfg_llm_model") or os.getenv("LMSTUDIO_MODEL", C.LM_MODEL))
     lm_lang = saved_config.get("cfg_llm_language") or os.getenv("LMSTUDIO_LANGUAGE", C.LM_LANGUAGE)
     _ss_default("cfg_lm_language", lm_lang)
+
+    # Multi-provider LLM settings (saved config → env → defaults)
+    _ss_default(
+        "cfg_llm_provider",
+        saved_config.get("cfg_llm_provider") or os.getenv("LLM_PROVIDER", C.LLM_PROVIDER_DEFAULT),
+    )
+    _ss_default(
+        "cfg_openai_api_key",
+        saved_config.get("cfg_openai_cloud_key") or os.getenv("OPENAI_API_KEY", ""),
+    )
+    _ss_default(
+        "cfg_openai_model",
+        saved_config.get("cfg_openai_model") or os.getenv("OPENAI_MODEL", C.OPENAI_MODEL_DEFAULT),
+    )
+    _ss_default(
+        "cfg_openai_base_url",
+        saved_config.get("cfg_openai_base_url") or os.getenv("OPENAI_BASE_URL", ""),
+    )
+    _ss_default(
+        "cfg_anthropic_api_key",
+        saved_config.get("cfg_anthropic_key") or os.getenv("ANTHROPIC_API_KEY", ""),
+    )
+    _ss_default(
+        "cfg_anthropic_model",
+        saved_config.get("cfg_anthropic_model") or os.getenv("ANTHROPIC_MODEL", C.ANTHROPIC_MODEL_DEFAULT),
+    )
 
     # OSINT keys
     _ss_default("cfg_otx", saved_config.get("cfg_otx_key") or os.getenv("OTX_KEY", C.OTX_KEY))
@@ -127,81 +161,159 @@ def load_config() -> bool:
         return False
 
 
-def render_config_tab():
-    st.markdown("### Configuration")
-    st.markdown("#### LM Studio (OpenAI-compatible)")
-    c1, c2 = st.columns([2, 1])
-    with c1:
-        st.session_state["cfg_lm_base_url"] = st.text_input(
-            "OpenAI base_url", value=st.session_state.get("cfg_lm_base_url")
+def _active_provider() -> str:
+    """Return the currently selected LLM provider id, defaulting to LM Studio."""
+    prov = st.session_state.get("cfg_llm_provider", C.LLM_PROVIDER_DEFAULT)
+    return prov if prov in llm_providers.PROVIDERS else C.LLM_PROVIDER_DEFAULT
+
+
+def _active_provider_credentials() -> tuple[str, str, str]:
+    """Return ``(base_url, api_key, model)`` for the active provider from session state.
+
+    OpenAI/Anthropic carry no LM Studio base_url; Anthropic ignores base_url entirely.
+    """
+    provider = _active_provider()
+    if provider == llm_providers.PROVIDER_OPENAI:
+        return (
+            st.session_state.get("cfg_openai_base_url", "") or "",
+            st.session_state.get("cfg_openai_api_key", "") or "",
+            st.session_state.get("cfg_openai_model", C.OPENAI_MODEL_DEFAULT) or C.OPENAI_MODEL_DEFAULT,
         )
-    with c2:
-        st.session_state["cfg_lm_api_key"] = st.text_input("API Key", value=st.session_state.get("cfg_lm_api_key"))
+    if provider == llm_providers.PROVIDER_ANTHROPIC:
+        return (
+            "",
+            st.session_state.get("cfg_anthropic_api_key", "") or "",
+            st.session_state.get("cfg_anthropic_model", C.ANTHROPIC_MODEL_DEFAULT) or C.ANTHROPIC_MODEL_DEFAULT,
+        )
+    # LM Studio
+    return (
+        st.session_state.get("cfg_lm_base_url", "") or "",
+        st.session_state.get("cfg_lm_api_key", "") or "",
+        st.session_state.get("cfg_lm_model", "") or "",
+    )
 
-    # Buttons and shared status
-    b1, b2, b3, _ = st.columns([1, 1, 1, 1])
 
-    # Action flags
+def _render_llm_integration():
+    """Render the provider selector and the active provider's fields."""
+    st.markdown("#### LLM Integration")
+
+    # Provider selector (horizontal). Maps display label ↔ provider id.
+    provider_options = list(llm_providers.PROVIDERS)
+    provider_captions = {
+        llm_providers.PROVIDER_LMSTUDIO: "LM Studio (local)",
+        llm_providers.PROVIDER_OPENAI: "OpenAI",
+        llm_providers.PROVIDER_ANTHROPIC: "Anthropic",
+    }
+    current_provider = _active_provider()
+    prov_idx = provider_options.index(current_provider)
+    selected_provider = st.radio(
+        "Provider",
+        provider_options,
+        index=prov_idx,
+        horizontal=True,
+        format_func=lambda p: provider_captions.get(p, p),
+        key="widget_llm_provider",
+    )
+    st.session_state["cfg_llm_provider"] = selected_provider
+
     do_test = False
-    do_fetch = False
-    do_rerun = False
 
-    with b1:
-        if st.button("Test Connection"):
-            do_test = True
-    with b2:
-        if st.button("Fetch Models"):
-            do_fetch = True
-    with b3:
-        if st.button("Re-run Report"):
-            do_rerun = True
+    # ---- Provider-specific fields (only the active provider's are shown) ----
+    if selected_provider == llm_providers.PROVIDER_LMSTUDIO:
+        c1, c2 = st.columns([2, 1])
+        with c1:
+            st.session_state["cfg_lm_base_url"] = st.text_input(
+                "OpenAI-compatible base_url", value=st.session_state.get("cfg_lm_base_url")
+            )
+        with c2:
+            st.session_state["cfg_lm_api_key"] = st.text_input("API Key", value=st.session_state.get("cfg_lm_api_key"))
 
-    # Combined status area
+        b1, b2, b3, _ = st.columns([1, 1, 1, 1])
+        with b1:
+            if st.button("Test Connection"):
+                do_test = True
+        with b2:
+            do_fetch = st.button("Fetch Models")
+        with b3:
+            if st.button("Re-run Report"):
+                st.session_state["trigger_llm_rerun"] = True
+                st.success("Re-run triggered. Reloading...")
+                st.rerun()
+
+        if do_fetch:
+            with st.spinner("Fetching models..."):
+                models = fetch_models(
+                    st.session_state.get("cfg_lm_base_url"),
+                    st.session_state.get("cfg_lm_api_key"),
+                )
+                if models:
+                    st.session_state["available_models"] = models
+                    st.success(f"Found {len(models)} models.")
+                else:
+                    st.error("Could not fetch models. Check URL/Key.")
+
+        available = st.session_state.get("available_models", [])
+        current_model = st.session_state.get("cfg_lm_model", "")
+        if available:
+            index = available.index(current_model) if current_model in available else 0
+            st.session_state["cfg_lm_model"] = st.selectbox("Model name", available, index=index)
+        else:
+            st.session_state["cfg_lm_model"] = st.text_input("Model name", value=current_model)
+
+    elif selected_provider == llm_providers.PROVIDER_OPENAI:
+        c1, c2 = st.columns([2, 1])
+        with c1:
+            st.session_state["cfg_openai_api_key"] = st.text_input(
+                "OpenAI API Key", type="password", value=st.session_state.get("cfg_openai_api_key", "")
+            )
+        with c2:
+            if st.button("Test Connection"):
+                do_test = True
+        st.session_state["cfg_openai_model"] = st.text_input(
+            "Model", value=st.session_state.get("cfg_openai_model", C.OPENAI_MODEL_DEFAULT)
+        )
+        st.session_state["cfg_openai_base_url"] = st.text_input(
+            "Base URL (optional — blank = api.openai.com)",
+            value=st.session_state.get("cfg_openai_base_url", ""),
+            placeholder="https://api.openai.com/v1",
+        )
+        if st.button("Fetch Models", key="openai_fetch_models"):
+            with st.spinner("Fetching models..."):
+                models = fetch_models(
+                    st.session_state.get("cfg_openai_base_url") or "https://api.openai.com/v1",
+                    st.session_state.get("cfg_openai_api_key"),
+                )
+                if models:
+                    st.session_state["available_models"] = models
+                    st.success(f"Found {len(models)} models.")
+                else:
+                    st.error("Could not fetch models. Check Key/Base URL.")
+
+    elif selected_provider == llm_providers.PROVIDER_ANTHROPIC:
+        c1, c2 = st.columns([2, 1])
+        with c1:
+            st.session_state["cfg_anthropic_api_key"] = st.text_input(
+                "Anthropic API Key", type="password", value=st.session_state.get("cfg_anthropic_api_key", "")
+            )
+        with c2:
+            if st.button("Test Connection"):
+                do_test = True
+        anth_models = list(llm_providers.ANTHROPIC_MODELS)
+        current_anth = st.session_state.get("cfg_anthropic_model", C.ANTHROPIC_MODEL_DEFAULT)
+        anth_idx = anth_models.index(current_anth) if current_anth in anth_models else 0
+        st.session_state["cfg_anthropic_model"] = st.selectbox("Model", anth_models, index=anth_idx)
+
+    # ---- Shared Test Connection result ----
     if do_test:
         with st.spinner("Testing connection..."):
-            err = test_connection(
-                st.session_state["cfg_lm_base_url"],
-                st.session_state["cfg_lm_api_key"],
-                st.session_state.get("cfg_lm_model", ""),  # Model might be empty or valid
-            )
-            if not err:
-                st.success("Connection successful!")
-            else:
-                st.error(f"Connection failed: {err}")
+            base_url, api_key, model = _active_provider_credentials()
+            ok, msg = llm_providers.probe_provider(selected_provider, base_url=base_url, api_key=api_key, model=model)
+        if ok:
+            st.success(f"✅ {msg}")
+        else:
+            st.error(f"❌ {msg}")
 
-    if do_fetch:
-        with st.spinner("Fetching models..."):
-            models = fetch_models(
-                st.session_state.get("cfg_lm_base_url"),
-                st.session_state.get("cfg_lm_api_key"),
-            )
-            if models:
-                st.session_state["available_models"] = models
-                st.success(f"Found {len(models)} models.")
-            else:
-                st.error("Could not fetch models. Check URL/Key.")
-
-    if do_rerun:
-        st.session_state["trigger_llm_rerun"] = True
-        st.success("Re-run triggered. Reloading...")
-        st.rerun()
-
-    # Model selection
-    available = st.session_state.get("available_models", [])
-    current_model = st.session_state.get("cfg_lm_model", "")
-
-    if available:
-        # If current model is not in available, add it or just default to index 0
-        index = 0
-        if current_model in available:
-            index = available.index(current_model)
-
-        selected = st.selectbox("Model name", available, index=index)
-        st.session_state["cfg_lm_model"] = selected
-    else:
-        st.session_state["cfg_lm_model"] = st.text_input("Model name", value=current_model)
-
-    # Language Selection
+    # ---- Language Selection (shared across providers) ----
     current_lang = st.session_state.get("cfg_lm_language", "US English")
     languages = [
         "US English",
@@ -215,7 +327,6 @@ def render_config_tab():
         "German",
     ]
 
-    # Callback to update the real config key before script reruns
     def _update_lang():
         st.session_state["cfg_lm_language"] = st.session_state["widget_lm_language"]
 
@@ -224,9 +335,12 @@ def render_config_tab():
     except ValueError:
         lang_idx = 0
 
-    # Use a proxy key 'widget_lm_language' to avoid GC issues when the tab is skipped,
-    # but use on_change to ensure 'cfg_lm_language' is updated immediately.
     st.selectbox("Report Language", languages, index=lang_idx, key="widget_lm_language", on_change=_update_lang)
+
+
+def render_config_tab():
+    st.markdown("### Configuration")
+    _render_llm_integration()
 
     st.markdown("---")
     st.markdown("#### OSINT API Keys (optional)")

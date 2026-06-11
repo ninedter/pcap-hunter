@@ -138,9 +138,16 @@ class PhaseTracker:
         if label:
             self.overall_text.write(f"Overall progress: {pct}% — {label}")
 
-    def next_phase(self, title: str):
+    def next_phase(self, title: str, display_title: str | None = None):
+        """Begin a new phase row.
+
+        ``title`` is the stable phase KEY — the slug and skip/done session-state
+        keys are derived from it, so it must never change for a given phase.
+        ``display_title`` overrides only the user-visible caption (defaults to
+        ``title``); use it to show a friendlier label without re-slugging.
+        """
         with self._pc:
-            st.caption(title)
+            st.caption(display_title or title)
             # Safe CSS hook wrapper (no .classes() calls)
             st.markdown('<div class="phase-row">', unsafe_allow_html=True)
             cols = st.columns([5, 1.1])

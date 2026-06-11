@@ -11,8 +11,6 @@ import logging
 import os
 from datetime import datetime, timezone
 
-import streamlit as st
-
 
 class JSONFormatter(logging.Formatter):
     """Structured JSON log formatter for SIEM/log aggregation ingestion.
@@ -77,6 +75,12 @@ def get_logger(name: str) -> logging.Logger:
     The log level defaults to ``INFO`` and can be overridden with the
     ``PCAP_HUNTER_LOG_LEVEL`` environment variable (e.g. ``DEBUG``, ``WARNING``).
 
+    Dotted (module-level) loggers that receive their own handler stop
+    propagating to ancestors: once a parent like ``app`` also has a handler
+    (the API process attaches one so logs are visible under uvicorn), every
+    record would otherwise emit twice. Top-level names (no dot) keep
+    propagating so root-level handlers (e.g. pytest's caplog) still see them.
+
     Args:
         name: The name of the logger (typically ``__name__``).
 
@@ -99,6 +103,8 @@ def get_logger(name: str) -> logging.Logger:
 
         handler.setLevel(logging.DEBUG)
         logger.addHandler(handler)
+        if "." in name:
+            logger.propagate = False
 
         level_name = os.getenv("PCAP_HUNTER_LOG_LEVEL", "INFO").upper()
         logger.setLevel(getattr(logging, level_name, logging.INFO))
@@ -108,6 +114,10 @@ def get_logger(name: str) -> logging.Logger:
 
 def log_runtime_error(msg: str):
     """Log a runtime error to the session state."""
+    # Lazy import: this module is also used by the headless API process, which
+    # must not drag streamlit in just to get get_logger().
+    import streamlit as st
+
     if "runtime_logs" not in st.session_state:
         st.session_state["runtime_logs"] = []
 

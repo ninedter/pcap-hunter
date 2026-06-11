@@ -156,6 +156,24 @@ def create_app() -> FastAPI:
             "env vars, or create at least one DB-backed key before starting."
         )
 
+    # Make app.* logs (audit middleware, repository, worker stages) visible under
+    # uvicorn, which configures only its own loggers.
+    from app.utils.logger import get_logger
+
+    get_logger("app")
+
+    if not settings.main_key and key_repo.count_active_keys(scope="full") == 0:
+        logger.warning(
+            "No full-scope auth source configured (no PCAP_HUNTER_API_KEY env var and no active "
+            "full-scope DB key) — ingress and admin endpoints will reject every request until one exists."
+        )
+    if not settings.main_key and not settings.feed_key:
+        logger.warning(
+            "Booting without env-var API keys — auth relies entirely on %d DB-backed key(s). "
+            "If this is unintentional, the compose file may have been re-upped without the key env vars.",
+            key_repo.count_active_keys(),
+        )
+
     app = FastAPI(
         title="PCAP Hunter Integrations API",
         version="1.0.0",

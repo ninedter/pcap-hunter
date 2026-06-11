@@ -93,6 +93,10 @@ def _sha256_file(path: str) -> str:
 
 def _worker_run(job_id: str, db_path: str, pcap_path: str, options_dict: dict) -> None:
     """Top-level worker function (must be picklable for ProcessPoolExecutor)."""
+    from app.utils.logger import get_logger
+
+    get_logger("app")  # spawn-platform children inherit no handlers
+
     from app.database.models import JobStatus as JS
     from app.database.repository import CaseRepository as Repo
     from app.pipeline.progress import CallbackProgress, ProgressEvent

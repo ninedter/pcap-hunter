@@ -151,6 +151,25 @@ def test_count_active_keys(tmp_path):
     assert repo.count_active_keys() == 2
 
 
+def test_count_active_keys_by_scope(tmp_path):
+    repo = _repo(tmp_path)
+    for i, scope in enumerate((Scope.FEED, Scope.FEED, Scope.FULL)):
+        _, key = _make_key(name=f"k-{scope.value}-{i}", scope=scope)
+        repo.create_key(key)
+    assert repo.count_active_keys() == 3
+    assert repo.count_active_keys(scope="full") == 1
+    assert repo.count_active_keys(scope="feed") == 2
+
+    # Revoked and expired keys stay excluded when a scope filter is applied.
+    _, revoked = _make_key(name="k-full-revoked", scope=Scope.FULL)
+    rid = repo.create_key(revoked)
+    repo.revoke_key(rid)
+    _, expired = _make_key(name="k-full-expired", scope=Scope.FULL, expires_at=datetime.now() - timedelta(days=1))
+    repo.create_key(expired)
+    assert repo.count_active_keys(scope="full") == 1
+    assert repo.count_active_keys() == 3
+
+
 def test_get_expiring_keys(tmp_path):
     repo = _repo(tmp_path)
     _, k1 = _make_key(name="expiring", expires_at=datetime.now() + timedelta(days=3))

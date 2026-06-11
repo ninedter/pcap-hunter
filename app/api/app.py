@@ -13,9 +13,11 @@ import uuid
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, Request
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from app.api.deps import get_key_repo, get_settings, get_usage_tracker
 from app.api.queue import recover_stale_running_jobs
@@ -131,6 +133,15 @@ def _sanitize_request_id(value: str) -> str:
     return _REQUEST_ID_RE.sub("", value)[:_REQUEST_ID_MAX_LEN]
 
 
+def _request_id_of(request: Request) -> str:
+    """Sanitized request ID stored by the middleware, or sanitize the raw header if it hasn't run yet."""
+    rid = getattr(request.state, "request_id", None) or ""
+    if not rid:
+        raw = request.headers.get("X-Request-ID", "")
+        rid = _sanitize_request_id(raw) if raw else ""
+    return rid
+
+
 def create_app() -> FastAPI:
     """Build the FastAPI app. Reads APISettings from env (refuses to start without keys)."""
     settings = get_settings()
@@ -185,8 +196,11 @@ def create_app() -> FastAPI:
         )
         return response
 
-    @app.exception_handler(HTTPException)
-    async def _http_exception_handler(request: Request, exc: HTTPException) -> JSONResponse:
+    # Registered for the *Starlette* base class so routing-raised errors
+    # (405 method-not-allowed, 404 no-route) get problem+json too —
+    # fastapi.HTTPException subclasses it, so app-raised errors still match.
+    @app.exception_handler(StarletteHTTPException)
+    async def _http_exception_handler(request: Request, exc: StarletteHTTPException) -> JSONResponse:
         detail = exc.detail
         if isinstance(detail, dict):
             code = detail.get("code", "http_error")
@@ -199,12 +213,7 @@ def create_app() -> FastAPI:
             detail_text = str(detail) if not isinstance(detail, str) else detail
             extras = {}
 
-        # Use the sanitized request ID stored by the middleware, or sanitize
-        # the raw header if the middleware hasn't run yet.
-        rid = getattr(request.state, "request_id", None) or ""
-        if not rid:
-            raw = request.headers.get("X-Request-ID", "")
-            rid = _sanitize_request_id(raw) if raw else ""
+        rid = _request_id_of(request)
         body = {
             "type": f"https://pcap-hunter.io/errors/{code}",
             "title": title,
@@ -222,6 +231,26 @@ def create_app() -> FastAPI:
             media_type="application/problem+json",
             headers=headers,
         )
+
+    @app.exception_handler(RequestValidationError)
+    async def _validation_exception_handler(request: Request, exc: RequestValidationError) -> JSONResponse:
+        rid = _request_id_of(request)
+        # Deliberately drop the raw `input` values — submitted secrets must
+        # not echo back into error bodies.
+        errors = [
+            {"loc": list(e.get("loc", [])), "msg": e.get("msg", ""), "type": e.get("type", "")} for e in exc.errors()
+        ]
+        body = {
+            "type": "https://pcap-hunter.io/errors/validation_error",
+            "title": "Unprocessable Entity",
+            "status": 422,
+            "detail": "Request validation failed.",
+            "instance": str(request.url.path),
+            "code": "validation_error",
+            "request_id": rid,
+            "errors": errors,
+        }
+        return JSONResponse(status_code=422, content=body, media_type="application/problem+json")
 
     app.include_router(health.router)
     app.include_router(pcaps.router)

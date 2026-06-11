@@ -74,7 +74,8 @@ def _do_auth(authorization: str | None, required: Scope) -> Scope:
         )
         return result.scope
     except ValueError as exc:
-        raise HTTPException(status_code=401, detail=str(exc))
+        # RFC 6750 §3: Bearer-auth APIs must advertise the scheme on 401.
+        raise HTTPException(status_code=401, detail=str(exc), headers={"WWW-Authenticate": "Bearer"})
     except PermissionError:
         raise HTTPException(status_code=403, detail="insufficient_scope")
     except RateLimitError as exc:

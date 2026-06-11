@@ -7,6 +7,8 @@ import hashlib
 import io
 import json
 import uuid
+from datetime import datetime, timezone
+from email.utils import format_datetime
 
 from fastapi import APIRouter, Depends, Query, Request
 from fastapi.responses import Response
@@ -53,14 +55,28 @@ def _last_modified(rows: list[dict]) -> str | None:
     return max(timestamps) if timestamps else None
 
 
+def _http_date(iso_ts: str | None) -> str | None:
+    """ISO-8601 (DB format) -> RFC 7231 IMF-fixdate; None if unparseable."""
+    if not iso_ts:
+        return None
+    try:
+        dt = datetime.fromisoformat(iso_ts)
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return format_datetime(dt.astimezone(timezone.utc), usegmt=True)
+
+
 def _conditional_response(request: Request, body: bytes, media_type: str, last_modified: str | None) -> Response:
     etag = _etag_for(body)
     inm = request.headers.get("If-None-Match")
     if inm and inm.strip('"') == etag:
         return Response(status_code=304, headers={"ETag": f'"{etag}"'})
     headers = {"ETag": f'"{etag}"', "Cache-Control": "private, max-age=60"}
-    if last_modified:
-        headers["Last-Modified"] = last_modified
+    http_date = _http_date(last_modified)
+    if http_date:
+        headers["Last-Modified"] = http_date
     return Response(content=body, media_type=media_type, headers=headers)
 
 

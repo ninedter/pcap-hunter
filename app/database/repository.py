@@ -322,18 +322,36 @@ class CaseRepository:
         """
         Delete case and all related data.
 
+        The schema declares ON DELETE CASCADE foreign keys, but SQLite's
+        foreign_keys pragma is off per connection, so related rows in iocs,
+        notes, analyses, case_tags, and jobs are deleted explicitly here.
+
         Args:
             case_id: Case ID to delete.
 
         Returns:
-            True if deleted.
+            True if the case existed and was deleted.
         """
         conn = self._get_conn()
         try:
-            conn.execute("DELETE FROM cases WHERE id = ?", (case_id,))
+            # FK pragma is off (INSERT OR REPLACE in save_analysis would
+            # cascade-wipe children if enabled) -> delete related rows explicitly,
+            # children first.
+            conn.execute(
+                "DELETE FROM iocs WHERE analysis_id IN (SELECT id FROM analyses WHERE case_id = ?)",
+                (case_id,),
+            )
+            conn.execute(
+                "DELETE FROM notes WHERE case_id = ? OR analysis_id IN (SELECT id FROM analyses WHERE case_id = ?)",
+                (case_id, case_id),
+            )
+            conn.execute("DELETE FROM analyses WHERE case_id = ?", (case_id,))
+            conn.execute("DELETE FROM case_tags WHERE case_id = ?", (case_id,))
+            conn.execute("DELETE FROM jobs WHERE case_id = ?", (case_id,))
+            cur = conn.execute("DELETE FROM cases WHERE id = ?", (case_id,))
             conn.commit()
-            logger.info("Deleted case: %s", case_id)
-            return True
+            logger.info("Deleted case and related data: %s", case_id)
+            return cur.rowcount > 0
         except Exception as e:
             logger.error("Failed to delete case %s: %s", case_id, e)
             return False

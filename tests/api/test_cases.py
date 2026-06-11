@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import os
+import pathlib
 import time
 from types import SimpleNamespace
 
@@ -18,6 +19,7 @@ from app.reports.pdf_generator import WEASYPRINT_AVAILABLE  # noqa: F401
 def client(monkeypatch, tmp_path):
     monkeypatch.setenv("PCAP_HUNTER_API_KEY", "MAIN")
     monkeypatch.setenv("PCAP_HUNTER_API_DB_PATH", str(tmp_path / "t.db"))
+    monkeypatch.setenv("PCAP_HUNTER_API_UPLOADS_DIR", str(tmp_path / "uploads"))
 
     from app.api.deps import get_queue, get_repo, get_settings
 
@@ -260,3 +262,50 @@ def test_report_pdf_tolerates_malformed_beacon_records(client, tmp_path, monkeyp
     r = client.get("/api/v1/cases/pdfcase6/report.pdf", headers={"Authorization": "Bearer MAIN"})
     assert r.status_code == 200, r.text
     assert captured["beacon_df"] is None
+
+
+def test_delete_case_removes_files(client, tmp_path, monkeypatch):
+    """DELETE must clean up the uploaded pcap, cached pdf, and per-run zeek/carve dirs."""
+    from app import config as config_module
+
+    uploads = pathlib.Path(os.environ["PCAP_HUNTER_API_UPLOADS_DIR"])
+    reports = tmp_path / "reports"
+    monkeypatch.setenv("PCAP_HUNTER_REPORTS_DIR", str(reports))
+    zeek_base = tmp_path / "zeek"
+    carve_base = tmp_path / "carved"
+    monkeypatch.setattr(config_module, "ZEEK_DIR", zeek_base)
+    monkeypatch.setattr(config_module, "CARVE_DIR", carve_base)
+
+    case_id = _seed_case_with_analysis("delfiles1")
+
+    uploads.mkdir(parents=True, exist_ok=True)
+    reports.mkdir(parents=True, exist_ok=True)
+    (uploads / f"{case_id}.pcap").write_bytes(b"\xd4\xc3\xb2\xa1" + b"\x00" * 20)
+    (reports / f"{case_id}.pdf").write_bytes(b"%PDF-fake")
+    # Per-run output dirs as the pipeline runner creates them: <sanitized-case>_<uuid8>
+    (zeek_base / f"{case_id}_deadbeef").mkdir(parents=True)
+    (zeek_base / f"{case_id}_deadbeef" / "conn.log").write_text("zeek log")
+    (carve_base / f"{case_id}_deadbeef").mkdir(parents=True)
+    # Another case's run dir must survive the cleanup glob.
+    (zeek_base / "othercase_cafe0001").mkdir(parents=True)
+
+    r = client.delete(f"/api/v1/cases/{case_id}", headers={"Authorization": "Bearer MAIN"})
+    assert r.status_code == 204
+    assert not (uploads / f"{case_id}.pcap").exists()
+    assert not (reports / f"{case_id}.pdf").exists()
+    assert not (zeek_base / f"{case_id}_deadbeef").exists()
+    assert not (carve_base / f"{case_id}_deadbeef").exists()
+    assert (zeek_base / "othercase_cafe0001").exists()
+
+
+def test_delete_case_succeeds_when_no_artifacts_exist(client, tmp_path, monkeypatch):
+    """File cleanup is best-effort: missing artifacts must never break the 204."""
+    monkeypatch.setenv("PCAP_HUNTER_REPORTS_DIR", str(tmp_path / "reports-nonexistent"))
+    case_id = _seed_case_with_analysis("delfiles2")
+
+    r = client.delete(f"/api/v1/cases/{case_id}", headers={"Authorization": "Bearer MAIN"})
+    assert r.status_code == 204
+
+    from app.api.deps import get_repo
+
+    assert get_repo().get_case(case_id) is None

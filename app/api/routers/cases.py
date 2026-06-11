@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import glob
 import logging
 import os
 import pathlib
+import re
+import shutil
 import tempfile
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -131,4 +134,26 @@ def delete_case(case_id: str, _scope=Depends(require_full_scope), repo=Depends(g
             cancel_queued_job(repo, row[0])
 
     repo.delete_case(case_id)
+
+    # Best-effort artifact cleanup: uploaded pcap, cached pdf, per-run output
+    # dirs. The DB delete above is the source of truth — file errors must
+    # never turn the 204 into a failure.
+    try:
+        uploads_dir = pathlib.Path(os.environ.get("PCAP_HUNTER_API_UPLOADS_DIR", "data/api_uploads"))
+        (uploads_dir / f"{case_id}.pcap").unlink(missing_ok=True)
+        (_reports_dir() / f"{case_id}.pdf").unlink(missing_ok=True)
+
+        # Call-time import so tests can monkeypatch ZEEK_DIR/CARVE_DIR on the module.
+        from app import config as C
+
+        # Sanitization mirrors app.pipeline.runner._derive_run_id so the glob
+        # matches exactly the run dirs the runner created for this case.
+        safe = re.sub(r"[^A-Za-z0-9._-]", "_", case_id)[:40].lstrip(".")
+        if safe:
+            for base in (C.ZEEK_DIR, C.CARVE_DIR):
+                for d in glob.glob(str(base / f"{safe}_*")):
+                    shutil.rmtree(d, ignore_errors=True)
+    except Exception as exc:
+        logger.warning("Artifact cleanup after deleting case %s failed: %s", case_id, exc)
+
     return JSONResponse(status_code=204, content=None)

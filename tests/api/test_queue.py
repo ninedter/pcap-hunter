@@ -461,7 +461,8 @@ def test_worker_skips_cancelled_job(tmp_path, monkeypatch):
 
 
 def test_worker_skips_deleted_job(tmp_path, monkeypatch):
-    """Case deletion cascades the job row away — the already-submitted future must no-op."""
+    """delete_case explicitly deletes the job row (FK pragma is off, so nothing
+    cascades) — the already-submitted future must no-op."""
     import app.pipeline.runner as runner_mod
 
     calls: dict = {}
@@ -478,7 +479,7 @@ def test_worker_skips_deleted_job(tmp_path, monkeypatch):
 
     _worker_run(job_id, db, str(fake_pcap), {"osint_enabled": False, "llm_enabled": False})
 
-    assert repo.get_job(job_id) is None, "the cascaded job row must stay gone"
+    assert repo.get_job(job_id) is None, "the explicitly-deleted job row must stay gone"
     assert "ran" not in calls, "pipeline must not run for a deleted job"
     conn = repo._get_conn()
     try:
@@ -486,3 +487,71 @@ def test_worker_skips_deleted_job(tmp_path, monkeypatch):
         assert orphans == 0, "no orphan analysis may be created for a deleted case"
     finally:
         conn.close()
+
+
+# ---------------------------------------------------------------------------
+# Task 8b: CAS status transitions + atomic finalize
+# ---------------------------------------------------------------------------
+
+
+def test_start_job_if_queued_flips_exactly_once(tmp_path):
+    """The CAS RUNNING flip succeeds once on a queued job and loses thereafter."""
+    repo = CaseRepository(db_path=str(tmp_path / "t.db"))
+    case_id = repo.create_case(Case(title="T"))
+    job_id = repo.create_job(Job(case_id=case_id, pcap_path="/tmp/x.pcap"))
+
+    assert repo.start_job_if_queued(job_id) is True
+    j = repo.get_job(job_id)
+    assert j.status == JobStatus.RUNNING
+    assert j.started_at is not None
+    assert j.heartbeat_at is not None
+
+    # A second contender loses: the job is no longer queued.
+    assert repo.start_job_if_queued(job_id) is False
+    assert repo.get_job(job_id).status == JobStatus.RUNNING
+
+
+def test_start_job_if_queued_false_on_cancelled(tmp_path):
+    """A job cancelled before the flip must stay cancelled — the flip loses."""
+    repo = CaseRepository(db_path=str(tmp_path / "t.db"))
+    case_id = repo.create_case(Case(title="T"))
+    job_id = repo.create_job(Job(case_id=case_id, pcap_path="/tmp/x.pcap"))
+    assert repo.cancel_job_if_queued(job_id) is True
+
+    assert repo.start_job_if_queued(job_id) is False
+    assert repo.get_job(job_id).status == JobStatus.CANCELLED
+
+
+def test_start_job_if_queued_false_on_missing(tmp_path):
+    """A deleted/never-created job id must not be resurrected by the flip."""
+    repo = CaseRepository(db_path=str(tmp_path / "t.db"))
+    assert repo.start_job_if_queued("j_missing0") is False
+
+
+def test_cancel_job_if_queued_false_on_running(tmp_path):
+    """Cancel-if-queued must lose against a job that already started."""
+    repo = CaseRepository(db_path=str(tmp_path / "t.db"))
+    case_id = repo.create_case(Case(title="T"))
+    job_id = repo.create_job(Job(case_id=case_id, pcap_path="/tmp/x.pcap"))
+    assert repo.start_job_if_queued(job_id) is True
+
+    assert repo.cancel_job_if_queued(job_id) is False
+    assert repo.get_job(job_id).status == JobStatus.RUNNING
+
+
+def test_complete_job_sets_done_and_reconciles_progress(tmp_path):
+    """complete_job must finalize status, result, and progress in one write."""
+    repo = CaseRepository(db_path=str(tmp_path / "t.db"))
+    case_id = repo.create_case(Case(title="T"))
+    job_id = repo.create_job(Job(case_id=case_id, pcap_path="/tmp/x.pcap"))
+    assert repo.start_job_if_queued(job_id) is True
+    repo.update_job_progress(job_id, "Parsing", 5, 10)
+
+    repo.complete_job(job_id, b'{"ok": true}')
+
+    j = repo.get_job(job_id)
+    assert j.status == JobStatus.DONE
+    assert j.finished_at is not None
+    assert json.loads(j.result_json) == {"ok": True}
+    assert j.progress_stage == "Complete"
+    assert j.progress_done == j.progress_total == 10

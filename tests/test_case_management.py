@@ -358,6 +358,21 @@ class TestCaseRepository:
         assert repo.get_statistics()["total_cases"] == 0
         assert repo.get_statistics()["total_analyses"] == 0
 
+    def test_clear_all_reaps_jobs(self, repo):
+        """clear_all must delete job rows along with the case data."""
+        case_id = repo.create_case(Case(title="With Job"))
+        job_id = repo.create_job(Job(case_id=case_id, pcap_path="/p.pcap"))
+        assert repo.get_job(job_id) is not None
+
+        assert repo.clear_all() is True
+
+        assert repo.get_job(job_id) is None
+        conn = repo._get_conn()
+        try:
+            assert conn.execute("SELECT COUNT(*) FROM jobs").fetchone()[0] == 0
+        finally:
+            conn.close()
+
     def test_save_analysis_to_case(self, repo):
         """Test saving analysis to case."""
         case_id = repo.create_case(Case(title="With Analysis"))

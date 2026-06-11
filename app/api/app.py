@@ -23,7 +23,7 @@ from app.api.auth import Scope
 from app.api.deps import get_key_repo, get_settings, get_usage_tracker
 from app.api.queue import recover_stale_running_jobs
 from app.api.routers import admin, cases, health, iocs, jobs, pcaps
-from app.api.settings import NoKeysConfiguredError
+from app.api.settings import FULL_SCOPE_RECOVERY_HINT, NoKeysConfiguredError
 
 logger = logging.getLogger(__name__)
 
@@ -166,9 +166,8 @@ def create_app() -> FastAPI:
     if not settings.main_key and key_repo.count_active_keys(scope=Scope.FULL.value) == 0:
         logger.warning(
             "No full-scope auth source configured (no PCAP_HUNTER_API_KEY env var and no active "
-            "full-scope DB key) — ingress and admin endpoints will reject every request until one exists. "
-            "Recover by setting PCAP_HUNTER_API_KEY and restarting, or by creating a full-scope key "
-            "in the Streamlit Admin tab."
+            "full-scope DB key) — ingress and admin endpoints will reject every request until one exists. %s",
+            FULL_SCOPE_RECOVERY_HINT,
         )
     if not settings.main_key and not settings.feed_key:
         logger.warning(

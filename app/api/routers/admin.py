@@ -13,7 +13,7 @@ from app.api.deps import get_key_repo, get_rate_limiter, get_settings, require_f
 from app.api.key_models import APIKey, generate_api_key
 from app.api.key_repository import KeyRepository
 from app.api.rate_limiter import RateLimiter
-from app.api.settings import APISettings
+from app.api.settings import FULL_SCOPE_RECOVERY_HINT, APISettings
 
 logger = logging.getLogger(__name__)
 
@@ -21,8 +21,7 @@ router = APIRouter(prefix="/api/v1/admin", tags=["admin"])
 
 _LOCKOUT_WARNING = (
     "No full-scope auth source remains — ingress and admin endpoints (including key "
-    "creation) will reject every request. Recover by setting PCAP_HUNTER_API_KEY and "
-    "restarting, or by creating a full-scope key in the Streamlit Admin tab."
+    "creation) will reject every request. " + FULL_SCOPE_RECOVERY_HINT
 )
 
 
@@ -38,6 +37,7 @@ def _full_scope_lockout_warning(settings: APISettings, repo: KeyRepository) -> s
     """
     if settings.main_key:
         return None
+    # Advisory check only — post-mutation count on a separate connection; gates no enforcement.
     if repo.count_active_keys(scope=Scope.FULL.value) > 0:
         return None
     logger.warning(_LOCKOUT_WARNING)

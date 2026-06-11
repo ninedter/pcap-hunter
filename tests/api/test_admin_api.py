@@ -282,6 +282,28 @@ class TestLockoutWarnings:
         messages = [rec.message for rec in caplog.records]
         assert any("full-scope" in m for m in messages), f"no full-scope warning in log: {messages}"
 
+    def test_patch_past_expiry_warns(self, dbkey_client, caplog):
+        """PATCHing the only full-scope DB key to a past expires_at → 200, 'warning' in body, lockout in log.
+
+        Auth happens before the mutation takes effect, so the request succeeds even though the
+        key will be expired after the update.
+        """
+        client, raw_key, key_id = dbkey_client
+        auth = {"Authorization": f"Bearer {raw_key}"}
+
+        with caplog.at_level(logging.WARNING, logger="app.api.routers.admin"):
+            r = client.patch(
+                f"/api/v1/admin/keys/{key_id}",
+                json={"expires_at": "2020-01-01T00:00:00"},
+                headers=auth,
+            )
+
+        assert r.status_code == 200
+        body = r.json()
+        assert "warning" in body, f"expected 'warning' key in response body, got: {body}"
+        messages = [rec.message for rec in caplog.records]
+        assert any("full-scope" in m for m in messages), f"no full-scope warning in log: {messages}"
+
     def test_mutation_with_remaining_full_key_no_warning(self, dbkey_client):
         """With two full-scope DB keys, revoking one does NOT produce a warning."""
         client, raw_key, _key_id = dbkey_client

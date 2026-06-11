@@ -10,6 +10,12 @@ class NoKeysConfiguredError(RuntimeError):
     """Raised when no auth keys exist (neither env vars nor DB keys)."""
 
 
+FULL_SCOPE_RECOVERY_HINT = (
+    "Recover by setting PCAP_HUNTER_API_KEY and restarting, "
+    "or by creating a full-scope key in the Streamlit 'API Keys' tab."
+)
+
+
 @dataclass(frozen=True)
 class APISettings:
     main_key: str | None

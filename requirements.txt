@@ -30,17 +30,21 @@ pytest>=8.0,<9.0
 pytest-cov>=4.1,<6.0
 plotly>=5.18.0,<6.0
 # Static image renderer for Plotly — required to embed charts in PDF reports.
-# kaleido 1.x uses a bundled headless Chromium (via the choreographer helper)
-# that's auto-managed on first use. The older 0.x series is deprecated and
-# will be removed from Plotly after September 2025.
-kaleido>=1.0.0,<2.0
+# kaleido 1.x explicitly refuses plotly <6.1 ("not compatible"), so with
+# plotly 5.x pinned above, 0.2.1 is the ONLY working pairing — it ships its
+# own headless Chromium, no system browser needed. Fresh installs previously
+# resolved kaleido 1.x and chart rendering silently broke everywhere except
+# long-lived dev environments. Revisit together with a plotly>=6.1 upgrade.
+kaleido==0.2.1
 # maxminddb-geolite2 is unmaintained since 2018, but the package itself is
 # pure-Python and works on modern interpreters. Its only published version is
 # the date-stamped 2018.703 — the previous ">=4.1,<5.0" constraint pointed at
 # versions that have never existed on PyPI, which made fresh installs (e.g.,
 # the Docker build) fail to resolve. Pin to the actual published release.
 maxminddb-geolite2==2018.703
-ruff>=0.3.0,<1.0
+# Pinned to one formatter family: 0.15 changed lambda-conditional formatting,
+# and the docker image (canonical verify env) resolves fresh — keep host/image aligned.
+ruff>=0.15,<0.16
 python-whois>=0.9,<1.0
 
 # Phase 3: YARA Scanning (optional — requires system yara library)

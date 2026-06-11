@@ -119,9 +119,11 @@ def export_dataframe_to_csv(df, filename: str | None = None) -> bytes:
     sanitized = df.copy()
     for col in sanitized.select_dtypes(include=["object"]).columns:
         sanitized[col] = sanitized[col].apply(
-            lambda x: _sanitize_csv_value(str(x))
-            if not isinstance(x, (list, dict)) and pd.notna(x)
-            else (_sanitize_csv_value(str(x)) if isinstance(x, (list, dict)) else x)
+            lambda x: (
+                _sanitize_csv_value(str(x))
+                if not isinstance(x, (list, dict)) and pd.notna(x)
+                else (_sanitize_csv_value(str(x)) if isinstance(x, (list, dict)) else x)
+            )
         )
     buf = io.StringIO()
     sanitized.to_csv(buf, index=False)

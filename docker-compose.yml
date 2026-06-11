@@ -3,7 +3,7 @@ services:
   pcap-hunter-ui:
     build: .
     image: pcap-hunter:latest
-    command: ["streamlit", "run", "/app/main.py", "--server.port=8501", "--server.address=0.0.0.0"]
+    command: ["streamlit", "run", "app/main.py", "--server.port=8501", "--server.address=0.0.0.0"]
     ports:
       - "127.0.0.1:8501:8501"
     volumes:
@@ -16,7 +16,10 @@ services:
     ports:
       - "127.0.0.1:8000:8000"
     environment:
-      PCAP_HUNTER_API_KEY: "${PCAP_HUNTER_API_KEY:?must be set}"
+      # Required for the API to authenticate requests (app/api/settings.py reads
+      # it softly, so we default empty here — a `:?` guard would abort even
+      # UI-only `docker compose up pcap-hunter-ui` at interpolation time).
+      PCAP_HUNTER_API_KEY: "${PCAP_HUNTER_API_KEY:-}"
       PCAP_HUNTER_FEED_KEY: "${PCAP_HUNTER_FEED_KEY:-}"
       PCAP_HUNTER_API_HOST: "0.0.0.0"
       PYTHONPATH: "."

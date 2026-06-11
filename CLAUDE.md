@@ -13,9 +13,22 @@ make test             # PYTHONPATH=. pytest tests/ -v --cov=app
 make lint             # ruff check .
 make format           # ruff format .
 make clean            # Remove caches
+make docker-up        # Build + run the UI in Docker (http://localhost:8501)
+make docker-verify    # Format + lint + full test suite INSIDE the image
 ```
 
 Always run tests with `PYTHONPATH=.` — this is required for absolute imports to resolve.
+
+### Docker is the canonical build-and-verify path
+
+**Any local verification that requires a build must go through Docker**
+(`make docker-up` to run the app, `make docker-verify` for the gate). The
+host machine has multiple coexisting Python installs (framework + Homebrew),
+so host-side "it works here" proves nothing about a clean environment —
+a fresh-install breakage shipped exactly that way once. `make verify` on the
+host remains fine for fast iteration; anything build-shaped (dependency
+changes, install paths, release checks, user-facing verification) runs in
+the container.
 
 ## Architecture
 

@@ -21,16 +21,22 @@ RUN pip install --upgrade pip setuptools wheel \
  && pip wheel -r requirements.txt --wheel-dir /wheels
 
 # ---------- Runtime ----------
-FROM python:3.11-bookworm
+FROM python:3.11-bookworm AS runtime
 ENV PYTHONUNBUFFERED=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
     STREAMLIT_BROWSER_GATHER_USAGE_STATS=false \
-    DEBIAN_FRONTEND=noninteractive
+    DEBIAN_FRONTEND=noninteractive \
+    PYTHONPATH=/app
 
-# System deps (no compilers here)
+# System deps (no compilers here):
+# - tshark/wireshark-common: packet parsing + capinfos
+# - libpango/libcairo/libgdk-pixbuf/shared-mime-info/fonts: WeasyPrint PDF export
+# (kaleido 0.2.1 bundles its own headless Chromium — no system browser needed)
 RUN apt-get update && apt-get install -y --no-install-recommends \
     curl ca-certificates gnupg \
     tshark wireshark-common libpcap0.8 \
+    libpango-1.0-0 libpangocairo-1.0-0 libcairo2 libgdk-pixbuf-2.0-0 \
+    shared-mime-info fonts-dejavu-core \
  && rm -rf /var/lib/apt/lists/*
 
 # Add Zeek repo + install Zeek in runtime image
@@ -46,16 +52,28 @@ COPY --from=builder /wheels /wheels
 COPY requirements.txt .
 RUN pip install --no-cache-dir /wheels/*
 
-# Your modularized app
-COPY app/ /app/
+# Repo-shaped layout: the package lives at /app/app so absolute imports
+# (from app.pipeline import ...) resolve identically to a local checkout.
+# The previous flattened COPY (app/ -> /app/) broke `uvicorn app.api.app`.
+COPY app/ ./app/
 
 # Non-root + data dirs
-RUN useradd -m runner && mkdir -p /data && chown -R runner:runner /app /data
+RUN useradd -m runner && mkdir -p /data /app/data && chown -R runner:runner /app /data
 USER runner
 
 EXPOSE 8000 8501
 
-# Default: run Streamlit. Override with:
-#   docker run ... pcap-hunter make run-api
-# to run the integrations API instead.
-CMD ["streamlit", "run", "/app/main.py", "--server.port=8501", "--server.address=0.0.0.0"]
+# Default: run Streamlit. The compose file runs the integrations API from the
+# same image with an explicit uvicorn command.
+CMD ["streamlit", "run", "app/main.py", "--server.port=8501", "--server.address=0.0.0.0"]
+
+# ---------- Test (canonical local verification: make docker-verify) ----------
+# Mirrors `make verify` (format check + lint + full suite) inside the runtime
+# environment, so verification never depends on the host Python setup.
+FROM runtime AS test
+USER root
+COPY pyproject.toml Makefile ./
+COPY tests/ ./tests/
+RUN chown -R runner:runner /app
+USER runner
+CMD ["sh", "-c", "ruff format --check app tests && ruff check app tests && python -m pytest tests/ -q"]

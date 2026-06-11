@@ -1,4 +1,4 @@
-.PHONY: install install-system install-python check-deps doctor test test-pdf verify lint format run clean fix-permissions help run-api run-api-dev smoke-api
+.PHONY: install install-system install-python check-deps doctor test test-pdf verify lint format run clean fix-permissions help run-api run-api-dev smoke-api docker-build docker-up docker-down docker-verify
 
 # Prefer the Python interpreter that streamlit is installed under. Falls back
 # to whatever python3 is on $PATH. This matters on macOS where framework
@@ -74,6 +74,29 @@ fix-permissions:
 	@ls -l /dev/bpf*
 
 # -------------------------------------------------------------------------
+# Docker targets — the canonical build-and-verify path.
+#
+# Any local verification that requires a build goes through Docker so it
+# never depends on the host's (fragmented) Python setup.
+# -------------------------------------------------------------------------
+
+docker-build:
+	docker build --target runtime -t pcap-hunter:latest .
+
+docker-up: docker-build
+	docker compose up -d pcap-hunter-ui
+	@echo "UI running at http://localhost:8501 (docker compose logs -f pcap-hunter-ui)"
+
+docker-down:
+	docker compose down
+
+# Build-backed verification gate: format check + lint + full test suite,
+# executed inside the runtime image (same env the app ships in).
+docker-verify:
+	docker build --target test -t pcap-hunter:test .
+	docker run --rm pcap-hunter:test
+
+# -------------------------------------------------------------------------
 # API targets
 # -------------------------------------------------------------------------
 
@@ -105,6 +128,10 @@ help:
 	@echo "  make lint             Run ruff check"
 	@echo "  make format           Run ruff format"
 	@echo "  make clean            Remove caches"
+	@echo "  make docker-build     Build the runtime image (pcap-hunter:latest)"
+	@echo "  make docker-up        Build + start the UI container on :8501"
+	@echo "  make docker-down      Stop compose services"
+	@echo "  make docker-verify    Format + lint + full tests inside the image"
 	@echo "  make run-api          Start the integrations API on :8000"
 	@echo "  make run-api-dev      Run API with --reload + debug logging"
 	@echo "  make smoke-api        End-to-end smoke test against local API"

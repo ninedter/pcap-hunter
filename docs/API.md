@@ -306,7 +306,7 @@ Returns the full pipeline result as JSON once the job completes.
 |--------|---------|
 | 200 | Result available |
 | 404 | Job not found |
-| 409 | Job not finished yet |
+| 409 | Job not finished yet — or finished in a terminal-but-resultless state (`failed` or `cancelled`); these permanently return 409 because no result will ever exist. The problem body carries an additive `current_status` field (e.g. `"current_status": "failed"`) so callers can distinguish in-progress polling from a permanent failure. |
 | 410 | Result expired (GC'd per retention policy) |
 
 **Response body** (abridged):
@@ -381,7 +381,7 @@ Returns 204 No Content on success. Queued jobs are cancelled as part of the dele
 
 | Status | Code | Meaning |
 |--------|------|---------|
-| 204 | | Case and all associated data deleted |
+| 204 | | Case and all associated data deleted. File cleanup (PCAP, PDF cache, run dirs) is best-effort — any leftover files age out via GC TTLs. |
 | 404 | `case_not_found` | Case ID does not exist |
 | 409 | `case_has_running_job` | A job is running — also returned when a *queued* job slips into `running` mid-delete (the cancel loses the race) |
 | 500 | `case_delete_failed` | Database deletion failed; file cleanup is aborted and no files are removed |
@@ -626,6 +626,7 @@ Content-Type: application/problem+json
 | `key_not_found` | 404 | API key ID does not exist |
 | `validation_error` | 422 | Request body/query validation failed (see `errors` array) |
 | `method_not_allowed` | 405 | HTTP method not supported on this route |
+| `not_found` | 404 | Unknown route (no handler matched the path) |
 
 ### Request Tracing
 
@@ -715,12 +716,15 @@ job_id = response.json()["job_id"]
 Use the `http_poller` input to pull the IOC feed:
 
 ```ruby
+# `since` must be ISO 8601 — the API compares it lexically against stored timestamps,
+# so Logstash-style relative strings (e.g. "now-24h") silently return an empty feed.
+# Template the cutoff from your pipeline's clock; the example below uses a fixed date.
 input {
   http_poller {
     urls => {
       pcap_hunter => {
         method => get
-        url => "http://pcap-hunter:8000/api/v1/iocs.json?min_score=50&since=now-24h"
+        url => "http://pcap-hunter:8000/api/v1/iocs.json?min_score=50&since=2026-06-01T00:00:00Z"
         headers => { "Authorization" => "Bearer ${PCAP_HUNTER_FEED_KEY}" }
       }
     }
@@ -755,12 +759,13 @@ JOB=$(curl -s -X POST http://localhost:8000/api/v1/pcaps \
   -H "Authorization: Bearer $KEY" \
   -F "pcap=@suspect.pcap" | jq -r .job_id)
 
-# Poll until done
+# Poll until done (also break on failed/cancelled — both permanently return 409 on /result)
 while true; do
   STATUS=$(curl -s http://localhost:8000/api/v1/jobs/$JOB \
     -H "Authorization: Bearer $KEY" | jq -r .status)
   [ "$STATUS" = "done" ] && break
   [ "$STATUS" = "failed" ] && { echo "Job failed"; exit 1; }
+  [ "$STATUS" = "cancelled" ] && { echo "Job cancelled"; exit 1; }
   sleep 10
 done
 
@@ -804,7 +809,7 @@ An hourly background task (`_gc_loop`) automatically cleans up:
   (`RUN_DIR_RETENTION_SECONDS`) at the start of each new run, so artifacts are
   effectively retained for 7 days regardless of the API TTL.
 - Finished job records older than `job_ttl_days` (default 30)
-- **Orphaned case rows** — analyses (plus their IOCs and notes), case-level notes, tag links, and jobs whose case no longer exists are reconciled out of the database on every sweep (`orphaned_rows_deleted` counter in the GC log line). This heals historical deletes that removed only the case row and would otherwise leave stale indicators serving in the IOC feed forever.
+- **Rows orphaned by deleted cases** — analyses (plus their IOCs and notes), case-level notes, tag links, and jobs whose case no longer exists are reconciled out of the database on every sweep (`orphaned_rows_deleted` counter in the GC log line). This heals historical deletes that removed only the case row and would otherwise leave stale indicators serving in the IOC feed forever.
 
 ### Usage Tracking
 

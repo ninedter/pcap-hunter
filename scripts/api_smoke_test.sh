@@ -62,22 +62,28 @@ N=$(curl -fsS "$API/api/v1/cases/$CASE_ID" -H "Authorization: Bearer $KEY" \
 [[ "$N" -ge 1 ]] || { echo "case has no analyses"; exit 1; }
 
 echo "=== report.pdf renders on demand ==="
-PDF_CODE=$(curl -sS -o /tmp/smoke_report.pdf -w "%{http_code}" \
+SMOKE_PDF=$(mktemp /tmp/smoke_report.XXXXXX.pdf)
+PDF_CODE=$(curl -sS -o "$SMOKE_PDF" -w "%{http_code}" \
     "$API/api/v1/cases/$CASE_ID/report.pdf" -H "Authorization: Bearer $KEY")
 if [[ "$PDF_CODE" == "200" ]]; then
-    head -c4 /tmp/smoke_report.pdf | grep -q "%PDF" || { echo "not a pdf"; exit 1; }
-elif [[ "$PDF_CODE" != "503" ]]; then
-    echo "report.pdf unexpected status: $PDF_CODE"; exit 1
+    head -c4 "$SMOKE_PDF" | grep -q "%PDF" || { rm -f "$SMOKE_PDF"; echo "not a pdf"; exit 1; }
+elif [[ "$PDF_CODE" == "503" ]]; then
+    echo "report.pdf skipped (503 pdf_unavailable)"
+else
+    rm -f "$SMOKE_PDF"; echo "report.pdf unexpected status: $PDF_CODE"; exit 1
 fi
-rm -f /tmp/smoke_report.pdf
+rm -f "$SMOKE_PDF"
 
 echo "=== feed serves this case's iocs ==="
-curl -fsS "$API/api/v1/iocs.json?case_id=$CASE_ID" -H "Authorization: Bearer $FEED" \
-    | python3 -c "import json,sys; d=json.load(sys.stdin); print('feed count:', d['count'])"
+CNT=$(curl -fsS "$API/api/v1/iocs.json?case_id=$CASE_ID" -H "Authorization: Bearer $FEED" \
+    | python3 -c "import json,sys; print(json.load(sys.stdin)['count'])")
+echo "feed count: $CNT"
+[[ "$CNT" -ge 1 ]] || { echo "expected >=1 ioc pre-delete (tiny.pcap yields 2)"; exit 1; }
 
 echo "=== GET /api/v1/iocs.json ==="
 curl -fsS "$API/api/v1/iocs.json" \
-    -H "Authorization: Bearer $FEED" | python3 -m json.tool | head -30
+    -H "Authorization: Bearer $FEED" \
+    | python3 -c "import json,sys; print(json.dumps(json.load(sys.stdin), indent=2)[:2000])"
 
 echo "=== DELETE /api/v1/cases/$CASE_ID ==="
 curl -fsS -X DELETE "$API/api/v1/cases/$CASE_ID" \

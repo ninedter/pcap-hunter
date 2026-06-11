@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import pathlib
 import shutil
 import time
@@ -19,15 +20,22 @@ def gc_sweep(
     settings: APISettings,
     uploads_dir: pathlib.Path,
     artifacts_dir: pathlib.Path,
+    reports_dir: pathlib.Path | None = None,
 ) -> dict[str, int]:
     """Run one GC pass. Returns counters for telemetry."""
+    if reports_dir is None:
+        reports_dir = pathlib.Path(os.environ.get("PCAP_HUNTER_REPORTS_DIR", "data/reports"))
     pcaps_deleted = _gc_files(uploads_dir, settings.pcap_ttl_days)
     artifacts_deleted = _gc_files(artifacts_dir, settings.artifact_ttl_days)
+    # Cached PDFs are derived artifacts — reaping them is safe because the report
+    # route regenerates on demand (cache-miss triggers a fresh render).
+    pdfs_deleted = _gc_files(reports_dir, settings.artifact_ttl_days)
     jobs_deleted = _gc_old_jobs(repo, settings.job_ttl_days)
     orphaned_rows_deleted = _gc_orphaned_case_rows(repo)
     stats = {
         "pcaps_deleted": pcaps_deleted,
         "artifacts_deleted": artifacts_deleted,
+        "pdfs_deleted": pdfs_deleted,
         "jobs_deleted": jobs_deleted,
         "orphaned_rows_deleted": orphaned_rows_deleted,
     }

@@ -76,10 +76,13 @@ async def _gc_loop() -> None:
     settings = get_settings()
     uploads = pathlib.Path(os.environ.get("PCAP_HUNTER_API_UPLOADS_DIR", "data/api_uploads"))
     artifacts = pathlib.Path(os.environ.get("PCAP_HUNTER_API_ARTIFACTS_DIR", "data/carved"))
+    reports = pathlib.Path(os.environ.get("PCAP_HUNTER_REPORTS_DIR", "data/reports"))
 
     while True:
         try:
-            gc_sweep(repo=get_repo(), settings=settings, uploads_dir=uploads, artifacts_dir=artifacts)
+            gc_sweep(
+                repo=get_repo(), settings=settings, uploads_dir=uploads, artifacts_dir=artifacts, reports_dir=reports
+            )
         except Exception:
             logger.exception("gc_sweep failed")
         await asyncio.sleep(3600)

@@ -319,7 +319,7 @@ Returns the full pipeline result as JSON once the job completes.
   "duration_seconds": 12.4,
   "stages_run": ["pcap_count", "pyshark_pass", "zeek", "dns_analysis", "tls_certs", "beacon", "carve", "yara_scan", "osint"],
   "warnings": ["llm_unsupported_on_api_path"],
-  "summary_narrative": "...",
+  "summary_narrative": null,
   "mitre_techniques": [],
   "dns_analysis": {},
   "tls_analysis": {},

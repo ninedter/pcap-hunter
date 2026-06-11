@@ -202,3 +202,43 @@ def test_gc_orphan_sweep_keeps_healthy_cases(tmp_path):
     assert repo.get_analysis(analysis_id) is not None
     assert repo.get_job(job_id) is not None
     assert [r["value"] for r in query_iocs(repo, IOCFilter())] == ["203.0.113.7"]
+
+
+# ---------------------------------------------------------------------------
+# Reports-dir GC sweep
+# ---------------------------------------------------------------------------
+
+
+def test_gc_sweeps_old_report_pdfs(tmp_path):
+    """GC must delete expired cached PDFs (and .pdf.tmp from crashed renders)
+    while leaving fresh ones alone; pdfs_deleted counter must reflect the count."""
+    reports = tmp_path / "reports"
+    reports.mkdir()
+
+    old_pdf = reports / "case_abc123.pdf"
+    old_pdf.write_bytes(b"%PDF-1.4 old")
+    old_tmp = reports / "case_xyz789.pdf.tmp"
+    old_tmp.write_bytes(b"partial render")
+    fresh_pdf = reports / "case_def456.pdf"
+    fresh_pdf.write_bytes(b"%PDF-1.4 fresh")
+
+    # Backdate the old files past artifact_ttl_days (2 in _settings)
+    ten_days_ago = (datetime.now() - timedelta(days=10)).timestamp()
+    os.utime(old_pdf, (ten_days_ago, ten_days_ago))
+    os.utime(old_tmp, (ten_days_ago, ten_days_ago))
+
+    repo = CaseRepository(db_path=str(tmp_path / "t.db"))
+    settings = _settings(tmp_path)
+
+    stats = gc_sweep(
+        repo=repo,
+        settings=settings,
+        uploads_dir=tmp_path / "uploads",
+        artifacts_dir=tmp_path / "artifacts",
+        reports_dir=reports,
+    )
+
+    assert stats["pdfs_deleted"] == 2
+    assert not old_pdf.exists()
+    assert not old_tmp.exists()
+    assert fresh_pdf.exists()

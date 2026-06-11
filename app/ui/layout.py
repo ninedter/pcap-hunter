@@ -448,6 +448,25 @@ def _verdict_badge(verdict: str) -> str:
     )
 
 
+def _verdict_label(verdict: str) -> str:
+    """Return a plain-text/markdown-safe verdict label (emoji dot + uppercase word).
+
+    Streamlit expander labels are rendered as markdown, not HTML, so
+    ``_verdict_badge`` (which returns a ``<span>`` element) must never appear
+    in a label.  Use this helper for labels; keep ``_verdict_badge`` for body
+    content only.
+    """
+    dot = {
+        "critical": "🔴",
+        "high": "🟠",
+        "medium": "🟡",
+        "low": "🟢",
+        "clean": "🔵",
+        "unknown": "⚪",
+    }.get(verdict.lower(), "⚪")
+    return f"{dot} {verdict.upper()}"
+
+
 def _provider_pill(name: str, status: str) -> str:
     """Return a small pill showing provider status.
 
@@ -632,7 +651,10 @@ def _render_ip_detail_card(ip: str, obj: dict, vt: dict, abuse: dict, gn: dict, 
     """Render an expandable detail card for a single IP."""
     verdict = _determine_ip_verdict(vt, abuse, gn, shodan)
 
-    with st.expander(f"🔍 {ip}  —  {_verdict_badge(verdict)}", expanded=False):
+    with st.expander(f"🔍 {ip}  —  {_verdict_label(verdict)}", expanded=False):
+        # Verdict badge (HTML) rendered at the top of the body — expander labels are
+        # markdown-only and cannot contain raw <span> HTML.
+        st.markdown(_verdict_badge(verdict), unsafe_allow_html=True)
         # Provider status pills
         providers_html = ""
         ip_providers_map = [
@@ -1144,7 +1166,7 @@ def render_osint(result_col, osint_data, *, correlations=None, features=None, be
 
         # ==================== IP TRIAGE TAB ====================
         with tab_ips:
-            st.caption("Prioritized IP table — select a row for WHOIS lookup.")
+            st.caption("Prioritized IP table — click a row's checkbox **or** use the WHOIS lookup control below.")
             ip_rows = []
             for ip, obj in (osint_data.get("ips") or {}).items():
                 vt = _extract_vt_ip_stats(obj)
@@ -1220,6 +1242,18 @@ def render_osint(result_col, osint_data, *, correlations=None, features=None, be
                         target_ip = df_ips.iloc[idx]["IP"]
                         show_whois_dialog(target_ip)
 
+                # Explicit WHOIS lookup control (clearer affordance than row-click alone)
+                ip_options = [r["IP"] for r in ip_rows]
+                whois_ip_choice = st.selectbox(
+                    "Look up WHOIS for…",
+                    options=ip_options,
+                    index=None,
+                    placeholder="Choose an IP",
+                    key="whois_ip_select",
+                )
+                if st.button("🔎 WHOIS lookup", key="whois_ip_btn") and whois_ip_choice:
+                    show_whois_dialog(whois_ip_choice)
+
                 # Verdict summary
                 from collections import Counter
 
@@ -1246,7 +1280,7 @@ def render_osint(result_col, osint_data, *, correlations=None, features=None, be
 
         # ==================== DOMAINS TAB ====================
         with tab_doms:
-            st.caption("Domain enrichment — select a row for WHOIS lookup.")
+            st.caption("Domain enrichment — click a row's checkbox **or** use the WHOIS lookup control below.")
             dom_rows = []
             for dom, obj in (osint_data.get("domains") or {}).items():
                 vt = obj.get("vt") or {}
@@ -1335,6 +1369,18 @@ def render_osint(result_col, osint_data, *, correlations=None, features=None, be
                         idx = current_sel[0]
                         target_dom = df_doms.iloc[idx]["Domain"]
                         show_whois_dialog(target_dom)
+
+                # Explicit WHOIS lookup control (clearer affordance than row-click alone)
+                dom_options = [r["Domain"] for r in dom_rows]
+                whois_dom_choice = st.selectbox(
+                    "Look up WHOIS for…",
+                    options=dom_options,
+                    index=None,
+                    placeholder="Choose a domain",
+                    key="whois_dom_select",
+                )
+                if st.button("🔎 WHOIS lookup", key="whois_dom_btn") and whois_dom_choice:
+                    show_whois_dialog(whois_dom_choice)
 
                 # Verdict summary
                 from collections import Counter

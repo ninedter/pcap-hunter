@@ -30,6 +30,11 @@ host remains fine for fast iteration; anything build-shaped (dependency
 changes, install paths, release checks, user-facing verification) runs in
 the container.
 
+API keys saved inside the container persist in the `pcap-hunter-home` volume
+(mounted at `/home/runner`, with a pinned `hostname:` so the config encryption
+key stays stable); LM Studio on the host is reachable via
+`host.docker.internal` — the compose file defaults `LM_BASE_URL` accordingly.
+
 ## Architecture
 
 ```

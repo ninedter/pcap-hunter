@@ -7,6 +7,13 @@ import streamlit as st
 from app import config as C
 from app.database.repository import CaseRepository
 from app.llm.client import fetch_models, test_connection
+from app.pipeline.osint import (
+    PROBE_RESULT_INVALID_KEY,
+    PROBE_RESULT_OK,
+    PROBE_RESULT_RATE_LIMITED,
+    PROBE_RESULT_UNREACHABLE,
+    probe_providers,
+)
 from app.pipeline.osint_cache import get_osint_cache
 from app.utils import geo_data
 from app.utils.config_manager import get_config_manager
@@ -238,6 +245,29 @@ def render_config_tab():
         st.session_state["cfg_shodan"] = st.text_input(
             "Shodan", type="password", value=st.session_state.get("cfg_shodan")
         )
+
+    if st.button("Test Providers", help="Live-check each configured OSINT provider with a benign indicator"):
+        probe_keys = {
+            "OTX_KEY": st.session_state.get("cfg_otx", ""),
+            "VT_KEY": st.session_state.get("cfg_vt", ""),
+            "ABUSEIPDB_KEY": st.session_state.get("cfg_abuseipdb", ""),
+            "GREYNOISE_KEY": st.session_state.get("cfg_greynoise", ""),
+            "SHODAN_KEY": st.session_state.get("cfg_shodan", ""),
+        }
+        with st.spinner("Probing OSINT providers…"):
+            probe_results = probe_providers(probe_keys)
+        for row in probe_results:
+            provider, status, detail = row["provider"], row["status"], row.get("detail", "")
+            if status == PROBE_RESULT_OK:
+                st.success(f"✅ {provider}: key valid, provider reachable")
+            elif status == PROBE_RESULT_INVALID_KEY:
+                st.error(f"🔑 {provider}: invalid key ({detail})")
+            elif status == PROBE_RESULT_RATE_LIMITED:
+                st.warning(f"⏳ {provider}: rate limited — {detail}")
+            elif status == PROBE_RESULT_UNREACHABLE:
+                st.error(f"🌐 {provider}: unreachable — {detail}")
+            else:
+                st.info(f"➖ {provider}: no API key configured")
 
     st.markdown("---")
     st.markdown("#### Binary Paths (optional)")

@@ -9,6 +9,25 @@ from app import config as C
 
 logger = logging.getLogger(__name__)
 
+
+def _normalize_base_url(base_url: str) -> str:
+    """Ensure OpenAI-compatible base URLs carry an API version path.
+
+    The OpenAI SDK appends ``/chat/completions`` to ``base_url`` verbatim, so
+    ``http://host:1234`` (no path) sends LM Studio ``POST /chat/completions``,
+    which it logs as "Unexpected endpoint". Bare host:port URLs get ``/v1``
+    appended; URLs that already carry any path are respected as-is.
+    """
+    from urllib.parse import urlparse
+
+    url = (base_url or "").strip().rstrip("/")
+    if not url:
+        return url
+    if not urlparse(url).path:
+        return f"{url}/v1"
+    return url
+
+
 # Patterns that indicate prompt injection attempts in IOC data
 _INJECTION_PATTERNS = re.compile(
     r"(?i)"
@@ -744,7 +763,7 @@ def generate_report(
     if lang_instruction:
         msg_system += f"\n\n{lang_instruction}"
 
-    client = OpenAI(base_url=base_url, api_key=api_key, timeout=120.0)
+    client = OpenAI(base_url=_normalize_base_url(base_url), api_key=api_key, timeout=120.0)
 
     # --- Generate each section ---
     full_report_parts = []
@@ -1150,7 +1169,9 @@ def test_connection(base_url: str, api_key: str, model: str) -> str:
         return "Missing Base URL."
 
     try:
-        client = OpenAI(base_url=base_url, api_key=api_key or "lm-studio", timeout=C.LLM_PROBE_TIMEOUT_SECONDS)
+        client = OpenAI(
+            base_url=_normalize_base_url(base_url), api_key=api_key or "lm-studio", timeout=C.LLM_PROBE_TIMEOUT_SECONDS
+        )
         client.chat.completions.create(
             model=model,
             messages=[{"role": "user", "content": "ping"}],
@@ -1170,7 +1191,9 @@ def fetch_models(base_url: str, api_key: str) -> list[str]:
         return []
 
     try:
-        client = OpenAI(base_url=base_url, api_key=api_key or "lm-studio", timeout=C.LLM_PROBE_TIMEOUT_SECONDS)
+        client = OpenAI(
+            base_url=_normalize_base_url(base_url), api_key=api_key or "lm-studio", timeout=C.LLM_PROBE_TIMEOUT_SECONDS
+        )
         models = client.models.list()
         return [m.id for m in models]
     except Exception as e:

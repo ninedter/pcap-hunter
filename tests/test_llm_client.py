@@ -28,10 +28,10 @@ class TestLLMClient(unittest.TestCase):
 
         models = fetch_models("http://test", "key")
 
-        # Verify OpenAI was called with correct args
+        # Verify OpenAI was called with correct args (bare URLs are normalized to carry /v1)
         mock_openai_cls.assert_called_once()
         call_kwargs = mock_openai_cls.call_args
-        self.assertEqual(call_kwargs.kwargs.get("base_url"), "http://test")
+        self.assertEqual(call_kwargs.kwargs.get("base_url"), "http://test/v1")
         self.assertEqual(call_kwargs.kwargs.get("api_key"), "key")
         self.assertEqual(models, ["model-a", "model-b"])
 
@@ -143,6 +143,66 @@ class TestProbeTimeouts:
             result = llm_client.fetch_models("http://localhost:1234/v1", "")
         assert mock_openai.call_args.kwargs.get("timeout") == 15.0
         assert result == ["model-a"]
+
+
+class TestNormalizeBaseUrl:
+    """The OpenAI SDK appends /chat/completions to base_url verbatim, so a bare
+    host:port URL must gain /v1 or LM Studio rejects the request."""
+
+    def test_bare_host_port_gets_v1(self):
+        from app.llm.client import _normalize_base_url
+
+        assert _normalize_base_url("http://localhost:1234") == "http://localhost:1234/v1"
+
+    def test_trailing_slash_stripped_then_v1_appended(self):
+        from app.llm.client import _normalize_base_url
+
+        assert _normalize_base_url("http://h:1234/") == "http://h:1234/v1"
+
+    def test_existing_v1_path_unchanged(self):
+        from app.llm.client import _normalize_base_url
+
+        assert _normalize_base_url("http://h:1234/v1") == "http://h:1234/v1"
+
+    def test_existing_custom_path_unchanged(self):
+        from app.llm.client import _normalize_base_url
+
+        assert _normalize_base_url("http://h:1234/api/v0") == "http://h:1234/api/v0"
+
+    def test_empty_string_passes_through(self):
+        from app.llm.client import _normalize_base_url
+
+        assert _normalize_base_url("") == ""
+
+    def test_test_connection_passes_normalized_url_to_openai(self):
+        from app.llm import client as llm_client
+
+        with patch.object(llm_client, "OpenAI") as mock_openai:
+            mock_openai.return_value.chat.completions.create.return_value = MagicMock()
+            llm_client.test_connection("http://host.docker.internal:1234", "", "test-model")
+        assert mock_openai.call_args.kwargs.get("base_url") == "http://host.docker.internal:1234/v1"
+
+    def test_fetch_models_passes_normalized_url_to_openai(self):
+        from app.llm import client as llm_client
+
+        mock_model = MagicMock()
+        mock_model.id = "model-a"
+
+        with patch.object(llm_client, "OpenAI") as mock_openai:
+            mock_openai.return_value.models.list.return_value = [mock_model]
+            llm_client.fetch_models("http://localhost:1234", "")
+        assert mock_openai.call_args.kwargs.get("base_url") == "http://localhost:1234/v1"
+
+    def test_generate_report_passes_normalized_url_to_openai(self):
+        from app.llm import client as llm_client
+
+        with patch.object(llm_client, "OpenAI") as mock_openai:
+            mock_completion = MagicMock()
+            mock_completion.choices = [MagicMock(message=MagicMock(content="Body"))]
+            mock_openai.return_value.chat.completions.create.return_value = mock_completion
+            context = {"features": {}, "osint": {}, "zeek": {}, "packet_count": 1}
+            llm_client.generate_report("http://localhost:1234", "key", "model-x", context)
+        assert mock_openai.call_args.kwargs.get("base_url") == "http://localhost:1234/v1"
 
 
 if __name__ == "__main__":

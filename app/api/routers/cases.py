@@ -11,7 +11,7 @@ import shutil
 import tempfile
 
 from fastapi import APIRouter, Depends, HTTPException
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, Response
 
 from app.api.deps import get_repo, require_full_scope
 from app.api.queue import cancel_queued_job
@@ -170,4 +170,4 @@ def delete_case(case_id: str, _scope=Depends(require_full_scope), repo=Depends(g
     except Exception as exc:
         logger.warning("Artifact cleanup after deleting case %s failed: %s", case_id, exc)
 
-    return JSONResponse(status_code=204, content=None)
+    return Response(status_code=204)

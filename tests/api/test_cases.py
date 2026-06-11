@@ -72,6 +72,7 @@ def test_delete_case_no_job(client):
 
     r = client.delete(f"/api/v1/cases/{case_id}", headers={"Authorization": "Bearer MAIN"})
     assert r.status_code == 204
+    assert r.content == b"", f"204 must have an empty body (RFC 7230); got {r.content!r}"
     assert get_repo().get_case(case_id) is None
 
 

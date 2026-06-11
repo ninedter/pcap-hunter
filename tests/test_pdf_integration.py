@@ -488,3 +488,62 @@ class TestSectionRegistry:
 
     def test_report_timestamp_is_timezone_aware(self, full_report_html):
         assert re.search(r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}(:\d{2})? [A-Z]{2,5}", full_report_html)
+
+
+class TestLLMMarkdownTableRendering:
+    """The LLM Risk Matrix / IOC Summary are emitted as GitHub-flavored pipe
+    tables. They must render as real <table> HTML inside the summary section,
+    not leak as literal pipe characters."""
+
+    RISK_MATRIX_MD = (
+        "## Risk Assessment\n\n"
+        "Overall risk is HIGH.\n\n"
+        "| Category | Key Findings | Likelihood | Impact | Risk |\n"
+        "|---|---|---|---|---|\n"
+        "| Network / C2 | Beacon to 34.12.37.224 at 60s intervals | High | High | Critical |\n"
+        "| DNS | None observed | Low | Low | Low |\n"
+        "| TLS / Encryption | Self-signed cert on port 6888 | Medium | Medium | Medium |\n"
+    )
+
+    def _summary_html(self, realistic_features) -> str:
+        gen = PDFReportGenerator(ReportConfig(include_charts=False))
+        html = gen._build_html(
+            report_md=self.RISK_MATRIX_MD,
+            features=realistic_features,
+            osint=None,
+            yara_results=None,
+            dns_analysis=None,
+            tls_analysis=None,
+            case_info=None,
+            beacon_df=None,
+            correlations=None,
+        )
+        # Slice out the summary section so assertions can't pass via the
+        # registry-rendered .data-table sections elsewhere in the document.
+        start = html.index('class="summary-content"')
+        end = html.index("</section>", start)
+        return html[start:end]
+
+    def test_pipe_table_renders_as_html_table_in_summary(self, realistic_features):
+        summary = self._summary_html(realistic_features)
+        assert "<table>" in summary
+        assert "<th>Category</th>" in summary
+        assert "<th>Likelihood</th>" in summary
+        assert "<td>None observed</td>" in summary
+        assert "34.12.37.224" in summary
+
+    def test_pipe_table_does_not_leak_as_literal_text(self, realistic_features):
+        summary = self._summary_html(realistic_features)
+        assert "| Category |" not in summary
+        assert "|---|" not in summary
+
+    def test_summary_tables_are_styled_by_generic_table_css(self):
+        """LLM content lives in .summary-content; the stylesheet's generic
+        table/th/td rules (border, navy header, padding) must cover it."""
+        styles = PDFReportGenerator(ReportConfig())._get_styles()
+        # Generic selectors — not scoped to .data-table — so summary tables inherit them
+        assert re.search(r"(^|\})\s*table\s*\{[^}]*border-collapse", styles, re.DOTALL)
+        assert re.search(r"th,\s*td\s*\{[^}]*border", styles, re.DOTALL)
+        assert re.search(r"(^|\})\s*th\s*\{[^}]*background-color", styles, re.DOTALL)
+        # No .summary-content rule may disable table display
+        assert ".summary-content table { display: none" not in styles

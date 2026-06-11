@@ -790,6 +790,10 @@ with tab_progress:
                         "dns_analysis": st.session_state.get("dns_analysis"),
                         "tls_analysis": st.session_state.get("tls_analysis"),
                         "yara_results": st.session_state.get("yara_results"),
+                        "flow_asymmetry": st.session_state.get("flow_asymmetry"),
+                        "port_anomalies": st.session_state.get("port_anomalies"),
+                        "ja3_analysis": st.session_state.get("ja3_analysis"),
+                        "rdns_map": st.session_state.get("rdns_map"),
                         "config": {
                             "limit_packets": limit_packets,
                             "do_pyshark": do_pyshark,

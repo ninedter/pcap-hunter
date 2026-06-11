@@ -147,6 +147,14 @@ For beacon candidates, always check:
 2. Is the protocol inherently periodic (ICMP, NTP, keep-alive)? → Likely false positive
 3. Are there corroborating OSINT signals? → Without these, do NOT escalate
 
+=== EVIDENCE GROUNDING (non-negotiable) ===
+- Use ONLY facts present in the DATA blocks of each request. Never invent indicators, counts,
+  CVEs, hostnames, or geolocations.
+- Quote indicator values verbatim — never alter, abbreviate, or "correct" an IP, domain, hash,
+  or JA3 fingerprint.
+- When a data block is empty or absent, state that no findings were observed — do not speculate
+  about what might have been found.
+
 === OUTPUT RULES ===
 - Every claim must reference specific data (IPs, counts, scores) from the evidence
 - State your CONFIDENCE (High/Medium/Low) for each significant finding
@@ -403,9 +411,183 @@ def _extract_yara_summary(yara_results: dict | None) -> dict:
     return summary
 
 
+def _as_dict(item: Any) -> dict | None:
+    """Coerce a dataclass-with-to_dict or plain dict into a dict, else None."""
+    if hasattr(item, "to_dict"):
+        return item.to_dict()
+    if isinstance(item, dict):
+        return item
+    return None
+
+
+def _extract_flow_asymmetry_details(flow_asymmetry: list | None, max_pairs: int = 5) -> list[dict]:
+    """Compact suspicious exfiltration pairs (src→dst, MB out/in, ratio) for LLM context.
+
+    Accepts FlowAsymmetryResult dataclasses or their to_dict() output.
+    """
+    details: list[dict] = []
+    for item in flow_asymmetry or []:
+        d = _as_dict(item)
+        if not d or not d.get("is_suspicious"):
+            continue
+        details.append(
+            {
+                "src": d.get("src", ""),
+                "dst": d.get("dst", ""),
+                "mb_out": round((d.get("outbound_bytes", 0) or 0) / 1_000_000, 2),
+                "mb_in": round((d.get("inbound_bytes", 0) or 0) / 1_000_000, 2),
+                "ratio": d.get("ratio", 0),
+                "reason": d.get("reason", ""),
+            }
+        )
+        if len(details) >= max_pairs:
+            break
+    return details
+
+
+def _extract_port_anomaly_details(port_anomalies: list | None, max_items: int = 5) -> list[dict]:
+    """Compact port/protocol anomalies (pre-sorted by score) for LLM context."""
+    details: list[dict] = []
+    for item in port_anomalies or []:
+        d = _as_dict(item)
+        if not d:
+            continue
+        details.append(
+            {
+                "src": d.get("src", ""),
+                "dst": d.get("dst", ""),
+                "port": d.get("port", ""),
+                "proto": d.get("proto", ""),
+                "type": d.get("anomaly_type", ""),
+                "reason": d.get("reason", ""),
+            }
+        )
+        if len(details) >= max_items:
+            break
+    return details
+
+
+def _extract_ja3_details(ja3_analysis: dict | None) -> dict:
+    """Compact JA3 fingerprint findings (suspicious/known-bad hashes + counts)."""
+    if not ja3_analysis:
+        return {"available": False}
+
+    # int() coercion: counts may arrive as numpy scalars (pandas to_dict),
+    # which json.dumps rejects when the details are embedded in prompts.
+    out: dict[str, Any] = {
+        "available": True,
+        "total_tls_sessions": int(ja3_analysis.get("total_tls_sessions", 0) or 0),
+        "unique_ja3": int(ja3_analysis.get("unique_ja3", 0) or 0),
+        "unknown_ja3": int(ja3_analysis.get("unknown_ja3", 0) or 0),
+        "malware_detected": bool(ja3_analysis.get("malware_detected")),
+    }
+    malware = ja3_analysis.get("malware_ja3") or []
+    if malware:
+        out["malware_ja3"] = [
+            {
+                "ja3": m.get("ja3", ""),
+                "client": m.get("ja3_client", ""),
+                "src": m.get("src", ""),
+                "dst": m.get("dst", ""),
+            }
+            for m in malware[:5]
+            if isinstance(m, dict)
+        ]
+    top_clients = ja3_analysis.get("top_clients") or {}
+    if top_clients:
+        out["top_clients"] = {str(k): int(v) for k, v in list(top_clients.items())[:5]}
+    return out
+
+
+def _extract_host_identities(rdns_map: dict | None, osint: dict | None, max_hosts: int = 10) -> list[dict]:
+    """Hostname + geo for top talkers so the narrative names hosts accurately."""
+    identities: list[dict] = []
+    seen: set[str] = set()
+
+    # OSINT-enriched IPs first — they carry geo and PTR data
+    ips_data = (osint or {}).get("ips") or {}
+    for ip, data in ips_data.items():
+        if not isinstance(data, dict):
+            continue
+        entry: dict[str, Any] = {"ip": ip}
+        hostname = (rdns_map or {}).get(ip) or data.get("ptr")
+        if hostname:
+            entry["hostname"] = hostname
+        country = data.get("country")
+        city = data.get("city")
+        if country:
+            entry["geo"] = f"{city}, {country}" if city else country
+        if len(entry) > 1:
+            identities.append(entry)
+            seen.add(ip)
+        if len(identities) >= max_hosts:
+            return identities
+
+    # Remaining reverse-DNS hits (top talkers without OSINT enrichment)
+    for ip, hostname in (rdns_map or {}).items():
+        if ip in seen or not hostname:
+            continue
+        identities.append({"ip": ip, "hostname": hostname})
+        if len(identities) >= max_hosts:
+            break
+    return identities
+
+
+def _extract_ioc_rows(correlations: list | None, max_rows: int = 10) -> list[dict]:
+    """Compact correlation rows for the IOC Summary table.
+
+    Accepts CorrelationResult dataclasses or their to_dict() output; signal
+    entries may be dataclasses, dicts, or legacy strings.
+    """
+    rows: list[dict] = []
+    for c in (correlations or [])[:max_rows]:
+        d = _as_dict(c)
+        if not d:
+            continue
+        signals = d.get("signals") or []
+        if not isinstance(signals, (list, tuple)):
+            signals = [signals]
+        sig_names = []
+        for s in signals:
+            if isinstance(s, dict):
+                sig_names.append(str(s.get("name", "")))
+            elif hasattr(s, "name"):
+                sig_names.append(str(s.name))
+            else:
+                sig_names.append(str(s))
+        rows.append(
+            {
+                "indicator": d.get("indicator"),
+                "type": d.get("type") or d.get("indicator_type"),
+                "verdict": d.get("verdict"),
+                "score": d.get("composite_score"),
+                "signals": [n for n in sig_names if n][:5],
+            }
+        )
+    return rows
+
+
 # ---------------------------------------------------------------------------
 # Per-section prompt builders
 # ---------------------------------------------------------------------------
+
+
+def _compact_json(obj: Any) -> str:
+    """Token-frugal JSON for embedding evidence slices in prompts."""
+    return json.dumps(obj, ensure_ascii=False, separators=(",", ":"))
+
+
+# Risk Matrix table layout — defined once so the English instruction and the
+# translated-instruction fallback in generate_report can never drift apart.
+RISK_MATRIX_TABLE_SPEC = (
+    "| Category | Key Findings | Likelihood | Impact | Risk |\n"
+    "|---|---|---|---|---|\n"
+    "| Network / C2 | ... | Low/Medium/High | Low/Medium/High | Low/Medium/High/Critical |\n"
+    "| DNS | ... | ... | ... | ... |\n"
+    "| TLS / Encryption | ... | ... | ... | ... |\n"
+    "| Payloads / Endpoint | ... | ... | ... | ... |\n"
+    "| Data Exposure | ... | ... | ... | ... |\n"
+)
 
 
 def _build_section_prompts(
@@ -420,6 +602,10 @@ def _build_section_prompts(
     tls_summary: dict,
     yara_summary: dict,
     no_findings: bool,
+    flow_asym_details: list | None = None,
+    port_anomaly_details: list | None = None,
+    ja3_details: dict | None = None,
+    ioc_rows: list | None = None,
 ) -> list[tuple[str, str, int]]:
     """Build evidence-aware (title, instruction, max_tokens) tuples for each section.
 
@@ -427,6 +613,10 @@ def _build_section_prompts(
     what format to use, and what data is relevant — avoiding generic instructions.
     """
     sections: list[tuple[str, str, int]] = []
+    flow_asym_details = flow_asym_details or []
+    port_anomaly_details = port_anomaly_details or []
+    ja3_details = ja3_details or {}
+    ioc_rows = ioc_rows or []
 
     # ---- 1. Executive Summary ----
     exec_inst = (
@@ -521,6 +711,18 @@ def _build_section_prompts(
             "- Why no candidates qualified (e.g., all periodic flows were to known-good destinations)\n"
             "- Keep this section to 1-2 short paragraphs.\n"
         )
+    if flow_asym_details:
+        beacon_inst += (
+            "\nFlow asymmetry — suspicious outbound/inbound byte ratios (possible exfiltration):\n"
+            f"{_compact_json(flow_asym_details[:5])}\n"
+            "Discuss the data-exfiltration risk of each pair, citing src→dst, MB out/in, and ratio verbatim.\n"
+        )
+    if port_anomaly_details:
+        beacon_inst += (
+            "\nPort anomalies (top 5, pre-scored):\n"
+            f"{_compact_json(port_anomaly_details[:5])}\n"
+            "Assess whether these ports corroborate C2 or lateral movement; dismiss benign explanations explicitly.\n"
+        )
     sections.append(("Beaconing / C2 Analysis", beacon_inst, 1500))
 
     # ---- 6. DNS & TLS Analysis ----
@@ -560,6 +762,15 @@ def _build_section_prompts(
     else:
         dns_tls_inst += "TLS analysis was not performed or yielded no results. Note this briefly.\n"
 
+    if ja3_details.get("available"):
+        ja3_payload = {k: v for k, v in ja3_details.items() if k != "available"}
+        dns_tls_inst += (
+            "\n**JA3 TLS client fingerprints:**\n"
+            f"{_compact_json(ja3_payload)}\n"
+            "Discuss any suspicious or known-malware JA3 hashes (quote the hash values verbatim, with "
+            "src/dst and counts). If none are flagged, state that TLS client fingerprints appear unremarkable.\n"
+        )
+
     sections.append(("DNS & TLS Analysis", dns_tls_inst, 1500))
 
     # ---- 7. Risk Assessment ----
@@ -569,9 +780,11 @@ def _build_section_prompts(
         f"Verdict distribution: {json.dumps(verdict_summary)}\n\n"
         "Structure:\n"
         "1. **Overall Risk Level**: State CRITICAL/HIGH/MEDIUM/LOW/CLEAN with justification\n"
-        "2. **Risk Matrix**: For each finding category (network, endpoint, data), assess:\n"
-        "   - Likelihood (based on evidence strength)\n"
-        "   - Impact (potential damage if exploited)\n"
+        "2. **Risk Matrix** — render EXACTLY this GitHub-flavored Markdown table, one row per category, "
+        "no extra columns:\n\n"
+        f"{RISK_MATRIX_TABLE_SPEC}\n"
+        "Populate Key Findings ONLY from the evidence provided (counts and indicator values verbatim); "
+        "write 'None observed' where the data shows nothing for a category.\n"
         "3. **Confidence Assessment**: How confident are you in this assessment? "
         "Note any caveats, data gaps, or ambiguous indicators.\n\n"
         "Your assessment MUST align with the evidence. Do not inflate or deflate.\n"
@@ -601,7 +814,35 @@ def _build_section_prompts(
             "- Security hygiene (certificate rotation, software updates)\n"
             "Do NOT recommend drastic actions (host isolation, incident response) for benign traffic.\n"
         )
+    if top_threats:
+        actions_inst += (
+            "\nConfirmed top threats — when recommending blocklist or containment entries, cite ONLY these "
+            "indicator values, VERBATIM:\n"
+            f"{_compact_json(top_threats[:10])}\n"
+            "Do not invent additional IOCs.\n"
+        )
     sections.append(("Recommended Actions", actions_inst, 1200))
+
+    # ---- 9. IOC Summary ----
+    ioc_inst = (
+        "Write the **IOC Summary** section.\n\n"
+        "Render EXACTLY one GitHub-flavored Markdown table with this header, one row per indicator "
+        "from the correlation data below, and nothing else before or after the table:\n\n"
+        "| Indicator | Type | Verdict | Score | Key Signals |\n"
+        "|---|---|---|---|---|\n\n"
+    )
+    if ioc_rows:
+        ioc_inst += (
+            "Populate rows ONLY from this correlation data — quote each indicator value verbatim, "
+            "join Key Signals with commas:\n"
+            f"{_compact_json(ioc_rows)}\n"
+        )
+    else:
+        ioc_inst += (
+            "No scored indicators are available. Output exactly one data row:\n"
+            "| None | - | - | - | No scored indicators |\n"
+        )
+    sections.append(("IOC Summary", ioc_inst, 800))
 
     return sections
 
@@ -630,6 +871,10 @@ def generate_report(
     dns_analysis = context.get("dns_analysis")
     tls_analysis = context.get("tls_analysis")
     yara_results = context.get("yara_results")
+    flow_asymmetry = context.get("flow_asymmetry") or []
+    port_anomalies = context.get("port_anomalies") or []
+    ja3_analysis = context.get("ja3_analysis") or {}
+    rdns_map = context.get("rdns_map") or {}
 
     # --- Build structured summaries ---
     flows = feats.get("flows") or []
@@ -675,6 +920,13 @@ def generate_report(
     dns_summary = _extract_dns_summary(dns_analysis)
     tls_summary = _extract_tls_summary(tls_analysis)
     yara_summary = _extract_yara_summary(yara_results)
+    # These blocks embed straight into section instructions, so sanitize the
+    # untrusted capture-derived strings (IPs, JA3 client names, indicators) now.
+    flow_asym_details = _deep_sanitize(_extract_flow_asymmetry_details(flow_asymmetry))
+    port_anomaly_details = _deep_sanitize(_extract_port_anomaly_details(port_anomalies))
+    ja3_details = _deep_sanitize(_extract_ja3_details(ja3_analysis))
+    host_identities = _deep_sanitize(_extract_host_identities(rdns_map, osint))
+    ioc_rows = _deep_sanitize(_extract_ioc_rows(correlations))
 
     # Concise overview block (sent to every section)
     overview = _sanitize_for_llm(
@@ -706,18 +958,23 @@ def generate_report(
         "zeek_samples": _deep_sanitize(
             _sanitize_for_llm({k: (rows[:5] if isinstance(rows, list) else []) for k, rows in zeek.items()})
         ),
+        "flow_asymmetry": flow_asym_details,
+        "port_anomalies": port_anomaly_details,
+        "ja3": ja3_details,
+        "host_identities": host_identities,
     }
 
     # Map sections → which evidence blocks they need
     section_evidence_map = {
-        "Executive Summary": ["top_flows"],
-        "Key Findings": ["osint_ips", "beacons", "dns", "tls", "yara"],
-        "Indicators & Evidence": ["osint_ips", "osint_domains", "top_flows", "zeek_samples"],
+        "Executive Summary": ["top_flows", "host_identities"],
+        "Key Findings": ["osint_ips", "beacons", "dns", "tls", "yara", "flow_asymmetry", "port_anomalies", "ja3"],
+        "Indicators & Evidence": ["osint_ips", "osint_domains", "top_flows", "zeek_samples", "host_identities", "ja3"],
         "OSINT Corroboration": ["osint_ips", "osint_domains"],
-        "Beaconing / C2 Analysis": ["beacons", "osint_ips"],
+        "Beaconing / C2 Analysis": ["beacons", "osint_ips", "host_identities"],
         "DNS & TLS Analysis": ["dns", "tls"],
-        "Risk Assessment": ["yara"],
+        "Risk Assessment": ["yara", "beacons", "dns", "tls", "flow_asymmetry", "port_anomalies"],
         "Recommended Actions": [],
+        "IOC Summary": [],
     }
 
     # --- Determine section-level flags ---
@@ -729,7 +986,7 @@ def generate_report(
     sections = _build_section_prompts(
         pre_risk=pre_risk,
         verdict_summary=verdict_summary,
-        top_threats=top_threats,
+        top_threats=_deep_sanitize(top_threats),
         summary=overview,
         has_beacons=has_beacons,
         has_osint=has_osint,
@@ -737,6 +994,10 @@ def generate_report(
         tls_summary=tls_summary,
         yara_summary=yara_summary,
         no_findings=no_findings,
+        flow_asym_details=flow_asym_details,
+        port_anomaly_details=port_anomaly_details,
+        ja3_details=ja3_details,
+        ioc_rows=ioc_rows,
     )
 
     # --- Language handling ---
@@ -773,6 +1034,16 @@ def generate_report(
         lang_data = t_map.get(title, {})
         display_title = lang_data.get("title", title)
         display_instruction = lang_data.get("instruction", instruction)
+
+        # Static translations replace the English instruction wholesale — and
+        # with it the embedded Risk Matrix table spec. Re-append it so every
+        # language renders the matrix as a real table, not prose bullets.
+        if title == "Risk Assessment" and "| Category |" not in display_instruction:
+            display_instruction += (
+                "\n\nRender the Risk Matrix as EXACTLY this GitHub-flavored Markdown table, one row per "
+                "category (translate only the cell contents, keep the column structure):\n\n"
+                f"{RISK_MATRIX_TABLE_SPEC}"
+            )
 
         # Titles the LLM might echo back (both the English key and the
         # translated display form). We strip any leading line that matches

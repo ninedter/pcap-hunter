@@ -1,3 +1,4 @@
+import re
 import sys
 import unittest
 from unittest.mock import MagicMock, patch
@@ -60,16 +61,256 @@ class TestLLMClient(unittest.TestCase):
         context = {"features": {}, "osint": {}, "zeek": {}, "packet_count": 100}
         report = generate_report("http://test", "key", "model-x", context, language="US English")
 
-        # Verify calls - Should be called 8 times (once per section)
-        self.assertEqual(mock_client_instance.chat.completions.create.call_count, 8)
+        # Verify calls - Should be called 9 times (once per section, incl. IOC Summary)
+        self.assertEqual(mock_client_instance.chat.completions.create.call_count, 9)
 
         # Verify output concatenation
         # Logic appends "## Title\n\nContent" for each section
         self.assertIn("## Executive Summary", report)
+        self.assertIn("## IOC Summary", report)
         self.assertIn("Section Content", report)
-        # Should have 8 sections * (Header + Content)
         # Just checking basic structure
         self.assertTrue(report.startswith("## Executive Summary"))
+
+
+def _production_context() -> dict:
+    """Production-shape LLM context: real dataclasses, not lookalike dicts.
+
+    flow_asymmetry/port_anomalies carry the actual FlowAsymmetryResult /
+    PortAnomalyResult dataclasses main.py stores in session state, and
+    correlations carry CorrelationResult with nested CorrelationSignal.
+    """
+    from app.analysis.correlation import CorrelationResult, CorrelationSignal
+    from app.analysis.flow_analysis import FlowAsymmetryResult, PortAnomalyResult
+
+    return {
+        "features": {
+            "flows": [
+                {
+                    "src": "10.0.0.5",
+                    "dst": "34.12.37.224",
+                    "sport": 55004,
+                    "dport": 6888,
+                    "proto": "TCP",
+                    "count": 1200,
+                    "bytes": 524288,
+                },
+            ],
+            "artifacts": {"ips": ["34.12.37.224"], "domains": ["evil.example"], "urls": [], "hashes": [], "ja3": []},
+        },
+        "osint": {
+            "ips": {
+                "34.12.37.224": {
+                    "vt": {"data": {"attributes": {"reputation": -12, "last_analysis_stats": {"malicious": 5}}}},
+                    "ptr": "c2.bad.example",
+                    "country": "Czechia",
+                    "city": "Prague",
+                },
+            },
+            "domains": {},
+        },
+        "zeek": {},
+        "beaconing": [{"src": "10.0.0.5", "dst": "34.12.37.224", "dport": 6888, "score": 0.96, "count": 120}],
+        "packet_count": 5234,
+        "correlations": [
+            CorrelationResult(
+                indicator="34.12.37.224",
+                indicator_type="ip",
+                signals=[
+                    CorrelationSignal("vt_detections", -12, 0.12, "virustotal"),
+                    CorrelationSignal("beacon_score", 0.96, 0.96, "beacon"),
+                ],
+                composite_score=0.85,
+                verdict="critical",
+            ),
+        ],
+        "flow_asymmetry": [
+            FlowAsymmetryResult(
+                src="10.0.0.5",
+                dst="34.12.37.224",
+                outbound_bytes=52_000_000,
+                inbound_bytes=400_000,
+                ratio=130.0,
+                total_packets=4200,
+                score=0.9,
+                is_suspicious=True,
+                reason="130:1 outbound ratio",
+            ),
+            FlowAsymmetryResult(
+                src="10.0.0.6",
+                dst="1.1.1.1",
+                outbound_bytes=1000,
+                inbound_bytes=900,
+                ratio=1.1,
+                total_packets=10,
+                score=0.0,
+                is_suspicious=False,
+                reason="",
+            ),
+        ],
+        "port_anomalies": [
+            PortAnomalyResult(
+                src="10.0.0.5",
+                dst="34.12.37.224",
+                port=4444,
+                proto="tcp",
+                anomaly_type="c2_port",
+                expected_service="",
+                score=0.8,
+                reason="Known C2 framework port 4444",
+            ),
+        ],
+        "ja3_analysis": {
+            "total_tls_sessions": 40,
+            "unique_ja3": 6,
+            "malware_detected": True,
+            "malware_ja3": [
+                {
+                    "ja3": "6734f37431670b3ab4292b8f60f29984",
+                    "ja3_client": "Trickbot",
+                    "src": "10.0.0.5",
+                    "dst": "34.12.37.224",
+                },
+            ],
+            "unknown_ja3": 2,
+            "top_clients": {"Chrome": 20, "Trickbot": 4},
+        },
+        "rdns_map": {"34.12.37.224": "c2.bad.example", "142.250.204.110": "syd09s25.1e100.net"},
+    }
+
+
+def _capture_section_prompts(context: dict, language: str = "US English"):
+    """Run generate_report with a mocked client; return (report, {title: user_prompt}, system_prompt)."""
+    from app.llm import client as llm_client
+
+    with patch.object(llm_client, "OpenAI") as mock_openai:
+        completion = MagicMock()
+        completion.choices = [MagicMock(message=MagicMock(content="Body"))]
+        mock_openai.return_value.chat.completions.create.return_value = completion
+        report = llm_client.generate_report("http://test", "key", "model-x", context, language=language)
+        calls = mock_openai.return_value.chat.completions.create.call_args_list
+
+    prompts: dict[str, str] = {}
+    system_prompt = ""
+    for call in calls:
+        messages = call.kwargs["messages"]
+        system_prompt = messages[0]["content"]
+        user = messages[1]["content"]
+        m = re.search(r"Write ONLY the body content for the '([^']+)' section", user)
+        assert m, f"section prompt missing title preamble: {user[:120]}"
+        prompts[m.group(1)] = user
+    return report, prompts, system_prompt
+
+
+RISK_TABLE_HEADER = "| Category | Key Findings | Likelihood | Impact | Risk |"
+IOC_TABLE_HEADER = "| Indicator | Type | Verdict | Score | Key Signals |"
+
+
+class TestRiskMatrixTableInstruction(unittest.TestCase):
+    """The Risk Assessment section must demand a real GFM table, in every language."""
+
+    def test_risk_section_contains_exact_table_header(self):
+        _, prompts, _ = _capture_section_prompts(_production_context())
+        risk = prompts["Risk Assessment"]
+        self.assertIn(RISK_TABLE_HEADER, risk)
+        self.assertIn("|---|---|---|---|---|", risk)
+        self.assertIn("None observed", risk)
+        self.assertIn("| Network / C2 |", risk)
+        self.assertIn("| Data Exposure |", risk)
+
+    def test_translated_risk_instruction_still_carries_table_spec(self):
+        # Static translations replace the English instruction wholesale; the
+        # fallback must re-append the table spec for non-English reports.
+        _, prompts, _ = _capture_section_prompts(_production_context(), language="Tradition Chinese (zh-tw)")
+        risk = prompts["風險評估"]
+        self.assertIn(RISK_TABLE_HEADER, risk)
+        self.assertIn("|---|---|---|---|---|", risk)
+
+
+class TestIOCSummarySection(unittest.TestCase):
+    """Every report ends with a copy-paste IOC table grounded in correlations."""
+
+    def test_ioc_summary_is_final_section_with_table_header(self):
+        report, prompts, _ = _capture_section_prompts(_production_context())
+        self.assertIn("IOC Summary", prompts)
+        ioc = prompts["IOC Summary"]
+        self.assertIn(IOC_TABLE_HEADER, ioc)
+        # Real correlation data quoted for the model — indicator + signal names
+        self.assertIn("34.12.37.224", ioc)
+        self.assertIn("beacon_score", ioc)
+        self.assertIn("critical", ioc)
+        # Wired in after Recommended Actions
+        self.assertLess(report.index("## Recommended Actions"), report.index("## IOC Summary"))
+
+    def test_ioc_summary_empty_correlations_instructs_none_row(self):
+        context = {"features": {}, "osint": {}, "zeek": {}, "packet_count": 10}
+        _, prompts, _ = _capture_section_prompts(context)
+        ioc = prompts["IOC Summary"]
+        self.assertIn(IOC_TABLE_HEADER, ioc)
+        self.assertIn("| None | - | - | - | No scored indicators |", ioc)
+
+
+class TestEvidenceGrounding(unittest.TestCase):
+    """Anti-hallucination rules + new evidence blocks wired into section prompts."""
+
+    def test_system_prompt_contains_grounding_rules(self):
+        from app.llm.client import SYSTEM_INSTRUCTIONS
+
+        self.assertIn("Use ONLY facts present in the DATA blocks", SYSTEM_INSTRUCTIONS)
+        self.assertIn("Never invent indicators, counts,", SYSTEM_INSTRUCTIONS)
+        self.assertIn("Quote indicator values verbatim", SYSTEM_INSTRUCTIONS)
+        self.assertIn("state that no findings were observed", SYSTEM_INSTRUCTIONS)
+        # The no-heading-echo instruction must remain intact alongside the new rules
+        _, prompts, system_prompt = _capture_section_prompts(_production_context())
+        self.assertIn("Use ONLY facts present in the DATA blocks", system_prompt)
+        self.assertIn("Do NOT include the section title", prompts["Executive Summary"])
+
+    def test_flow_asymmetry_wired_into_beacon_section(self):
+        _, prompts, _ = _capture_section_prompts(_production_context())
+        beacon = prompts["Beaconing / C2 Analysis"]
+        self.assertIn("Flow asymmetry", beacon)
+        self.assertIn('"mb_out":52.0', beacon)  # compact JSON, MB out/in + ratio
+        self.assertIn('"ratio":130.0', beacon)
+        self.assertIn("34.12.37.224", beacon)
+        self.assertIn("exfiltration", beacon.lower())
+        # Non-suspicious pairs must not be fed to the model
+        self.assertNotIn("1.1.1.1", beacon)
+
+    def test_port_anomalies_wired_into_beacon_section(self):
+        _, prompts, _ = _capture_section_prompts(_production_context())
+        beacon = prompts["Beaconing / C2 Analysis"]
+        self.assertIn("Port anomalies", beacon)
+        self.assertIn("4444", beacon)
+        self.assertIn("c2_port", beacon)
+
+    def test_ja3_wired_into_dns_tls_section(self):
+        _, prompts, _ = _capture_section_prompts(_production_context())
+        dns_tls = prompts["DNS & TLS Analysis"]
+        self.assertIn("JA3", dns_tls)
+        self.assertIn("6734f37431670b3ab4292b8f60f29984", dns_tls)
+        self.assertIn("Trickbot", dns_tls)
+
+    def test_host_identities_wired_into_executive_summary(self):
+        _, prompts, _ = _capture_section_prompts(_production_context())
+        exec_summary = prompts["Executive Summary"]
+        self.assertIn("host_identities", exec_summary)
+        self.assertIn("c2.bad.example", exec_summary)
+        self.assertIn("Prague, Czechia", exec_summary)
+
+    def test_recommended_actions_cites_real_top_threat_iocs(self):
+        _, prompts, _ = _capture_section_prompts(_production_context())
+        actions = prompts["Recommended Actions"]
+        self.assertIn("34.12.37.224", actions)
+        self.assertIn("VERBATIM", actions)
+
+    def test_absent_evidence_leaves_sections_clean(self):
+        # No flow asymmetry / port anomalies / ja3 → no fabricated discussion hooks
+        context = {"features": {}, "osint": {}, "zeek": {}, "packet_count": 10}
+        _, prompts, _ = _capture_section_prompts(context)
+        beacon = prompts["Beaconing / C2 Analysis"]
+        self.assertNotIn("Flow asymmetry", beacon)
+        self.assertNotIn("Port anomalies", beacon)
+        self.assertNotIn("JA3 TLS client fingerprints", prompts["DNS & TLS Analysis"])
 
 
 class TestStripDuplicateHeading(unittest.TestCase):

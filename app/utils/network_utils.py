@@ -195,3 +195,32 @@ def is_public_ipv4(s: str) -> bool:
         return isinstance(ip, ipaddress.IPv4Address) and ip.is_global
     except (ValueError, TypeError):
         return False
+
+
+def pick_top_public_ips(features: dict, n: int) -> list[str]:
+    """
+    Return top-N public IPv4s by packet volume across flows.
+    If n <= 0, return all public IPv4s from artifacts.
+    """
+    if not isinstance(features, dict) or n <= 0:
+        return [ip for ip in (features or {}).get("artifacts", {}).get("ips", []) if is_public_ipv4(ip)]
+
+    flows = (features or {}).get("flows", [])
+    if not flows:
+        return [ip for ip in (features or {}).get("artifacts", {}).get("ips", []) if is_public_ipv4(ip)]
+
+    counts = {}
+    for f in flows:
+        pkts = int(f.get("count") or 0)
+        src = f.get("src")
+        dst = f.get("dst")
+        if src and is_public_ipv4(src):
+            counts[src] = counts.get(src, 0) + pkts
+        if dst and is_public_ipv4(dst):
+            counts[dst] = counts.get(dst, 0) + pkts
+
+    if not counts:
+        return [ip for ip in (features or {}).get("artifacts", {}).get("ips", []) if is_public_ipv4(ip)]
+
+    ranked = sorted(counts.items(), key=lambda kv: kv[1], reverse=True)
+    return [ip for ip, _ in ranked[: max(1, n)]]

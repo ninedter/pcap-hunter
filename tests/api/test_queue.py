@@ -3,21 +3,27 @@
 
 from __future__ import annotations
 
+import json
 import pathlib
 import time
 from datetime import datetime, timedelta
 
 import pytest
 
+import app.api.queue as queue_mod
 from app.api.queue import (
+    WARNING_LLM_UNSUPPORTED,
+    WARNING_OSINT_NOT_CONFIGURED,
+    WARNING_PERSISTENCE_FAILED,
     InProcessJobQueue,
     JobQueue,
     JobSubmission,
     QueueFullError,
+    _worker_run,
     cancel_queued_job,
     recover_stale_running_jobs,
 )
-from app.database.models import Case, Job, JobStatus
+from app.database.models import Case, CaseStatus, Job, JobStatus, Severity
 from app.database.repository import CaseRepository
 
 
@@ -149,24 +155,15 @@ def test_cancel_running_job_returns_false(tmp_path):
     assert repo.get_job(job_id).status == JobStatus.RUNNING
 
 
-FIXTURE = pathlib.Path(__file__).parent.parent / "fixtures" / "tiny.pcap"
-
-
-@pytest.mark.skipif(not FIXTURE.exists(), reason="fixture missing")
+@pytest.mark.skipif(not FIXTURE_PCAP.exists(), reason="tiny.pcap fixture missing")
 def test_worker_persists_analysis_and_iocs(tmp_path):
     """_worker_run must save an Analysis row + IOCs and fill analysis_id in the blob."""
-    import json
-
-    from app.api.queue import _worker_run
-    from app.database.models import Case, CaseStatus, Job, Severity
-    from app.database.repository import CaseRepository
-
     db = str(tmp_path / "t.db")
     repo = CaseRepository(db_path=db)
     repo.create_case(Case(id="cafe0001", title="persist-test", status=CaseStatus.IN_PROGRESS, severity=Severity.LOW))
-    job_id = repo.create_job(Job(case_id="cafe0001", pcap_path=str(FIXTURE), options_json="{}"))
+    job_id = repo.create_job(Job(case_id="cafe0001", pcap_path=str(FIXTURE_PCAP), options_json="{}"))
 
-    _worker_run(job_id, db, str(FIXTURE), {"osint_enabled": False, "llm_enabled": False})
+    _worker_run(job_id, db, str(FIXTURE_PCAP), {"osint_enabled": False, "llm_enabled": False})
 
     job = repo.get_job(job_id)
     assert job.status.value == "done"
@@ -184,3 +181,122 @@ def test_worker_persists_analysis_and_iocs(tmp_path):
     assert len(case.analyses) == 1, "case must show the persisted analysis"
     # tiny.pcap has 10.0.0.x endpoints -> extract_iocs yields ip IOCs
     assert analysis.iocs, "heuristic IOC extraction must run on the API path"
+
+
+@pytest.mark.skipif(not FIXTURE_PCAP.exists(), reason="tiny.pcap fixture missing")
+def test_worker_runs_osint_when_enabled(tmp_path, monkeypatch):
+    """osint_enabled=True with keys configured must enrich and persist osint."""
+    captured = {}
+
+    def fake_enrich(arts, keys, phase=None):
+        captured["arts"] = arts
+        captured["keys"] = keys
+        return {"ips": {"8.8.8.8": {"vt": {}}}, "domains": {}, "ja3": {}}
+
+    monkeypatch.setattr(queue_mod, "osint_enrich", fake_enrich)
+    monkeypatch.setattr(queue_mod, "_load_osint_keys", lambda: {"VT_KEY": "x"})
+    monkeypatch.setattr(queue_mod, "bulk_resolve_ips", lambda ips, max_workers=8: {})
+
+    db = str(tmp_path / "t.db")
+    repo = CaseRepository(db_path=db)
+    repo.create_case(Case(id="cafe0002", title="osint-test", status=CaseStatus.IN_PROGRESS, severity=Severity.LOW))
+    job_id = repo.create_job(Job(case_id="cafe0002", pcap_path=str(FIXTURE_PCAP), options_json="{}"))
+
+    _worker_run(job_id, db, str(FIXTURE_PCAP), {"osint_enabled": True, "llm_enabled": False})
+
+    job = repo.get_job(job_id)
+    result = json.loads(job.result_json)
+    assert "osint" in result["stages_run"]
+    assert captured["keys"] == {"VT_KEY": "x"}, "worker must pass the loaded provider keys to enrich"
+    analysis = repo.get_analysis(result["analysis_id"])
+    assert analysis.osint.get("ips") == {"8.8.8.8": {"vt": {}}}
+
+
+@pytest.mark.skipif(not FIXTURE_PCAP.exists(), reason="tiny.pcap fixture missing")
+def test_worker_warns_when_osint_enabled_but_unconfigured(tmp_path, monkeypatch):
+    monkeypatch.setattr(queue_mod, "_load_osint_keys", lambda: {})
+
+    db = str(tmp_path / "t.db")
+    repo = CaseRepository(db_path=db)
+    repo.create_case(Case(id="cafe0003", title="t", status=CaseStatus.IN_PROGRESS, severity=Severity.LOW))
+    job_id = repo.create_job(Job(case_id="cafe0003", pcap_path=str(FIXTURE_PCAP), options_json="{}"))
+
+    _worker_run(job_id, db, str(FIXTURE_PCAP), {"osint_enabled": True, "llm_enabled": False})
+
+    result = json.loads(repo.get_job(job_id).result_json)
+    assert WARNING_OSINT_NOT_CONFIGURED in result["warnings"]
+
+
+@pytest.mark.skipif(not FIXTURE_PCAP.exists(), reason="tiny.pcap fixture missing")
+def test_worker_flags_llm_as_unsupported(tmp_path):
+    db = str(tmp_path / "t.db")
+    repo = CaseRepository(db_path=db)
+    repo.create_case(Case(id="cafe0004", title="t", status=CaseStatus.IN_PROGRESS, severity=Severity.LOW))
+    job_id = repo.create_job(Job(case_id="cafe0004", pcap_path=str(FIXTURE_PCAP), options_json="{}"))
+
+    _worker_run(job_id, db, str(FIXTURE_PCAP), {"osint_enabled": False, "llm_enabled": True})
+
+    result = json.loads(repo.get_job(job_id).result_json)
+    assert WARNING_LLM_UNSUPPORTED in result["warnings"]
+    assert result["summary_narrative"] is None
+
+
+@pytest.mark.skipif(not FIXTURE_PCAP.exists(), reason="tiny.pcap fixture missing")
+def test_worker_keeps_job_done_when_persistence_fails(tmp_path, monkeypatch):
+    """save_analysis raising must not fail the job: warn + analysis_id stays None."""
+
+    def boom(self, analysis):
+        raise RuntimeError("disk full")
+
+    monkeypatch.setattr(CaseRepository, "save_analysis", boom)
+
+    db = str(tmp_path / "t.db")
+    repo = CaseRepository(db_path=db)
+    repo.create_case(Case(id="cafe0005", title="t", status=CaseStatus.IN_PROGRESS, severity=Severity.LOW))
+    job_id = repo.create_job(Job(case_id="cafe0005", pcap_path=str(FIXTURE_PCAP), options_json="{}"))
+
+    _worker_run(job_id, db, str(FIXTURE_PCAP), {"osint_enabled": False, "llm_enabled": False})
+
+    job = repo.get_job(job_id)
+    assert job.status == JobStatus.DONE
+    result = json.loads(job.result_json)
+    assert result["analysis_id"] is None
+    assert WARNING_PERSISTENCE_FAILED in result["warnings"]
+
+
+def test_worker_beacon_records_round_trip(tmp_path, monkeypatch):
+    """beacon_df_records must survive persistence into features['beacon_records']."""
+    import app.pipeline.runner as runner_mod
+    from app.pipeline.runner import PipelineResult
+
+    records = [{"src": "10.0.0.1", "dst": "8.8.8.8", "score": 0.9}]
+
+    def fake_run_pipeline(pcap_path, case_id, options, progress, heartbeat=None):
+        return PipelineResult(
+            case_id=case_id,
+            packet_count=1,
+            features={
+                "flows": [{"src": "10.0.0.1", "dst": "8.8.8.8", "proto": "TCP", "count": 9}],
+                "artifacts": {"ips": ["10.0.0.1", "8.8.8.8"], "domains": [], "urls": [], "hashes": [], "ja3": []},
+            },
+            beacon_df_records=list(records),
+        )
+
+    # _worker_run imports run_pipeline from app.pipeline.runner at call time,
+    # so the patch must target the source module, not queue_mod.
+    monkeypatch.setattr(runner_mod, "run_pipeline", fake_run_pipeline)
+
+    fake_pcap = tmp_path / "fake.pcap"
+    fake_pcap.write_bytes(b"\xd4\xc3\xb2\xa1" + b"\x00" * 20)
+
+    db = str(tmp_path / "t.db")
+    repo = CaseRepository(db_path=db)
+    repo.create_case(Case(id="cafe0006", title="t", status=CaseStatus.IN_PROGRESS, severity=Severity.LOW))
+    job_id = repo.create_job(Job(case_id="cafe0006", pcap_path=str(fake_pcap), options_json="{}"))
+
+    _worker_run(job_id, db, str(fake_pcap), {"osint_enabled": False, "llm_enabled": False})
+
+    result = json.loads(repo.get_job(job_id).result_json)
+    assert result["analysis_id"], "persistence must succeed with the faked pipeline result"
+    persisted = repo.get_analysis(result["analysis_id"])
+    assert persisted.features["beacon_records"] == records

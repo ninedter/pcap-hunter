@@ -4,18 +4,55 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from abc import ABC, abstractmethod
 from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass, field
 from typing import Any
 
+from app import config as C
 from app.database.models import Job, JobStatus
 from app.database.repository import CaseRepository
+from app.pipeline.osint import enrich as osint_enrich
+from app.utils.network_utils import bulk_resolve_ips, is_public_ipv4, pick_top_public_ips
 
 logger = logging.getLogger(__name__)
 
 # Wire-format warning code added by the worker when analysis persistence fails.
 WARNING_PERSISTENCE_FAILED = "analysis_persistence_failed"
+# Wire-format warning codes for the post-runner stages the worker runs itself.
+WARNING_OSINT_NOT_CONFIGURED = "osint_not_configured"
+WARNING_OSINT_FAILED = "osint_failed"
+WARNING_YARA_FAILED = "yara_failed"
+WARNING_LLM_UNSUPPORTED = "llm_unsupported_on_api_path"
+
+
+def _load_osint_keys() -> dict[str, str]:
+    """OSINT provider keys for the headless worker: saved config first, env fallback.
+
+    Mirrors the UI seeding in app/ui/config_ui.py (saved ``cfg_*_key`` values,
+    ``OTX_KEY``/``VT_KEY``/... env overrides). Empty values are dropped so the
+    caller can treat an empty dict as "OSINT not configured".
+
+    Returns:
+        Provider key mapping in the shape ``app.pipeline.osint.enrich`` expects.
+    """
+    saved: dict = {}
+    try:
+        from app.utils.config_manager import get_config_manager
+
+        saved = get_config_manager().load() or {}
+    except Exception:
+        logger.debug("ConfigManager unavailable; falling back to env keys only")
+
+    keys = {
+        "OTX_KEY": saved.get("cfg_otx_key") or os.getenv("OTX_KEY", ""),
+        "VT_KEY": saved.get("cfg_vt_key") or os.getenv("VT_KEY", ""),
+        "ABUSEIPDB_KEY": saved.get("cfg_abuseipdb_key") or os.getenv("ABUSEIPDB_KEY", ""),
+        "GREYNOISE_KEY": saved.get("cfg_greynoise_key") or os.getenv("GREYNOISE_KEY", ""),
+        "SHODAN_KEY": saved.get("cfg_shodan_key") or os.getenv("SHODAN_KEY", ""),
+    }
+    return {k: v for k, v in keys.items() if v}
 
 
 @dataclass
@@ -87,6 +124,62 @@ def _worker_run(job_id: str, db_path: str, pcap_path: str, options_dict: dict) -
             heartbeat=lambda: repo.touch_job_heartbeat(job_id),
         )
 
+        opts = options_dict  # raw dict: includes keys PipelineOptions doesn't model (e.g. do_yara)
+        yara_results = None
+        osint_data: dict = {}
+
+        # --- Stage 8: YARA over carved files (mirrors app/main.py) ---
+        if opts.get("do_yara", True) and result.carved_items:
+            try:
+                from app.pipeline.yara_scan import scan_carved_files
+
+                rules_dir = ""
+                try:
+                    from app.utils.config_manager import get_config_manager
+
+                    rules_dir = (get_config_manager().load() or {}).get("cfg_yara_rules_dir") or ""
+                except Exception:
+                    logger.debug("ConfigManager unavailable; using default YARA rules")
+                yara_results = scan_carved_files(
+                    result.carved_items, rules_dirs=[rules_dir] if rules_dir.strip() else None
+                )
+                result.stages_run.append("yara_scan")
+            except Exception:
+                logger.exception("Job %s: yara stage failed", job_id)
+                result.warnings.append(WARNING_YARA_FAILED)
+            repo.touch_job_heartbeat(job_id)
+
+        # --- Stage 9: OSINT enrichment + rDNS (mirrors app/main.py) ---
+        if opts.get("osint_enabled", True):
+            keys = _load_osint_keys()
+            if not keys:
+                result.warnings.append(WARNING_OSINT_NOT_CONFIGURED)
+            else:
+                try:
+                    feats = result.features if isinstance(result.features, dict) else {}
+                    arts = dict(feats.get("artifacts", {}))
+                    top_n = int(opts.get("osint_top_n") or 50)
+                    arts["ips"] = (
+                        pick_top_public_ips(feats, top_n)
+                        if top_n > 0
+                        else [ip for ip in arts.get("ips", []) if is_public_ipv4(ip)]
+                    )
+                    osint_data = osint_enrich(arts, keys)
+                    osint_data = osint_data if isinstance(osint_data, dict) else {}
+                    all_public = [ip for ip in feats.get("artifacts", {}).get("ips", []) if is_public_ipv4(ip)]
+                    for ip, hostname in bulk_resolve_ips(all_public, max_workers=C.RDNS_MAX_WORKERS).items():
+                        if ip in osint_data.get("ips", {}) and "ptr" not in osint_data["ips"][ip]:
+                            osint_data["ips"][ip]["ptr"] = hostname
+                    result.stages_run.append("osint")
+                except Exception:
+                    logger.exception("Job %s: osint stage failed", job_id)
+                    result.warnings.append(WARNING_OSINT_FAILED)
+            repo.touch_job_heartbeat(job_id)
+
+        # --- LLM report: not yet supported headless (needs UI correlation context) ---
+        if opts.get("llm_enabled", True):
+            result.warnings.append(WARNING_LLM_UNSUPPORTED)
+
         # Persist the analysis so the case completes and IOCs reach the feed
         # (mirrors app/ui/cases_tab.py:_quick_save_analysis). Persistence
         # failures must not lose the pipeline result -> warn, keep analysis_id None.
@@ -99,6 +192,8 @@ def _worker_run(job_id: str, db_path: str, pcap_path: str, options_dict: dict) -
                 pcap_hash=_sha256_file(pcap_path),
                 packet_count=result.packet_count,
                 features=result.features,
+                osint=osint_data or {},
+                yara_results=yara_results,
                 dns_analysis=result.dns_analysis or None,
                 tls_analysis=result.tls_analysis or None,
             )

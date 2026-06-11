@@ -99,6 +99,15 @@ def _worker_run(job_id: str, db_path: str, pcap_path: str, options_dict: dict) -
     from app.pipeline.runner import PipelineOptions, run_pipeline
 
     repo = Repo(db_path=db_path)
+
+    # A job can be cancelled (or its case deleted, cascading the row away)
+    # between enqueue and execution — the submitted future still runs. Abort
+    # before burning a worker slot on a dead job.
+    job = repo.get_job(job_id)
+    if job is None or job.status == JS.CANCELLED:
+        logger.info("Job %s gone or cancelled before start; skipping", job_id)
+        return
+
     repo.update_job_status(job_id, JS.RUNNING)
 
     def _on_event(event: ProgressEvent) -> None:
@@ -115,10 +124,9 @@ def _worker_run(job_id: str, db_path: str, pcap_path: str, options_dict: dict) -
     options = PipelineOptions(**{k: v for k, v in options_dict.items() if k in PipelineOptions.__dataclass_fields__})
 
     try:
-        job = repo.get_job(job_id)
         result = run_pipeline(
             pcap_path=pcap_path,
-            case_id=job.case_id if job else "",
+            case_id=job.case_id,
             options=options,
             progress=progress,
             heartbeat=lambda: repo.touch_job_heartbeat(job_id),
@@ -187,7 +195,7 @@ def _worker_run(job_id: str, db_path: str, pcap_path: str, options_dict: dict) -
 
         try:
             analysis = Analysis(
-                case_id=job.case_id if job else "",
+                case_id=job.case_id,
                 pcap_path=pcap_path,
                 pcap_hash=_sha256_file(pcap_path),
                 packet_count=result.packet_count,

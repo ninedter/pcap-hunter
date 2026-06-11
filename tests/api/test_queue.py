@@ -411,3 +411,78 @@ def test_worker_yara_failure_degrades_to_warning(tmp_path, monkeypatch):
     assert WARNING_YARA_FAILED in result["warnings"]
     analysis = repo.get_analysis(result["analysis_id"])
     assert analysis.yara_results is None
+
+
+# ---------------------------------------------------------------------------
+# Task 5b: worker cancel guard
+# ---------------------------------------------------------------------------
+
+
+def _instrumented_pipeline(calls: dict):
+    """Build a run_pipeline stand-in that records invocation (production-shape result)."""
+    from app.pipeline.runner import PipelineResult
+
+    def fake_run_pipeline(pcap_path, case_id, options, progress, heartbeat=None):
+        calls["ran"] = True
+        return PipelineResult(
+            case_id=case_id,
+            packet_count=1,
+            features={
+                "flows": [{"src": "10.0.0.1", "dst": "8.8.8.8", "proto": "TCP", "count": 9}],
+                "artifacts": {"ips": ["10.0.0.1", "8.8.8.8"], "domains": [], "urls": [], "hashes": [], "ja3": []},
+            },
+        )
+
+    return fake_run_pipeline
+
+
+def test_worker_skips_cancelled_job(tmp_path, monkeypatch):
+    """A job cancelled between enqueue and execution must not run the pipeline."""
+    import app.pipeline.runner as runner_mod
+
+    calls: dict = {}
+    monkeypatch.setattr(runner_mod, "run_pipeline", _instrumented_pipeline(calls))
+
+    fake_pcap = tmp_path / "fake.pcap"
+    fake_pcap.write_bytes(b"\xd4\xc3\xb2\xa1" + b"\x00" * 20)
+
+    db = str(tmp_path / "t.db")
+    repo = CaseRepository(db_path=db)
+    repo.create_case(Case(id="cafe0020", title="t", status=CaseStatus.IN_PROGRESS, severity=Severity.LOW))
+    job_id = repo.create_job(Job(case_id="cafe0020", pcap_path=str(fake_pcap), options_json="{}"))
+    assert cancel_queued_job(repo, job_id) is True
+
+    _worker_run(job_id, db, str(fake_pcap), {"osint_enabled": False, "llm_enabled": False})
+
+    job = repo.get_job(job_id)
+    assert job.status == JobStatus.CANCELLED, f"cancelled job must stay cancelled, got {job.status.value}"
+    assert "ran" not in calls, "pipeline must not run for a cancelled job"
+    assert repo.get_case("cafe0020").analyses == [], "no analysis may be persisted for a cancelled job"
+
+
+def test_worker_skips_deleted_job(tmp_path, monkeypatch):
+    """Case deletion cascades the job row away — the already-submitted future must no-op."""
+    import app.pipeline.runner as runner_mod
+
+    calls: dict = {}
+    monkeypatch.setattr(runner_mod, "run_pipeline", _instrumented_pipeline(calls))
+
+    fake_pcap = tmp_path / "fake.pcap"
+    fake_pcap.write_bytes(b"\xd4\xc3\xb2\xa1" + b"\x00" * 20)
+
+    db = str(tmp_path / "t.db")
+    repo = CaseRepository(db_path=db)
+    repo.create_case(Case(id="cafe0021", title="t", status=CaseStatus.IN_PROGRESS, severity=Severity.LOW))
+    job_id = repo.create_job(Job(case_id="cafe0021", pcap_path=str(fake_pcap), options_json="{}"))
+    assert repo.delete_case("cafe0021") is True
+
+    _worker_run(job_id, db, str(fake_pcap), {"osint_enabled": False, "llm_enabled": False})
+
+    assert repo.get_job(job_id) is None, "the cascaded job row must stay gone"
+    assert "ran" not in calls, "pipeline must not run for a deleted job"
+    conn = repo._get_conn()
+    try:
+        orphans = conn.execute("SELECT COUNT(*) FROM analyses").fetchone()[0]
+        assert orphans == 0, "no orphan analysis may be created for a deleted case"
+    finally:
+        conn.close()

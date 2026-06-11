@@ -24,10 +24,12 @@ def gc_sweep(
     pcaps_deleted = _gc_files(uploads_dir, settings.pcap_ttl_days)
     artifacts_deleted = _gc_files(artifacts_dir, settings.artifact_ttl_days)
     jobs_deleted = _gc_old_jobs(repo, settings.job_ttl_days)
+    orphaned_rows_deleted = _gc_orphaned_case_rows(repo)
     stats = {
         "pcaps_deleted": pcaps_deleted,
         "artifacts_deleted": artifacts_deleted,
         "jobs_deleted": jobs_deleted,
+        "orphaned_rows_deleted": orphaned_rows_deleted,
     }
     logger.info("gc_sweep complete: %s", stats)
     return stats
@@ -69,5 +71,47 @@ def _gc_old_jobs(repo: CaseRepository, ttl_days: int) -> int:
         )
         conn.commit()
         return cursor.rowcount or 0
+    finally:
+        conn.close()
+
+
+def _gc_orphaned_case_rows(repo: CaseRepository) -> int:
+    """Remove rows whose case no longer exists.
+
+    Heals damage from the pre-cascade ``delete_case``, which removed only the
+    cases row — its analyses kept serving in the IOC feed forever (the feed
+    joins iocs to analyses only). Covers analyses (plus their iocs and notes),
+    case-level notes, case_tags, and jobs. ``notes.case_id`` and
+    ``jobs.case_id`` are nullable, so those deletes guard with IS NOT NULL to
+    leave case-less rows alone.
+
+    Returns:
+        Total number of orphaned rows deleted across all tables.
+    """
+    orphaned_analyses = "SELECT id FROM analyses WHERE case_id NOT IN (SELECT id FROM cases)"
+    conn = repo._get_conn()
+    try:
+        deleted = 0
+        # Children of orphaned analyses first, while the subquery still matches.
+        deleted += conn.execute(f"DELETE FROM iocs WHERE analysis_id IN ({orphaned_analyses})").rowcount or 0
+        deleted += conn.execute(f"DELETE FROM notes WHERE analysis_id IN ({orphaned_analyses})").rowcount or 0
+        deleted += conn.execute("DELETE FROM analyses WHERE case_id NOT IN (SELECT id FROM cases)").rowcount or 0
+        deleted += (
+            conn.execute(
+                "DELETE FROM notes WHERE case_id IS NOT NULL AND case_id NOT IN (SELECT id FROM cases)"
+            ).rowcount
+            or 0
+        )
+        deleted += conn.execute("DELETE FROM case_tags WHERE case_id NOT IN (SELECT id FROM cases)").rowcount or 0
+        deleted += (
+            conn.execute(
+                "DELETE FROM jobs WHERE case_id IS NOT NULL AND case_id NOT IN (SELECT id FROM cases)"
+            ).rowcount
+            or 0
+        )
+        conn.commit()
+        if deleted:
+            logger.info("gc: reconciled %d orphaned case rows", deleted)
+        return deleted
     finally:
         conn.close()

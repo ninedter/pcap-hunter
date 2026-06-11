@@ -6,9 +6,10 @@ from __future__ import annotations
 import os
 from datetime import datetime, timedelta
 
+from app.api.feed import IOCFilter, query_iocs
 from app.api.gc import gc_sweep
 from app.api.settings import APISettings
-from app.database.models import Case, Job, JobStatus
+from app.database.models import IOC, Analysis, Case, IOCType, Job, JobStatus, Severity
 from app.database.repository import CaseRepository
 
 
@@ -126,3 +127,78 @@ def test_gc_handles_missing_directory(tmp_path):
     )
     assert stats["pcaps_deleted"] == 0
     assert stats["artifacts_deleted"] == 0
+
+
+# ---------------------------------------------------------------------------
+# Task 5b: orphan reconcile sweep
+# ---------------------------------------------------------------------------
+
+
+def _seed_case_with_children(repo: CaseRepository, case_id: str) -> tuple[str, str]:
+    """Seed a case with an analysis, IOC, note, tag link, and job (production shapes)."""
+    repo.create_case(Case(id=case_id, title="t", tags=["soar:tines"]))
+    analysis_id = repo.save_analysis(
+        Analysis(
+            case_id=case_id,
+            pcap_path="/tmp/x.pcap",
+            pcap_hash="hash",
+            iocs=[IOC(ioc_type=IOCType.IP, value="203.0.113.7", severity=Severity.HIGH)],
+        )
+    )
+    repo.add_note(case_id, "investigating", analysis_id=analysis_id)
+    job_id = repo.create_job(Job(case_id=case_id, pcap_path="/tmp/x.pcap"))
+    return analysis_id, job_id
+
+
+def test_gc_reconciles_orphaned_case_children(tmp_path):
+    """Pre-cascade delete_case removed only the cases row; GC must heal the leftovers."""
+    repo = CaseRepository(db_path=str(tmp_path / "t.db"))
+    analysis_id, job_id = _seed_case_with_children(repo, "feed0001")
+
+    # Simulate legacy damage: only the cases row goes away (the FK pragma is
+    # off per connection, so children survive exactly as the old single-table
+    # delete_case left them).
+    conn = repo._get_conn()
+    try:
+        conn.execute("DELETE FROM cases WHERE id=?", ("feed0001",))
+        conn.commit()
+    finally:
+        conn.close()
+    assert [r["value"] for r in query_iocs(repo, IOCFilter())] == ["203.0.113.7"], "orphan poisons the feed"
+
+    stats = gc_sweep(
+        repo=repo, settings=_settings(tmp_path), uploads_dir=tmp_path / "uploads", artifacts_dir=tmp_path / "artifacts"
+    )
+
+    # analysis + ioc + analysis-note + case_tag + job
+    assert stats["orphaned_rows_deleted"] == 5
+    assert repo.get_analysis(analysis_id) is None
+    assert repo.get_job(job_id) is None
+    assert query_iocs(repo, IOCFilter()) == [], "the feed must stop serving orphaned IOCs"
+    conn = repo._get_conn()
+    try:
+        for table in ("analyses", "iocs", "notes", "case_tags", "jobs"):
+            count = conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+            assert count == 0, f"orphaned {table} rows must be reconciled"
+    finally:
+        conn.close()
+
+
+def test_gc_orphan_sweep_keeps_healthy_cases(tmp_path):
+    """A live case with children must come through the sweep untouched."""
+    repo = CaseRepository(db_path=str(tmp_path / "t.db"))
+    analysis_id, job_id = _seed_case_with_children(repo, "feed0002")
+
+    stats = gc_sweep(
+        repo=repo, settings=_settings(tmp_path), uploads_dir=tmp_path / "uploads", artifacts_dir=tmp_path / "artifacts"
+    )
+
+    assert stats["orphaned_rows_deleted"] == 0
+    case = repo.get_case("feed0002")
+    assert case is not None
+    assert len(case.analyses) == 1
+    assert len(case.notes) == 1
+    assert case.tags == ["soar:tines"]
+    assert repo.get_analysis(analysis_id) is not None
+    assert repo.get_job(job_id) is not None
+    assert [r["value"] for r in query_iocs(repo, IOCFilter())] == ["203.0.113.7"]

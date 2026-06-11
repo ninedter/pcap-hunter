@@ -539,6 +539,26 @@ def test_cancel_job_if_queued_false_on_running(tmp_path):
     assert repo.get_job(job_id).status == JobStatus.RUNNING
 
 
+def test_cancel_job_if_queued_false_on_missing(tmp_path):
+    """cancel_queued_job must return False (not raise) for a nonexistent job id."""
+    repo = CaseRepository(db_path=str(tmp_path / "t.db"))
+    ok = cancel_queued_job(repo, "j_nonexistent_99")
+    assert ok is False
+
+
+def test_complete_job_noop_on_deleted_row(tmp_path):
+    """complete_job on a nonexistent job id must not raise; the jobs table stays empty."""
+    repo = CaseRepository(db_path=str(tmp_path / "t.db"))
+    # Must not raise even when the row is gone.
+    repo.complete_job("j_ghost_00", b'{"ok": true}')
+    conn = repo._get_conn()
+    try:
+        count = conn.execute("SELECT COUNT(*) FROM jobs").fetchone()[0]
+    finally:
+        conn.close()
+    assert count == 0
+
+
 def test_complete_job_sets_done_and_reconciles_progress(tmp_path):
     """complete_job must finalize status, result, and progress in one write."""
     repo = CaseRepository(db_path=str(tmp_path / "t.db"))

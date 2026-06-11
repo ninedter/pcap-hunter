@@ -315,6 +315,30 @@ def test_delete_case_succeeds_when_no_artifacts_exist(client, tmp_path, monkeypa
     assert get_repo().get_case(case_id) is None
 
 
+def test_delete_case_409_when_queued_job_starts_mid_delete(client, monkeypatch):
+    """When cancel_queued_job returns False (job flipped queued→running between SELECT
+    and CAS), DELETE must return 409 case_has_running_job and leave the case intact."""
+    from app.api.deps import get_repo
+    from app.database.models import Case, Job
+
+    repo = get_repo()
+    case_id = repo.create_case(Case(title="race-case"))
+    job_id = repo.create_job(Job(case_id=case_id, pcap_path="/tmp/x.pcap"))
+
+    # Simulate the job flipping queued→running between our SELECT and the CAS cancel.
+    monkeypatch.setattr("app.api.routers.cases.cancel_queued_job", lambda repo, jid: False)
+
+    r = client.delete(f"/api/v1/cases/{case_id}", headers={"Authorization": "Bearer MAIN"})
+    assert r.status_code == 409
+    body = r.json()
+    assert body["code"] == "case_has_running_job"
+    assert body["job_id"] == job_id
+
+    # Case must still exist — the analyst's data is preserved.
+    r2 = client.get(f"/api/v1/cases/{case_id}", headers={"Authorization": "Bearer MAIN"})
+    assert r2.status_code == 200
+
+
 def test_delete_case_500_and_no_file_removal_when_db_delete_fails(client, tmp_path, monkeypatch):
     """When repo.delete_case returns False (DB failure), the route must return 500
     and must NOT destroy the analyst's evidence files."""

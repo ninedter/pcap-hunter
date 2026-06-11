@@ -131,7 +131,12 @@ def delete_case(case_id: str, _scope=Depends(require_full_scope), repo=Depends(g
                 detail={"code": "case_has_running_job", "job_id": row[0]},
             )
         if row[1] == "queued":
-            cancel_queued_job(repo, row[0])
+            if not cancel_queued_job(repo, row[0]):
+                # Lost the race: the job started between our SELECT and the CAS.
+                raise HTTPException(
+                    status_code=409,
+                    detail={"code": "case_has_running_job", "job_id": row[0]},
+                )
 
     if not repo.delete_case(case_id):
         raise HTTPException(

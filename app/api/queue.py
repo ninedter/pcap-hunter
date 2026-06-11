@@ -95,7 +95,10 @@ def _sha256_file(path: str) -> str:
 
 
 def _run_yara_stage(result: PipelineResult, opts: dict, job_id: str, repo: CaseRepository) -> dict | None:
-    """Stage 8: YARA over carved files (mirrors app/main.py); returns results, or None when skipped or failed."""
+    """Stage 8: YARA over carved files (mirrors app/main.py); returns results, or None when skipped or failed.
+
+    Appends to result.stages_run/warnings and touches the job heartbeat.
+    """
     yara_results = None
     if opts.get("do_yara", True) and result.carved_items:
         try:
@@ -118,7 +121,10 @@ def _run_yara_stage(result: PipelineResult, opts: dict, job_id: str, repo: CaseR
 
 
 def _run_osint_stage(result: PipelineResult, opts: dict, job_id: str, repo: CaseRepository) -> dict:
-    """Stage 9: OSINT enrichment + rDNS (mirrors app/main.py); returns osint data, empty when skipped or failed."""
+    """Stage 9: OSINT enrichment + rDNS (mirrors app/main.py); returns osint data, empty when skipped or failed.
+
+    Appends to result.stages_run/warnings and touches the job heartbeat.
+    """
     osint_data: dict = {}
     if opts.get("osint_enabled", True):
         keys = _load_osint_keys()
@@ -155,9 +161,11 @@ def _persist_analysis(
     osint_data: dict,
     yara_results: dict | None,
     repo: CaseRepository,
-    job_id: str,
 ) -> None:
-    """Persist the pipeline result as an Analysis so the case completes and IOCs reach the feed."""
+    """Persist the pipeline result as an Analysis so the case completes and IOCs reach the feed.
+
+    On success sets result.analysis_id; on failure appends WARNING_PERSISTENCE_FAILED.
+    """
     # Mirrors app/ui/cases_tab.py:_quick_save_analysis. Persistence failures
     # must not lose the pipeline result -> warn, keep analysis_id None.
     from app.database.models import Analysis
@@ -179,7 +187,7 @@ def _persist_analysis(
         analysis.iocs = repo.extract_iocs(analysis)
         result.analysis_id = repo.save_analysis(analysis)
     except Exception:
-        logger.exception("Job %s: analysis persistence failed", job_id)
+        logger.exception("Job %s: analysis persistence failed", job.id)
         result.warnings.append(WARNING_PERSISTENCE_FAILED)
 
 
@@ -242,7 +250,7 @@ def _worker_run(job_id: str, db_path: str, pcap_path: str, options_dict: dict) -
         if opts.get("llm_enabled", True):
             result.warnings.append(WARNING_LLM_UNSUPPORTED)
 
-        _persist_analysis(result, job, pcap_path, osint_data, yara_results, repo, job_id)
+        _persist_analysis(result, job, pcap_path, osint_data, yara_results, repo)
 
         result_blob = json.dumps(result.to_dict()).encode("utf-8")
         repo.complete_job(job_id, result_blob)

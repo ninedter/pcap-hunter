@@ -1,5 +1,6 @@
 import logging
 import os
+import pathlib
 import shutil
 
 import streamlit as st
@@ -48,6 +49,7 @@ PERSIST_KEYS = {
     "cfg_osint_cache_enabled": "cfg_osint_cache_enabled",
     "cfg_zeek_bin": "cfg_zeek_bin",
     "cfg_tshark_bin": "cfg_tshark_bin",
+    "cfg_yara_rules_dir": "cfg_yara_rules_dir",
     "cfg_home_lat": "cfg_home_lat",
     "cfg_home_lon": "cfg_home_lon",
     "cfg_home_continent": "cfg_home_continent",
@@ -116,6 +118,9 @@ def init_config_defaults():
     # Binary paths
     _ss_default("cfg_zeek_bin", saved_config.get("cfg_zeek_bin") or "")
     _ss_default("cfg_tshark_bin", saved_config.get("cfg_tshark_bin") or "")
+
+    # YARA rules directory
+    _ss_default("cfg_yara_rules_dir", saved_config.get("cfg_yara_rules_dir") or "")
 
     # Map settings
     _ss_default("cfg_home_lat", saved_config.get("cfg_home_lat", 0.0))
@@ -261,7 +266,7 @@ def _render_llm_integration():
             st.session_state["cfg_lm_model"] = st.text_input("Model name", value=current_model)
 
     elif selected_provider == llm_providers.PROVIDER_OPENAI:
-        c1, c2 = st.columns([2, 1])
+        c1, c2 = st.columns([2, 1], vertical_alignment="bottom")
         with c1:
             st.session_state["cfg_openai_api_key"] = st.text_input(
                 "OpenAI API Key", type="password", value=st.session_state.get("cfg_openai_api_key", "")
@@ -290,7 +295,7 @@ def _render_llm_integration():
                     st.error("Could not fetch models. Check Key/Base URL.")
 
     elif selected_provider == llm_providers.PROVIDER_ANTHROPIC:
-        c1, c2 = st.columns([2, 1])
+        c1, c2 = st.columns([2, 1], vertical_alignment="bottom")
         with c1:
             st.session_state["cfg_anthropic_api_key"] = st.text_input(
                 "Anthropic API Key", type="password", value=st.session_state.get("cfg_anthropic_api_key", "")
@@ -412,6 +417,30 @@ def render_config_tab():
             st.success(f"Found: `{resolved_tshark}`")
         else:
             st.error("Not found. Install Wireshark/Tshark.")
+
+    st.markdown("---")
+    st.markdown("#### YARA Rules")
+    yara_dir = st.text_input(
+        "YARA rules directory",
+        key="cfg_yara_rules_dir",
+        value=st.session_state.get("cfg_yara_rules_dir", ""),
+        help=(
+            "Folder containing .yar/.yara rule files. Scanned recursively at analysis time. "
+            "In Docker, put rules under ./data/yara_rules — the data folder is mounted into the container."
+        ),
+    )
+    if yara_dir.strip():
+        _yara_path = pathlib.Path(yara_dir.strip()).expanduser()
+        if not _yara_path.exists():
+            st.warning(f"Directory not found: {_yara_path}")
+        else:
+            _yara_count = len(list(_yara_path.rglob("*.yar"))) + len(list(_yara_path.rglob("*.yara")))
+            if _yara_count > 0:
+                st.caption(f"✓ {_yara_count} rule file(s) found")
+            else:
+                st.warning("No .yar/.yara files in this directory")
+    else:
+        st.caption("Leave blank to use ./data/yara_rules when present.")
 
     st.markdown("---")
     st.markdown("#### Extraction / Analysis")

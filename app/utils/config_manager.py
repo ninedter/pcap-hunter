@@ -40,6 +40,7 @@ DEFAULT_CONFIG = {
     "cfg_pyshark_limit": 200000,
     "cfg_osint_top_ips": 50,
     "cfg_osint_cache_enabled": False,  # Enable/disable OSINT response caching
+    "cfg_yara_rules_dir": "",  # User-configured YARA rules directory
     "cfg_vt_key": "",
     "cfg_greynoise_key": "",
     "cfg_shodan_key": "",

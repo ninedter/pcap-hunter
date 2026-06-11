@@ -176,7 +176,8 @@ def _run_single_pcap_pipeline(
             p = tracker.next_phase("YARA Scanning")
             from app.pipeline.yara_scan import scan_carved_files
 
-            _yara = scan_carved_files(result.carved_items, phase=p)
+            _yara_dir = (st.session_state.get("cfg_yara_rules_dir") or "").strip()
+            _yara = scan_carved_files(result.carved_items, rules_dirs=[_yara_dir] if _yara_dir else None, phase=p)
             st.session_state["yara_results"] = _yara
 
         # --- Stage 9: OSINT enrichment ---

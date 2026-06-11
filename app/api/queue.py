@@ -43,7 +43,7 @@ def _load_osint_keys() -> dict[str, str]:
 
         saved = get_config_manager().load() or {}
     except Exception:
-        logger.debug("ConfigManager unavailable; falling back to env keys only")
+        logger.info("ConfigManager unavailable; falling back to env keys only")
 
     keys = {
         "OTX_KEY": saved.get("cfg_otx_key") or os.getenv("OTX_KEY", ""),
@@ -139,7 +139,7 @@ def _worker_run(job_id: str, db_path: str, pcap_path: str, options_dict: dict) -
 
                     rules_dir = (get_config_manager().load() or {}).get("cfg_yara_rules_dir") or ""
                 except Exception:
-                    logger.debug("ConfigManager unavailable; using default YARA rules")
+                    logger.info("ConfigManager unavailable; using default YARA rules")
                 yara_results = scan_carved_files(
                     result.carved_items, rules_dirs=[rules_dir] if rules_dir.strip() else None
                 )
@@ -206,6 +206,11 @@ def _worker_run(job_id: str, db_path: str, pcap_path: str, options_dict: dict) -
             result.warnings.append(WARNING_PERSISTENCE_FAILED)
 
         result_blob = json.dumps(result.to_dict()).encode("utf-8")
+        # Reconcile progress: skipped stages never emit events, so a finished
+        # job would otherwise freeze at its last snapshot (e.g. 50%).
+        j = repo.get_job(job_id)
+        if j:
+            repo.update_job_progress(job_id, "Complete", j.progress_total, j.progress_total)
         repo.update_job_status(job_id, JS.DONE, result_json=result_blob)
     except Exception as exc:
         logger.exception("Job %s failed: %s", job_id, exc)

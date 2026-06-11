@@ -15,6 +15,7 @@ from app.api.queue import (
     WARNING_LLM_UNSUPPORTED,
     WARNING_OSINT_NOT_CONFIGURED,
     WARNING_PERSISTENCE_FAILED,
+    WARNING_YARA_FAILED,
     InProcessJobQueue,
     JobQueue,
     JobSubmission,
@@ -300,3 +301,113 @@ def test_worker_beacon_records_round_trip(tmp_path, monkeypatch):
     assert result["analysis_id"], "persistence must succeed with the faked pipeline result"
     persisted = repo.get_analysis(result["analysis_id"])
     assert persisted.features["beacon_records"] == records
+
+
+# ---------------------------------------------------------------------------
+# Task 3: progress reconciliation on completion
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.skipif(not FIXTURE_PCAP.exists(), reason="tiny.pcap fixture missing")
+def test_done_job_reports_complete_progress(tmp_path):
+    db = str(tmp_path / "t.db")
+    repo = CaseRepository(db_path=db)
+    repo.create_case(Case(id="cafe0005", title="t", status=CaseStatus.IN_PROGRESS, severity=Severity.LOW))
+    job_id = repo.create_job(Job(case_id="cafe0005", pcap_path=str(FIXTURE_PCAP), options_json="{}"))
+
+    _worker_run(job_id, db, str(FIXTURE_PCAP), {"osint_enabled": False, "llm_enabled": False})
+
+    job = repo.get_job(job_id)
+    assert job.status.value == "done"
+    assert job.progress_done == job.progress_total
+    assert job.progress_stage == "Complete"
+
+
+# ---------------------------------------------------------------------------
+# Carry-over A: YARA stage coverage
+# ---------------------------------------------------------------------------
+
+
+def test_worker_runs_yara_when_carved_items_exist(tmp_path, monkeypatch):
+    """Worker must call scan_carved_files and persist yara_results when carved_items is non-empty."""
+    import app.pipeline.runner as runner_mod
+    from app.pipeline.runner import PipelineResult
+
+    carved = [{"path": "x.bin", "sha256": "ab" * 32}]
+    yara_call_args = {}
+
+    def fake_run_pipeline(pcap_path, case_id, options, progress, heartbeat=None):
+        return PipelineResult(
+            case_id=case_id,
+            packet_count=1,
+            features={
+                "flows": [{"src": "10.0.0.1", "dst": "8.8.8.8", "proto": "TCP", "count": 9}],
+                "artifacts": {"ips": ["10.0.0.1", "8.8.8.8"], "domains": [], "urls": [], "hashes": [], "ja3": []},
+            },
+            carved_items=list(carved),
+        )
+
+    def fake_scan(items, rules_dirs=None):
+        yara_call_args["items"] = items
+        return {"matches": [], "scanned": 1}
+
+    monkeypatch.setattr(runner_mod, "run_pipeline", fake_run_pipeline)
+    monkeypatch.setattr("app.pipeline.yara_scan.scan_carved_files", fake_scan)
+
+    fake_pcap = tmp_path / "fake.pcap"
+    fake_pcap.write_bytes(b"\xd4\xc3\xb2\xa1" + b"\x00" * 20)
+
+    db = str(tmp_path / "t.db")
+    repo = CaseRepository(db_path=db)
+    repo.create_case(Case(id="cafe0010", title="t", status=CaseStatus.IN_PROGRESS, severity=Severity.LOW))
+    job_id = repo.create_job(Job(case_id="cafe0010", pcap_path=str(fake_pcap), options_json="{}"))
+
+    _worker_run(job_id, db, str(fake_pcap), {"osint_enabled": False, "llm_enabled": False, "do_yara": True})
+
+    result = json.loads(repo.get_job(job_id).result_json)
+    assert "yara_scan" in result["stages_run"], "yara_scan must be recorded in stages_run"
+    assert yara_call_args.get("items") == carved, "scan_carved_files must receive the carved_items list"
+    analysis = repo.get_analysis(result["analysis_id"])
+    assert analysis.yara_results == {"matches": [], "scanned": 1}
+
+
+def test_worker_yara_failure_degrades_to_warning(tmp_path, monkeypatch):
+    """A crash in scan_carved_files must not fail the job — warn + yara_results stays None."""
+    import app.pipeline.runner as runner_mod
+    from app.pipeline.runner import PipelineResult
+
+    carved = [{"path": "x.bin", "sha256": "ab" * 32}]
+
+    def fake_run_pipeline(pcap_path, case_id, options, progress, heartbeat=None):
+        return PipelineResult(
+            case_id=case_id,
+            packet_count=1,
+            features={
+                "flows": [{"src": "10.0.0.1", "dst": "8.8.8.8", "proto": "TCP", "count": 9}],
+                "artifacts": {"ips": ["10.0.0.1", "8.8.8.8"], "domains": [], "urls": [], "hashes": [], "ja3": []},
+            },
+            carved_items=list(carved),
+        )
+
+    def fake_scan_boom(items, rules_dirs=None):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(runner_mod, "run_pipeline", fake_run_pipeline)
+    monkeypatch.setattr("app.pipeline.yara_scan.scan_carved_files", fake_scan_boom)
+
+    fake_pcap = tmp_path / "fake.pcap"
+    fake_pcap.write_bytes(b"\xd4\xc3\xb2\xa1" + b"\x00" * 20)
+
+    db = str(tmp_path / "t.db")
+    repo = CaseRepository(db_path=db)
+    repo.create_case(Case(id="cafe0011", title="t", status=CaseStatus.IN_PROGRESS, severity=Severity.LOW))
+    job_id = repo.create_job(Job(case_id="cafe0011", pcap_path=str(fake_pcap), options_json="{}"))
+
+    _worker_run(job_id, db, str(fake_pcap), {"osint_enabled": False, "llm_enabled": False, "do_yara": True})
+
+    job = repo.get_job(job_id)
+    assert job.status.value == "done", "job must remain done despite YARA failure"
+    result = json.loads(job.result_json)
+    assert WARNING_YARA_FAILED in result["warnings"]
+    analysis = repo.get_analysis(result["analysis_id"])
+    assert analysis.yara_results is None

@@ -133,7 +133,15 @@ def delete_case(case_id: str, _scope=Depends(require_full_scope), repo=Depends(g
         if row[1] == "queued":
             cancel_queued_job(repo, row[0])
 
-    repo.delete_case(case_id)
+    if not repo.delete_case(case_id):
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "code": "case_delete_failed",
+                "title": "Internal Server Error",
+                "detail": "Case deletion failed; no files were removed.",
+            },
+        )
 
     # Best-effort artifact cleanup: uploaded pcap, cached pdf, per-run output
     # dirs. The DB delete above is the source of truth — file errors must
@@ -143,11 +151,12 @@ def delete_case(case_id: str, _scope=Depends(require_full_scope), repo=Depends(g
         (uploads_dir / f"{case_id}.pcap").unlink(missing_ok=True)
         (_reports_dir() / f"{case_id}.pdf").unlink(missing_ok=True)
 
-        # Call-time import so tests can monkeypatch ZEEK_DIR/CARVE_DIR on the module.
+        # Config constants resolved at call time (module-level import would work too).
         from app import config as C
 
-        # Sanitization mirrors app.pipeline.runner._derive_run_id so the glob
-        # matches exactly the run dirs the runner created for this case.
+        # Sanitization deliberately diverges from app.pipeline.runner._derive_run_id:
+        # the router SKIPs empty sanitized ids rather than falling back to "run",
+        # because globbing "run_*" would delete other cases' dirs.
         safe = re.sub(r"[^A-Za-z0-9._-]", "_", case_id)[:40].lstrip(".")
         if safe:
             for base in (C.ZEEK_DIR, C.CARVE_DIR):

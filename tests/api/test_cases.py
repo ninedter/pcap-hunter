@@ -288,6 +288,9 @@ def test_delete_case_removes_files(client, tmp_path, monkeypatch):
     (carve_base / f"{case_id}_deadbeef").mkdir(parents=True)
     # Another case's run dir must survive the cleanup glob.
     (zeek_base / "othercase_cafe0001").mkdir(parents=True)
+    # A dir that shares the case_id as a prefix but WITHOUT the underscore separator
+    # must also survive (guards against an over-greedy glob missing the "_" anchor).
+    (zeek_base / f"{case_id}x_cafe0001").mkdir(parents=True)
 
     r = client.delete(f"/api/v1/cases/{case_id}", headers={"Authorization": "Bearer MAIN"})
     assert r.status_code == 204
@@ -296,6 +299,7 @@ def test_delete_case_removes_files(client, tmp_path, monkeypatch):
     assert not (zeek_base / f"{case_id}_deadbeef").exists()
     assert not (carve_base / f"{case_id}_deadbeef").exists()
     assert (zeek_base / "othercase_cafe0001").exists()
+    assert (zeek_base / f"{case_id}x_cafe0001").exists(), "over-greedy glob must not delete dirs with extended prefix"
 
 
 def test_delete_case_succeeds_when_no_artifacts_exist(client, tmp_path, monkeypatch):
@@ -309,3 +313,28 @@ def test_delete_case_succeeds_when_no_artifacts_exist(client, tmp_path, monkeypa
     from app.api.deps import get_repo
 
     assert get_repo().get_case(case_id) is None
+
+
+def test_delete_case_500_and_no_file_removal_when_db_delete_fails(client, tmp_path, monkeypatch):
+    """When repo.delete_case returns False (DB failure), the route must return 500
+    and must NOT destroy the analyst's evidence files."""
+    from app.database.repository import CaseRepository
+
+    uploads = pathlib.Path(os.environ["PCAP_HUNTER_API_UPLOADS_DIR"])
+    monkeypatch.setenv("PCAP_HUNTER_REPORTS_DIR", str(tmp_path / "reports"))
+
+    case_id = _seed_case_with_analysis("delfail1")
+
+    uploads.mkdir(parents=True, exist_ok=True)
+    pcap_file = uploads / f"{case_id}.pcap"
+    pcap_file.write_bytes(b"\xd4\xc3\xb2\xa1" + b"\x00" * 20)
+
+    # Make the DB delete silently fail (e.g. locked DB → repository returns False).
+    monkeypatch.setattr(CaseRepository, "delete_case", lambda self, cid: False)
+
+    r = client.delete(f"/api/v1/cases/{case_id}", headers={"Authorization": "Bearer MAIN"})
+    assert r.status_code == 500
+    body = r.json()
+    assert body["code"] == "case_delete_failed"
+    # Evidence files must be untouched — the analyst's pcap must still exist.
+    assert pcap_file.exists(), "pcap must not be deleted when the DB delete fails"

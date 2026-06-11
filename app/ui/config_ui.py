@@ -252,12 +252,12 @@ def _render_llm_integration():
                     st.session_state.get("cfg_lm_api_key"),
                 )
                 if models:
-                    st.session_state["available_models"] = models
+                    st.session_state["available_models_lmstudio"] = models
                     st.success(f"Found {len(models)} models.")
                 else:
                     st.error("Could not fetch models. Check URL/Key.")
 
-        available = st.session_state.get("available_models", [])
+        available = st.session_state.get("available_models_lmstudio", [])
         current_model = st.session_state.get("cfg_lm_model", "")
         if available:
             index = available.index(current_model) if current_model in available else 0
@@ -274,9 +274,6 @@ def _render_llm_integration():
         with c2:
             if st.button("Test Connection"):
                 do_test = True
-        st.session_state["cfg_openai_model"] = st.text_input(
-            "Model", value=st.session_state.get("cfg_openai_model", C.OPENAI_MODEL_DEFAULT)
-        )
         st.session_state["cfg_openai_base_url"] = st.text_input(
             "Base URL (optional — blank = api.openai.com)",
             value=st.session_state.get("cfg_openai_base_url", ""),
@@ -289,10 +286,18 @@ def _render_llm_integration():
                     st.session_state.get("cfg_openai_api_key"),
                 )
                 if models:
-                    st.session_state["available_models"] = models
+                    st.session_state["available_models_openai"] = models
                     st.success(f"Found {len(models)} models.")
                 else:
                     st.error("Could not fetch models. Check Key/Base URL.")
+
+        available = st.session_state.get("available_models_openai", [])
+        current_model = st.session_state.get("cfg_openai_model", C.OPENAI_MODEL_DEFAULT)
+        if available:
+            index = available.index(current_model) if current_model in available else 0
+            st.session_state["cfg_openai_model"] = st.selectbox("Model", available, index=index)
+        else:
+            st.session_state["cfg_openai_model"] = st.text_input("Model", value=current_model)
 
     elif selected_provider == llm_providers.PROVIDER_ANTHROPIC:
         c1, c2 = st.columns([2, 1], vertical_alignment="bottom")

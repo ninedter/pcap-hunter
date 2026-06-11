@@ -6,7 +6,7 @@ from __future__ import annotations
 from datetime import datetime
 
 from app.api.feed import IOCFilter, query_iocs
-from app.database.models import IOC, Analysis, Case, IOCType, Severity
+from app.database.models import IOC, Analysis, Case, CaseStatus, IOCType, Severity
 from app.database.repository import CaseRepository
 
 
@@ -76,8 +76,6 @@ def test_query_iocs_min_score_filter(tmp_path):
 def test_min_score_filters_before_pagination(tmp_path):
     """Reproduces the 2026-06-11 live bug: 3 IOCs score >= 40, limit=2 must
     return 2 + a cursor-page of 1 — not a single row with no cursor."""
-    from app.database.models import CaseStatus
-
     repo = CaseRepository(db_path=str(tmp_path / "t.db"))
     repo.create_case(Case(id="feedcase", title="t", status=CaseStatus.IN_PROGRESS, severity=Severity.LOW))
     analysis = Analysis(case_id="feedcase", pcap_path="x.pcap", features={"artifacts": {}})
@@ -100,11 +98,9 @@ def test_min_score_filters_before_pagination(tmp_path):
 
 def test_duplicate_ioc_takes_max_severity_score(tmp_path):
     """The same indicator across analyses groups to one row with the max score."""
-    from app.database.models import CaseStatus
-
     repo = CaseRepository(db_path=str(tmp_path / "t.db"))
     repo.create_case(Case(id="feedcas2", title="t", status=CaseStatus.IN_PROGRESS, severity=Severity.LOW))
-    for sev in (Severity.LOW, Severity.CRITICAL):
+    for sev in (Severity.CRITICAL, Severity.LOW):
         a = Analysis(case_id="feedcas2", pcap_path="x.pcap", features={"artifacts": {}})
         a.iocs = [IOC(ioc_type=IOCType.IP, value="198.51.100.7", severity=sev)]
         repo.save_analysis(a)

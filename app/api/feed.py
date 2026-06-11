@@ -79,7 +79,7 @@ def query_iocs(repo: CaseRepository, filt: IOCFilter) -> list[dict[str, Any]]:
     if filt.min_score:
         sql += f" HAVING {_SCORE_CASE} >= ?"
         params.append(filt.min_score)
-    sql += " ORDER BY MAX(a.analyzed_at) DESC LIMIT ? OFFSET ?"
+    sql += " ORDER BY MAX(a.analyzed_at) DESC, i.value LIMIT ? OFFSET ?"
     params.extend([filt.limit, filt.offset])
 
     conn = repo._get_conn()

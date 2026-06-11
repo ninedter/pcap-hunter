@@ -2,14 +2,18 @@
 
 from __future__ import annotations
 
+import logging
 import os
 import pathlib
+import tempfile
 
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import FileResponse, JSONResponse
 
 from app.api.deps import get_repo, require_full_scope
 from app.api.queue import cancel_queued_job
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/v1/cases", tags=["ingress"])
 
@@ -32,10 +36,14 @@ def get_case_report(case_id: str, _scope=Depends(require_full_scope), repo=Depen
     if not case:
         raise HTTPException(status_code=404, detail="case_not_found")
 
+    latest = max(case.analyses, key=lambda a: a.analyzed_at) if case.analyses else None
     reports_dir = _reports_dir()
     pdf_path = reports_dir / f"{case_id}.pdf"
-    if not pdf_path.exists():
-        if not case.analyses:
+    cache_fresh = pdf_path.exists() and (latest is None or pdf_path.stat().st_mtime >= latest.analyzed_at.timestamp())
+    if not cache_fresh:
+        if latest is None:
+            # No analysis to render. A pre-existing cached file (orphaned by
+            # analysis deletion) still serves above via cache_fresh.
             raise HTTPException(
                 status_code=404,
                 detail={
@@ -44,7 +52,6 @@ def get_case_report(case_id: str, _scope=Depends(require_full_scope), repo=Depen
                     "detail": "Case has no persisted analysis to render.",
                 },
             )
-        analysis = max(case.analyses, key=lambda a: a.analyzed_at)
 
         # Lazy import — keeps the weasyprint stack off the API boot path (cold path only).
         from app.reports.pdf_generator import PDFReportGenerator, ReportConfig
@@ -61,15 +68,21 @@ def get_case_report(case_id: str, _scope=Depends(require_full_scope), repo=Depen
             )
         import pandas as pd
 
-        beacon_records = (analysis.features or {}).get("beacon_records") or []
+        beacon_records = (latest.features or {}).get("beacon_records") or []
+        beacon_df = None
+        if beacon_records:
+            try:
+                beacon_df = pd.DataFrame.from_records(beacon_records)
+            except Exception as exc:
+                logger.warning("Malformed beacon_records for case %s; omitting beacon table: %s", case_id, exc)
         report = generator.generate(
-            report_md=analysis.report or "",
-            features=analysis.features or {},
-            osint=analysis.osint or None,
-            yara_results=analysis.yara_results,
-            dns_analysis=analysis.dns_analysis,
-            tls_analysis=analysis.tls_analysis,
-            beacon_df=pd.DataFrame.from_records(beacon_records) if beacon_records else None,
+            report_md=latest.report or "",
+            features=latest.features or {},
+            osint=latest.osint or None,
+            yara_results=latest.yara_results,
+            dns_analysis=latest.dns_analysis,
+            tls_analysis=latest.tls_analysis,
+            beacon_df=beacon_df,
         )
         if report is None:
             raise HTTPException(
@@ -77,7 +90,16 @@ def get_case_report(case_id: str, _scope=Depends(require_full_scope), repo=Depen
                 detail={"code": "pdf_render_failed", "title": "Internal Server Error", "detail": "PDF render failed."},
             )
         reports_dir.mkdir(parents=True, exist_ok=True)
-        pdf_path.write_bytes(report.content)
+        # Atomic publish: write to a temp file then rename into place, so a
+        # concurrent reader never sees a torn/truncated pdf.
+        fd, tmp_name = tempfile.mkstemp(dir=reports_dir, suffix=".pdf.tmp")
+        try:
+            with os.fdopen(fd, "wb") as f:
+                f.write(report.content)
+            os.replace(tmp_name, pdf_path)
+        except BaseException:
+            os.unlink(tmp_name)
+            raise
 
     return FileResponse(
         path=str(pdf_path),

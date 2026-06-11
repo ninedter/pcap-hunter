@@ -2,12 +2,22 @@ from __future__ import annotations
 
 import logging
 import pathlib
+import threading
 import time
 from typing import Any
 
 import streamlit as st
 
 from app.utils.common import make_slug
+
+try:
+    # Stable location across Streamlit 1.3x–1.5x. Without attaching this
+    # context, widget updates from worker threads are silently dropped
+    # ("missing ScriptRunContext") and progress bars never move.
+    from streamlit.runtime.scriptrunner import add_script_run_ctx, get_script_run_ctx
+except ImportError:  # pragma: no cover — layout changed in some future Streamlit
+    add_script_run_ctx = None  # type: ignore[assignment]
+    get_script_run_ctx = None  # type: ignore[assignment]
 
 logger = logging.getLogger(__name__)
 
@@ -244,38 +254,51 @@ class BatchPhaseTracker:
 class _ThreadSafePhaseHandle:
     """Wraps a Streamlit PhaseHandle to be safe for use from worker threads.
 
-    The pipeline runner executes PyShark and Zeek in parallel via ThreadPoolExecutor.
-    Streamlit's PhaseHandle accesses ``st.session_state`` and widget delta generators,
-    which require the ScriptRunContext only available on the main script thread.
-    Calls from worker threads would raise exceptions that abort the analysis stage.
+    The pipeline runner executes stages in ThreadPoolExecutor workers (PyShark+Zeek,
+    then the DNS/TLS/beacon/carve fan-out). Streamlit widget updates require the
+    ScriptRunContext, which only the main script thread has by default — without
+    it, updates from worker threads are dropped and the progress bars freeze while
+    the analysis runs invisibly.
 
-    This wrapper catches and logs those exceptions so the analysis continues
-    even if progress UI updates fail from a thread.
+    The handle is always created on the main thread (see StreamlitProgressAdapter),
+    so we capture the context here and re-attach it to whichever worker thread
+    later calls ``set()``/``done()``. Exceptions are still swallowed so a UI
+    failure can never abort an analysis stage.
     """
 
     def __init__(self, inner: PhaseHandle) -> None:
         self._inner = inner
+        self._ctx = get_script_run_ctx() if get_script_run_ctx is not None else None
+
+    def _attach_ctx(self) -> None:
+        """Attach the captured ScriptRunContext to the calling thread (idempotent)."""
+        if self._ctx is not None and add_script_run_ctx is not None:
+            add_script_run_ctx(threading.current_thread(), self._ctx)
 
     def set(self, pct: float, msg: str = "") -> None:
         try:
+            self._attach_ctx()
             self._inner.set(pct, msg)
         except Exception:
             pass  # UI update failed from thread — analysis continues
 
     def done(self, msg: str = "Done") -> None:
         try:
+            self._attach_ctx()
             self._inner.done(msg)
         except Exception:
             pass
 
     def should_skip(self) -> bool:
         try:
+            self._attach_ctx()
             return self._inner.should_skip()
         except Exception:
             return False  # default: don't skip
 
     def is_done(self) -> bool:
         try:
+            self._attach_ctx()
             return self._inner.is_done()
         except Exception:
             return False

@@ -47,6 +47,10 @@ RUN echo "deb [signed-by=/usr/share/keyrings/zeek.gpg] https://download.opensuse
  && apt-get update && apt-get install -y --no-install-recommends zeek \
  && rm -rf /var/lib/apt/lists/*
 
+# The OBS package installs under /opt/zeek — put it on PATH so `which zeek`,
+# make doctor, and anything not using find_bin's fallback paths all work.
+ENV PATH="/opt/zeek/bin:${PATH}"
+
 WORKDIR /app
 COPY --from=builder /wheels /wheels
 COPY requirements.txt .

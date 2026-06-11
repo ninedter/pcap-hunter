@@ -405,9 +405,17 @@ class YARAScanner:
             return results
 
         if not self.is_available:
-            if phase:
-                phase.done("YARA not available.")
-            results["error"] = "YARA scanning not available"
+            # Distinguish "library missing" from "library fine, no rules loaded" —
+            # the latter is the default state (no rules ship with the app) and
+            # "not available" misleads users into debugging their install.
+            if YARA_AVAILABLE:
+                if phase:
+                    phase.done("No YARA rules configured — add a rules directory in Config.")
+                results["error"] = "no yara rules configured"
+            else:
+                if phase:
+                    phase.done("YARA not available.")
+                results["error"] = "YARA scanning not available"
             return results
 
         total = len(carved)

@@ -14,6 +14,9 @@ from app.database.repository import CaseRepository
 
 logger = logging.getLogger(__name__)
 
+# Wire-format warning code added by the worker when analysis persistence fails.
+WARNING_PERSISTENCE_FAILED = "analysis_persistence_failed"
+
 
 @dataclass
 class JobSubmission:
@@ -38,6 +41,17 @@ class JobQueue(ABC):
 
 class QueueFullError(Exception):
     """Raised when the queue's depth cap is exceeded."""
+
+
+def _sha256_file(path: str) -> str:
+    """Streaming SHA-256 of a file (used for Analysis.pcap_hash)."""
+    import hashlib
+
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1024 * 1024), b""):
+            h.update(chunk)
+    return h.hexdigest()
 
 
 def _worker_run(job_id: str, db_path: str, pcap_path: str, options_dict: dict) -> None:
@@ -72,6 +86,30 @@ def _worker_run(job_id: str, db_path: str, pcap_path: str, options_dict: dict) -
             progress=progress,
             heartbeat=lambda: repo.touch_job_heartbeat(job_id),
         )
+
+        # Persist the analysis so the case completes and IOCs reach the feed
+        # (mirrors app/ui/cases_tab.py:_quick_save_analysis). Persistence
+        # failures must not lose the pipeline result -> warn, keep analysis_id None.
+        from app.database.models import Analysis
+
+        try:
+            analysis = Analysis(
+                case_id=job.case_id if job else "",
+                pcap_path=pcap_path,
+                pcap_hash=_sha256_file(pcap_path),
+                packet_count=result.packet_count,
+                features=result.features,
+                dns_analysis=result.dns_analysis or None,
+                tls_analysis=result.tls_analysis or None,
+            )
+            if result.beacon_df_records:
+                analysis.features["beacon_records"] = result.beacon_df_records
+            analysis.iocs = repo.extract_iocs(analysis)
+            result.analysis_id = repo.save_analysis(analysis)
+        except Exception:
+            logger.exception("Job %s: analysis persistence failed", job_id)
+            result.warnings.append(WARNING_PERSISTENCE_FAILED)
+
         result_blob = json.dumps(result.to_dict()).encode("utf-8")
         repo.update_job_status(job_id, JS.DONE, result_json=result_blob)
     except Exception as exc:

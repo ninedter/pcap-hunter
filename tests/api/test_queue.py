@@ -147,3 +147,40 @@ def test_cancel_running_job_returns_false(tmp_path):
     ok = cancel_queued_job(repo, job_id)
     assert ok is False
     assert repo.get_job(job_id).status == JobStatus.RUNNING
+
+
+FIXTURE = pathlib.Path(__file__).parent.parent / "fixtures" / "tiny.pcap"
+
+
+@pytest.mark.skipif(not FIXTURE.exists(), reason="fixture missing")
+def test_worker_persists_analysis_and_iocs(tmp_path):
+    """_worker_run must save an Analysis row + IOCs and fill analysis_id in the blob."""
+    import json
+
+    from app.api.queue import _worker_run
+    from app.database.models import Case, CaseStatus, Job, Severity
+    from app.database.repository import CaseRepository
+
+    db = str(tmp_path / "t.db")
+    repo = CaseRepository(db_path=db)
+    repo.create_case(Case(id="cafe0001", title="persist-test", status=CaseStatus.IN_PROGRESS, severity=Severity.LOW))
+    job_id = repo.create_job(Job(case_id="cafe0001", pcap_path=str(FIXTURE), options_json="{}"))
+
+    _worker_run(job_id, db, str(FIXTURE), {"osint_enabled": False, "llm_enabled": False})
+
+    job = repo.get_job(job_id)
+    assert job.status.value == "done"
+    result = json.loads(job.result_json)
+    assert result["analysis_id"], "worker must persist the analysis and report its id"
+
+    analysis = repo.get_analysis(result["analysis_id"])
+    assert analysis is not None
+    assert analysis.case_id == "cafe0001"
+    assert analysis.packet_count == 20
+    assert analysis.pcap_hash and len(analysis.pcap_hash) == 64
+    assert analysis.features.get("flows"), "features must be persisted"
+
+    case = repo.get_case("cafe0001")
+    assert len(case.analyses) == 1, "case must show the persisted analysis"
+    # tiny.pcap has 10.0.0.x endpoints -> extract_iocs yields ip IOCs
+    assert analysis.iocs, "heuristic IOC extraction must run on the API path"

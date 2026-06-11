@@ -59,6 +59,8 @@ def test_method_not_allowed_is_problem_json(client):
     assert r.headers["content-type"].startswith("application/problem+json")
     assert r.json()["status"] == 405
     assert "GET" in r.headers.get("allow", "")
+    assert r.json()["code"] == "method_not_allowed"
+    assert r.json()["title"] == "Method Not Allowed"
 
 
 def test_401_includes_www_authenticate(client):

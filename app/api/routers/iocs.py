@@ -64,7 +64,8 @@ def _http_date(iso_ts: str | None) -> str | None:
     except ValueError:
         return None
     if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
+        # Rows are written by naive-local datetime.now() — interpret as local time.
+        dt = dt.astimezone()
     return format_datetime(dt.astimezone(timezone.utc), usegmt=True)
 
 

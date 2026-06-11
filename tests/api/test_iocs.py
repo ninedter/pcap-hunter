@@ -173,6 +173,21 @@ def test_iocs_pagination(client):
     assert body1["iocs"][0]["value"] != body2["iocs"][0]["value"]
 
 
+# ── _http_date unit test ────────────────────────────────────────────────────
+
+
+def test_http_date_treats_naive_as_local():
+    from datetime import datetime, timezone
+    from email.utils import parsedate_to_datetime
+
+    from app.api.routers.iocs import _http_date
+
+    naive = datetime(2026, 6, 11, 13, 12, 46)
+    out = _http_date(naive.isoformat())
+    expected = naive.astimezone(timezone.utc)  # local -> utc
+    assert parsedate_to_datetime(out) == expected
+
+
 # ── Last-Modified (RFC 7231) ────────────────────────────────────────────────
 
 

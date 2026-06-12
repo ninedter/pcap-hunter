@@ -26,7 +26,7 @@ from __future__ import annotations
 import math
 from pathlib import Path
 
-from PIL import Image, ImageDraw
+from PIL import Image, ImageChops, ImageDraw
 
 OUT_DIR = Path(__file__).resolve().parent.parent / "app" / "static"
 BRAND_DIR = Path(__file__).resolve().parent.parent / "docs" / "brand"
@@ -41,6 +41,8 @@ RED_ALERT = (233, 69, 96, 255)  # #e94560
 WHITE = (255, 255, 255, 255)
 LIGHT_GRID = (233, 238, 245, 255)  # #e9eef5
 DARK_BG = (17, 20, 32, 255)  # dark variant background
+STEEL_BLUE = (122, 162, 224, 255)  # dark-theme ring / handle accent
+STEEL_DEEP = (70, 95, 150, 255)  # dark-theme depth stroke
 TRANSPARENT = (0, 0, 0, 0)
 
 
@@ -78,15 +80,16 @@ def _draw_logo(size: int, *, dark: bool = False, transparent: bool = True) -> Im
         cy + r * math.sin(math.radians(45)) - p(4) * math.sin(math.radians(45)),
     )
     handle_end = (p(225), p(225))
-    # Thick cap: draw two lines — outer (deep navy) + thinner inner (mid navy)
+    # Thick cap: draw two lines — outer (deep) + thinner inner (accent).
+    # Dark variant needs light strokes; navy is invisible on a dark page.
     d.line(
         [handle_start, handle_end],
-        fill=NAVY_DEEP,
+        fill=STEEL_DEEP if dark else NAVY_DEEP,
         width=int(p(22)),
     )
     d.line(
         [handle_start, handle_end],
-        fill=NAVY_BLUE,
+        fill=STEEL_BLUE if dark else NAVY_BLUE,
         width=int(p(10)),
     )
 
@@ -165,26 +168,34 @@ def _draw_logo(size: int, *, dark: bool = False, transparent: bool = True) -> Im
     # Center marker
     dot(cx, cy, p(3), RED_ALERT)
 
-    # Mask inner scene to the lens circle
+    # Mask the inner scene to the lens circle, then composite it OVER the
+    # lens disc. paste() with a region mask would *replace* lens pixels with
+    # the scene's mostly-transparent pixels, erasing the disc — that bug
+    # shipped a see-through lens whose dark strokes vanished on dark themes.
     mask = Image.new("L", (S, S), 0)
     ImageDraw.Draw(mask).ellipse(
         [cx - r + int(p(6)), cy - r + int(p(6)), cx + r - int(p(6)), cy + r - int(p(6))],
         fill=255,
     )
-    img.paste(inner, (0, 0), mask)
+    inner.putalpha(ImageChops.multiply(inner.getchannel("A"), mask))
+    img.alpha_composite(inner)
 
     # --- Lens ring (outer) ---
-    d.ellipse(
-        [cx - r, cy - r, cx + r, cy + r],
-        outline=NAVY_BLUE,
-        width=int(ring_w),
-    )
+    # Built from two filled circles: ellipse(outline=, width=) renders
+    # concentric 1px ellipses whose radial gaps survive downsampling as
+    # patchy translucency, so parts of the ring faded into the page.
+    def annulus(radius: float, stroke: float, color: tuple[int, int, int, int]) -> None:
+        layer = Image.new("RGBA", (S, S), TRANSPARENT)
+        ld = ImageDraw.Draw(layer)
+        ro = radius + stroke / 2
+        ri = radius - stroke / 2
+        ld.ellipse([cx - ro, cy - ro, cx + ro, cy + ro], fill=color)
+        ld.ellipse([cx - ri, cy - ri, cx + ri, cy + ri], fill=TRANSPARENT)
+        img.alpha_composite(layer)
+
+    annulus(r, ring_w, STEEL_BLUE if dark else NAVY_BLUE)
     # Inner highlight ring for depth
-    d.ellipse(
-        [cx - r + int(ring_w / 2), cy - r + int(ring_w / 2), cx + r - int(ring_w / 2), cy + r - int(ring_w / 2)],
-        outline=NAVY_DEEP,
-        width=max(1, int(ring_w / 6)),
-    )
+    annulus(r - ring_w / 2, max(1.0, ring_w / 6), STEEL_DEEP if dark else NAVY_DEEP)
 
     # Downsample to target size for anti-aliasing
     return img.resize((size, size), Image.LANCZOS)

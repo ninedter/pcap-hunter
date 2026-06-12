@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 import pandas as pd
 import streamlit as st
 
@@ -58,6 +60,30 @@ def inject_css():
         """,
         unsafe_allow_html=True,
     )
+
+
+def resolve_logo_path(static_dir: Path, theme_type: str | None) -> Path | None:
+    """Pick the theme-appropriate header logo asset.
+
+    The light-background logo uses dark navy strokes that are nearly
+    invisible on the dark theme (the header icon read as "cut off"), so
+    each theme gets its own raster variant.
+
+    Args:
+        static_dir: Directory containing the generated logo PNGs.
+        theme_type: Active Streamlit theme type ("light"/"dark"), or None
+            when the runtime doesn't expose it.
+
+    Returns:
+        Path to the best available logo, or None if no asset exists.
+    """
+    light = static_dir / "logo-256.png"
+    dark = static_dir / "logo-dark-256.png"
+    preferred, fallback = (dark, light) if (theme_type or "").lower() == "dark" else (light, dark)
+    for candidate in (preferred, fallback):
+        if candidate.is_file():
+            return candidate
+    return None
 
 
 def render_export_buttons(data, prefix: str, key_suffix: str = "", is_dataframe: bool = False):

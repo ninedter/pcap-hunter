@@ -69,6 +69,7 @@ from app.ui.layout import (
     render_tls_certificates,
     render_yara_results,
     render_zeek,
+    resolve_logo_path,
 )
 from app.utils.common import ensure_dir, find_bin, is_public_ipv4, make_slug, uniq_sorted
 from app.utils.network_utils import pick_top_public_ips
@@ -237,7 +238,6 @@ def _run_single_pcap_pipeline(
 # of the current working directory (Docker vs. local vs. Streamlit cloud).
 _STATIC_DIR = pathlib.Path(__file__).resolve().parent / "static"
 _FAVICON_PATH = _STATIC_DIR / "favicon-32.png"
-_LOGO_PATH = _STATIC_DIR / "logo-256.png"
 
 st.set_page_config(
     page_title=C.APP_NAME,
@@ -249,10 +249,15 @@ inject_css()
 
 # Header: logo + title side-by-side. Narrow left column for the mark so the
 # wordmark dominates and the layout still looks right on smaller screens.
+# The mark is theme-aware: the light-bg variant's navy strokes vanish on the
+# dark theme (the icon read as "cut off"), so each theme has its own PNG.
+# st.context.theme needs Streamlit >= 1.46 — fall back to the light asset.
+_theme = getattr(getattr(st, "context", None), "theme", None)
+_logo_path = resolve_logo_path(_STATIC_DIR, getattr(_theme, "type", None))
 _hdr_logo, _hdr_title = st.columns([1, 11], gap="small", vertical_alignment="center")
 with _hdr_logo:
-    if _LOGO_PATH.is_file():
-        st.image(str(_LOGO_PATH), width=72)
+    if _logo_path is not None:
+        st.image(str(_logo_path), width=72)
 with _hdr_title:
     st.title(C.APP_NAME)
 

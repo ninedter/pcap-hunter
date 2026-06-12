@@ -6,7 +6,7 @@ from __future__ import annotations
 from datetime import datetime
 
 from app.api.feed import IOCFilter, query_iocs
-from app.database.models import IOC, Analysis, Case, IOCType, Severity
+from app.database.models import IOC, Analysis, Case, CaseStatus, IOCType, Severity
 from app.database.repository import CaseRepository
 
 
@@ -71,3 +71,41 @@ def test_query_iocs_min_score_filter(tmp_path):
     rows = query_iocs(repo, IOCFilter(min_score=75))
     assert len(rows) == 1
     assert rows[0]["value"] == "1.2.3.4"
+
+
+def test_min_score_filters_before_pagination(tmp_path):
+    """Reproduces the 2026-06-11 live bug: 3 IOCs score >= 40, limit=2 must
+    return 2 + a cursor-page of 1 — not a single row with no cursor."""
+    repo = CaseRepository(db_path=str(tmp_path / "t.db"))
+    repo.create_case(Case(id="feedcase", title="t", status=CaseStatus.IN_PROGRESS, severity=Severity.LOW))
+    analysis = Analysis(case_id="feedcase", pcap_path="x.pcap", features={"artifacts": {}})
+    analysis.iocs = [
+        IOC(ioc_type=IOCType.DOMAIN, value="low.example", severity=Severity.LOW),  # 25
+        IOC(ioc_type=IOCType.DOMAIN, value="high.example", severity=Severity.HIGH),  # 75
+        IOC(ioc_type=IOCType.HASH, value="c0" * 32, severity=Severity.MEDIUM),  # 50
+        IOC(ioc_type=IOCType.IP, value="203.0.113.66", severity=Severity.CRITICAL),  # 100
+    ]
+    repo.save_analysis(analysis)
+
+    page1 = query_iocs(repo, IOCFilter(min_score=40, limit=2, offset=0))
+    assert len(page1) == 2
+    page2 = query_iocs(repo, IOCFilter(min_score=40, limit=2, offset=2))
+    assert len(page2) == 1
+    assert all(r["score"] >= 40 for r in page1 + page2)
+    values = {r["value"] for r in page1 + page2}
+    assert values == {"high.example", "c0" * 32, "203.0.113.66"}
+
+
+def test_duplicate_ioc_takes_max_severity_score(tmp_path):
+    """The same indicator across analyses groups to one row with the max score."""
+    repo = CaseRepository(db_path=str(tmp_path / "t.db"))
+    repo.create_case(Case(id="feedcas2", title="t", status=CaseStatus.IN_PROGRESS, severity=Severity.LOW))
+    for sev in (Severity.CRITICAL, Severity.LOW):
+        a = Analysis(case_id="feedcas2", pcap_path="x.pcap", features={"artifacts": {}})
+        a.iocs = [IOC(ioc_type=IOCType.IP, value="198.51.100.7", severity=sev)]
+        repo.save_analysis(a)
+
+    rows = query_iocs(repo, IOCFilter())
+    row = next(r for r in rows if r["value"] == "198.51.100.7")
+    assert row["score"] == 100
+    assert row["severity"] == "critical"

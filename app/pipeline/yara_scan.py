@@ -8,6 +8,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from app import config as C
 from app.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -169,10 +170,12 @@ class YARAScanner:
         if rules_dirs:
             self._rules_dirs = [Path(d) for d in rules_dirs if Path(d).exists()]
         else:
-            # Use default rules directory
-            default_dir = Path(__file__).parent.parent / "data" / "yara"
-            if default_dir.exists():
-                self._rules_dirs = [default_dir]
+            # Check default rule locations in priority order; use all that exist.
+            candidates = [
+                Path(__file__).parent.parent / "data" / "yara",
+                C.DATA_DIR / "yara_rules",
+            ]
+            self._rules_dirs = [d for d in candidates if d.exists()]
 
         # Load rules on init
         self.load_rules()
@@ -405,9 +408,20 @@ class YARAScanner:
             return results
 
         if not self.is_available:
-            if phase:
-                phase.done("YARA not available.")
-            results["error"] = "YARA scanning not available"
+            # Distinguish "library missing" from "library fine, no rules loaded" —
+            # the latter is the default state (no rules ship with the app) and
+            # "not available" misleads users into debugging their install.
+            if YARA_AVAILABLE:
+                if phase:
+                    phase.done(
+                        "No YARA rules configured — set a rules directory in Config, "
+                        "or drop .yar files into data/yara_rules."
+                    )
+                results["error"] = "no yara rules configured"
+            else:
+                if phase:
+                    phase.done("YARA not available.")
+                results["error"] = "YARA scanning not available"
             return results
 
         total = len(carved)

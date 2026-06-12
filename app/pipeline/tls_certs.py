@@ -13,6 +13,7 @@ import hashlib
 import logging
 import re
 import subprocess
+import threading
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -20,6 +21,7 @@ from typing import Any
 
 import pandas as pd
 
+from app import config as C
 from app.pipeline.state import PhaseHandle
 from app.utils.common import find_bin
 
@@ -169,80 +171,129 @@ def extract_certificates_tshark(pcap_path: str | Path, phase: PhaseHandle | None
     ]
 
     try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
-        if result.returncode != 0:
-            logger.warning("tshark returned %s: %s", result.returncode, result.stderr)
-            return []
-    except subprocess.TimeoutExpired:
-        logger.error("tshark timed out during certificate extraction")
-        return []
+        # Stream stdout line by line: each line can carry hex-encoded DER
+        # certificates, so buffering the full output is the largest allocation
+        # in the pipeline on TLS-heavy captures.
+        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     except Exception as e:
         logger.error("Failed to run tshark: %s", e)
         return []
 
-    certificates = []
-    lines = result.stdout.strip().split("\n")
+    timed_out = threading.Event()
 
-    for i, line in enumerate(lines):
-        if not line.strip():
-            continue
+    def _kill() -> None:
+        timed_out.set()
+        proc.kill()
 
-        if phase and i % 10 == 0:
-            pct = 10 + int((i / len(lines)) * 60)
-            phase.set(pct, f"Processing certificate {i + 1}/{len(lines)}...")
+    watchdog = threading.Timer(C.TLS_EXTRACT_TIMEOUT_SECONDS, _kill)
+    watchdog.start()
 
+    # Drain stderr on a daemon thread so a chatty tshark can't fill the OS pipe
+    # buffer and stall the stdout loop; the collected text feeds the rc!=0 warning.
+    stderr_lines: list[str] = []
+
+    def _drain_stderr() -> None:
         try:
-            parts = line.split("|")
-            if len(parts) < 5:
+            for err_line in proc.stderr:
+                stderr_lines.append(err_line)
+        except (OSError, ValueError):  # pragma: no cover - pipe closed during kill
+            pass
+
+    stderr_thread: threading.Thread | None = None
+    if proc.stderr is not None:
+        stderr_thread = threading.Thread(target=_drain_stderr, name="tls-stderr-drain", daemon=True)
+        stderr_thread.start()
+
+    certificates = []
+    i = -1
+    try:
+        for raw_line in proc.stdout:
+            i += 1
+            line = raw_line.rstrip("\n")
+            if not line.strip():
                 continue
 
-            # parts[0] is frame_num (unused)
-            src_ip = parts[1] if len(parts) > 1 else ""
-            dst_ip = parts[2] if len(parts) > 2 else ""
-            dst_port = int(parts[3]) if len(parts) > 3 and parts[3].isdigit() else 0
-            cert_hex = parts[4] if len(parts) > 4 else ""
-            server_name = parts[5] if len(parts) > 5 else ""
+            if phase and i % 10 == 0:
+                # Total line count is unknown while streaming: capped monotone progression.
+                phase.set(min(70, 10 + i // 10), f"Processing certificate {i + 1}...")
 
-            if not cert_hex:
+            try:
+                parts = line.split("|")
+                if len(parts) < 5:
+                    continue
+
+                # parts[0] is frame_num (unused)
+                src_ip = parts[1] if len(parts) > 1 else ""
+                dst_ip = parts[2] if len(parts) > 2 else ""
+                dst_port = int(parts[3]) if len(parts) > 3 and parts[3].isdigit() else 0
+                cert_hex = parts[4] if len(parts) > 4 else ""
+                server_name = parts[5] if len(parts) > 5 else ""
+
+                if not cert_hex:
+                    continue
+
+                # Parse certificate data (hex encoded)
+                cert_bytes = bytes.fromhex(cert_hex.replace(":", "").replace(" ", ""))
+
+                # Calculate fingerprints
+                sha256_fp = hashlib.sha256(cert_bytes).hexdigest()
+                sha1_fp = hashlib.sha1(cert_bytes).hexdigest()
+
+                # Extract certificate details using cryptography library (with openssl fallback)
+                cert_info = _parse_cert_with_cryptography(cert_bytes)
+
+                cert = Certificate(
+                    serial=cert_info.get("serial", ""),
+                    subject_cn=cert_info.get("subject_cn", ""),
+                    subject_o=cert_info.get("subject_o", ""),
+                    issuer_cn=cert_info.get("issuer_cn", ""),
+                    issuer_o=cert_info.get("issuer_o", ""),
+                    not_before=cert_info.get("not_before"),
+                    not_after=cert_info.get("not_after"),
+                    fingerprint_sha256=sha256_fp,
+                    fingerprint_sha1=sha1_fp,
+                    sans=cert_info.get("sans", []),
+                    key_type=cert_info.get("key_type", ""),
+                    key_bits=cert_info.get("key_bits", 0),
+                    signature_algorithm=cert_info.get("sig_alg", ""),
+                    server_name=server_name,
+                    src_ip=src_ip,
+                    dst_ip=dst_ip,
+                    dst_port=dst_port,
+                )
+
+                # Analyze certificate
+                _analyze_certificate(cert)
+                certificates.append(cert)
+
+            except Exception as e:
+                logger.debug("Failed to parse certificate line: %s", e)
                 continue
 
-            # Parse certificate data (hex encoded)
-            cert_bytes = bytes.fromhex(cert_hex.replace(":", "").replace(" ", ""))
+        # Watchdog is still armed here, so a child that closed stdout but
+        # refuses to exit is killed rather than hanging the pool thread.
+        proc.wait()
+    finally:
+        watchdog.cancel()
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait()
 
-            # Calculate fingerprints
-            sha256_fp = hashlib.sha256(cert_bytes).hexdigest()
-            sha1_fp = hashlib.sha1(cert_bytes).hexdigest()
+    # The process is dead here (waited or killed), so stderr has hit EOF and the
+    # drain thread is finishing; the timeout is a guard against pathological pipes.
+    if stderr_thread is not None:
+        stderr_thread.join(timeout=5)
 
-            # Extract certificate details using cryptography library (with openssl fallback)
-            cert_info = _parse_cert_with_cryptography(cert_bytes)
+    if timed_out.is_set():
+        logger.error("tshark timed out during certificate extraction")
+        return []
 
-            cert = Certificate(
-                serial=cert_info.get("serial", ""),
-                subject_cn=cert_info.get("subject_cn", ""),
-                subject_o=cert_info.get("subject_o", ""),
-                issuer_cn=cert_info.get("issuer_cn", ""),
-                issuer_o=cert_info.get("issuer_o", ""),
-                not_before=cert_info.get("not_before"),
-                not_after=cert_info.get("not_after"),
-                fingerprint_sha256=sha256_fp,
-                fingerprint_sha1=sha1_fp,
-                sans=cert_info.get("sans", []),
-                key_type=cert_info.get("key_type", ""),
-                key_bits=cert_info.get("key_bits", 0),
-                signature_algorithm=cert_info.get("sig_alg", ""),
-                server_name=server_name,
-                src_ip=src_ip,
-                dst_ip=dst_ip,
-                dst_port=dst_port,
-            )
-
-            # Analyze certificate
-            _analyze_certificate(cert)
-            certificates.append(cert)
-
-        except Exception as e:
-            logger.debug("Failed to parse certificate line: %s", e)
-            continue
+    # A killed process exits non-zero and tshark sometimes writes warnings to
+    # stderr with rc=0, so only treat a non-zero rc as failure when it produced
+    # no parseable certificates at all.
+    if proc.returncode != 0 and not certificates:
+        logger.warning("tshark returned %s: %s", proc.returncode, "".join(stderr_lines).strip())
+        return []
 
     if phase:
         phase.set(80, f"Found {len(certificates)} certificates")
@@ -505,7 +556,10 @@ def extract_from_zeek_ssl(zeek_tables: dict[str, pd.DataFrame]) -> list[dict[str
         return []
 
     certs = []
-    for _, row in ssl_df.iterrows():
+    # to_dict("records") is much faster than iterrows(); the body only uses
+    # row.get(...), which behaves identically on dicts (NaN values still
+    # stringify to "nan" and non-numeric ports still raise into the except).
+    for row in ssl_df.to_dict(orient="records"):
         try:
             cert = {
                 "src": str(row.get("id.orig_h", row.get("id_orig_h", ""))),

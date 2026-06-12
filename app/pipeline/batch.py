@@ -71,6 +71,16 @@ class PCAPResult:
     filename: str
     features: dict[str, Any] = field(default_factory=dict)
     zeek_tables: dict[str, pd.DataFrame] = field(default_factory=dict)
+    # Actual on-disk zeek log paths for this run (per-run subdir of ZEEK_DIR) —
+    # used for JA3 extraction instead of reconstructing paths from the shared base.
+    zeek_log_paths: dict[str, str] = field(default_factory=dict)
+    # rDNS results ({ip: hostname}) resolved once inside the pipeline —
+    # reused for the dashboard hostname display instead of re-resolving.
+    rdns_map: dict[str, str] = field(default_factory=dict)
+    # Carved HTTP payload metadata dicts (time/tcp_stream/content_type/
+    # content_length/sha256/path) — feeds the carved-files UI panel and the
+    # LLM report context.
+    carved_items: list[dict] = field(default_factory=list)
     osint: dict[str, Any] = field(default_factory=dict)
     beacon_df: pd.DataFrame | None = None
     dns_analysis: dict[str, Any] = field(default_factory=dict)
@@ -152,16 +162,19 @@ def correlate_results(results: list[PCAPResult]) -> CorrelationResult:
         flows = r.features.get("flows", [])
         total_flows += len(flows)
 
-        # Track time range
+        # Track time range — prefer the true flow extent (first_ts/last_ts
+        # survive the per-flow sample cap); fall back to sampled timestamps
+        # for legacy data (same pattern as charts.plot_flow_timeline).
         for flow in flows:
             pkt_times = flow.get("pkt_times", [])
-            if pkt_times:
-                flow_min = min(pkt_times)
-                flow_max = max(pkt_times)
-                if earliest_ts is None or flow_min < earliest_ts:
-                    earliest_ts = flow_min
-                if latest_ts is None or flow_max > latest_ts:
-                    latest_ts = flow_max
+            first_ts = flow.get("first_ts")
+            last_ts = flow.get("last_ts")
+            flow_min = first_ts if first_ts is not None else (min(pkt_times) if pkt_times else None)
+            flow_max = last_ts if last_ts is not None else (max(pkt_times) if pkt_times else None)
+            if flow_min is not None and (earliest_ts is None or flow_min < earliest_ts):
+                earliest_ts = flow_min
+            if flow_max is not None and (latest_ts is None or flow_max > latest_ts):
+                latest_ts = flow_max
 
     # Find shared entities (in 2+ files)
     shared_ips = {ip: files for ip, files in ip_files.items() if len(files) > 1}

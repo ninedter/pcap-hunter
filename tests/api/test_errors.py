@@ -44,9 +44,29 @@ def test_error_response_is_problem_json(client):
 
 
 def test_validation_error_is_problem_json(client):
-    r = client.get("/api/v1/cases/x", headers={"Authorization": "Bearer MAIN"})
-    # 404 from get_case, but the path itself is valid; this just confirms shape
+    r = client.get("/api/v1/iocs.json?min_score=200", headers={"Authorization": "Bearer MAIN"})
+    assert r.status_code == 422
     assert r.headers["content-type"].startswith("application/problem+json")
+    body = r.json()
+    assert body["code"] == "validation_error"
+    assert body["status"] == 422
+    assert isinstance(body["errors"], list) and body["errors"]
+
+
+def test_method_not_allowed_is_problem_json(client):
+    r = client.delete("/api/v1/iocs.json", headers={"Authorization": "Bearer MAIN"})
+    assert r.status_code == 405
+    assert r.headers["content-type"].startswith("application/problem+json")
+    assert r.json()["status"] == 405
+    assert "GET" in r.headers.get("allow", "")
+    assert r.json()["code"] == "method_not_allowed"
+    assert r.json()["title"] == "Method Not Allowed"
+
+
+def test_401_includes_www_authenticate(client):
+    r = client.get("/api/v1/iocs.json")
+    assert r.status_code == 401
+    assert r.headers.get("www-authenticate") == "Bearer"
 
 
 def test_error_includes_request_id_when_provided(client):

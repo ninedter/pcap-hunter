@@ -26,6 +26,8 @@ SIGNAL_WEIGHTS = {
     "expired_cert": 0.04,
     "yara_match": 0.08,
     "flow_asymmetry": 0.04,
+    "shodan_vulns": 0.10,
+    "shodan_exposure": 0.04,
 }
 
 VERDICT_THRESHOLDS = {
@@ -109,6 +111,19 @@ def _collect_ip_signals(
     if isinstance(abuse_score, (int, float)) and abuse_score > 0:
         signals.append(CorrelationSignal("abuseipdb", abuse_score, abuse_score / 100, "abuseipdb"))
 
+    # Shodan — host JSON carries top-level "vulns" (CVE ids) and "ports".
+    # Failed queries store {"error": ...} (Shodan API) or {"_error": ...} (_j helper) — skip those.
+    shodan = ip_osint.get("shodan", {})
+    if isinstance(shodan, dict) and shodan and "error" not in shodan and "_error" not in shodan:
+        vulns = shodan.get("vulns") or []
+        ports = shodan.get("ports") or []
+        if isinstance(vulns, (list, tuple)) and vulns:
+            vuln_score = min(0.3 + 0.1 * len(vulns), 1.0)
+            signals.append(CorrelationSignal("shodan_vulns", f"{len(vulns)} CVEs", vuln_score, "shodan"))
+        if isinstance(ports, (list, tuple)) and len(ports) >= 10:
+            exposure_score = min(len(ports) / 30, 0.8)
+            signals.append(CorrelationSignal("shodan_exposure", f"{len(ports)} open ports", exposure_score, "shodan"))
+
     # Beacon score — threshold raised to 0.5 to reduce false positives from
     # benign periodic traffic (ICMP health-checks, keep-alives, NTP).
     if ip in beacon_lookup and beacon_lookup[ip] > 0.5:
@@ -174,7 +189,7 @@ def _collect_domain_signals(
 # signals need corroboration; contextual signals alone cap at "medium".
 _TIER1_DEFINITIVE = {"vt_detections", "greynoise_malicious"}
 _TIER2_BEHAVIOURAL = {"beacon_score", "flow_asymmetry", "dns_tunneling", "dga_domain"}
-_TIER3_CONTEXTUAL = {"abuseipdb", "self_signed_cert", "expired_cert", "yara_match"}
+_TIER3_CONTEXTUAL = {"abuseipdb", "self_signed_cert", "expired_cert", "yara_match", "shodan_vulns", "shodan_exposure"}
 
 # Strong-signal floors — a single definitive signal sets a minimum score
 # regardless of the rest of the formula.
@@ -253,11 +268,11 @@ def correlate_indicators(
     beacon_lookup: dict[str, float] = {}
     if beacon_df is not None:
         try:
-            for _, row in beacon_df.iterrows():
-                dst = row.get("dst", "")
-                score = row.get("score", 0)
-                if dst and score > 0:
-                    beacon_lookup[dst] = max(beacon_lookup.get(dst, 0), score)
+            # Vectorized max-score-per-dst (rank_beaconing emits "dst"/"score";
+            # dst can repeat across src/port combos). Keeps only truthy dsts
+            # with positive scores, same as the previous row-by-row loop.
+            valid = beacon_df[beacon_df["dst"].astype(bool) & (beacon_df["score"] > 0)]
+            beacon_lookup = valid.groupby("dst")["score"].max().to_dict()
         except Exception:
             pass
 

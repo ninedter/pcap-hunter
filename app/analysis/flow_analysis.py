@@ -121,8 +121,14 @@ def detect_flow_asymmetry(flows: list[dict[str, Any]]) -> list[FlowAsymmetryResu
         pkt_lens = flow.get("pkt_lens", [])
         count = flow.get("count", 0)
 
-        # Calculate bytes from packet lengths if available
-        if pkt_lens:
+        # Prefer the true byte total tracked by pyshark_pass — it survives the
+        # per-flow sample cap, while sum(pkt_lens) undercounts capped flows.
+        # Fall back to summing packet lengths (legacy data without the field),
+        # then to a per-packet estimate.
+        flow_bytes = flow.get("bytes")
+        if flow_bytes:
+            total_bytes = flow_bytes
+        elif pkt_lens:
             total_bytes = sum(pkt_lens)
         else:
             total_bytes = count * 800  # estimate 800 bytes per packet

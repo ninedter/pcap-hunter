@@ -13,14 +13,17 @@ import uuid
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, Request
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from starlette.exceptions import HTTPException as StarletteHTTPException
 
+from app.api.auth import Scope
 from app.api.deps import get_key_repo, get_settings, get_usage_tracker
 from app.api.queue import recover_stale_running_jobs
 from app.api.routers import admin, cases, health, iocs, jobs, pcaps
-from app.api.settings import NoKeysConfiguredError
+from app.api.settings import FULL_SCOPE_RECOVERY_HINT, NoKeysConfiguredError
 
 logger = logging.getLogger(__name__)
 
@@ -73,10 +76,15 @@ async def _gc_loop() -> None:
     settings = get_settings()
     uploads = pathlib.Path(os.environ.get("PCAP_HUNTER_API_UPLOADS_DIR", "data/api_uploads"))
     artifacts = pathlib.Path(os.environ.get("PCAP_HUNTER_API_ARTIFACTS_DIR", "data/carved"))
+    reports = pathlib.Path(
+        os.environ.get("PCAP_HUNTER_API_REPORTS_DIR") or os.environ.get("PCAP_HUNTER_REPORTS_DIR", "data/reports")
+    )
 
     while True:
         try:
-            gc_sweep(repo=get_repo(), settings=settings, uploads_dir=uploads, artifacts_dir=artifacts)
+            gc_sweep(
+                repo=get_repo(), settings=settings, uploads_dir=uploads, artifacts_dir=artifacts, reports_dir=reports
+            )
         except Exception:
             logger.exception("gc_sweep failed")
         await asyncio.sleep(3600)
@@ -88,10 +96,12 @@ def _title_for_status(status: int) -> str:
         401: "Unauthorized",
         403: "Forbidden",
         404: "Not Found",
+        405: "Method Not Allowed",
         409: "Conflict",
         410: "Gone",
         413: "Payload Too Large",
         415: "Unsupported Media Type",
+        422: "Unprocessable Entity",
         429: "Too Many Requests",
         500: "Internal Server Error",
         503: "Service Unavailable",
@@ -131,6 +141,15 @@ def _sanitize_request_id(value: str) -> str:
     return _REQUEST_ID_RE.sub("", value)[:_REQUEST_ID_MAX_LEN]
 
 
+def _request_id_of(request: Request) -> str:
+    """Sanitized request ID stored by the middleware, or sanitize the raw header if it hasn't run yet."""
+    rid = getattr(request.state, "request_id", None) or ""
+    if not rid:
+        raw = request.headers.get("X-Request-ID", "")
+        rid = _sanitize_request_id(raw) if raw else ""
+    return rid
+
+
 def create_app() -> FastAPI:
     """Build the FastAPI app. Reads APISettings from env (refuses to start without keys)."""
     settings = get_settings()
@@ -141,6 +160,25 @@ def create_app() -> FastAPI:
         raise NoKeysConfiguredError(
             "No auth keys configured. Set PCAP_HUNTER_API_KEY / PCAP_HUNTER_FEED_KEY "
             "env vars, or create at least one DB-backed key before starting."
+        )
+
+    # Make app.* logs (audit middleware, repository, worker stages) visible under
+    # uvicorn, which configures only its own loggers.
+    from app.utils.logger import get_logger
+
+    get_logger("app")
+
+    if not settings.main_key and key_repo.count_active_keys(scope=Scope.FULL.value) == 0:
+        logger.warning(
+            "No full-scope auth source configured (no PCAP_HUNTER_API_KEY env var and no active "
+            "full-scope DB key) — ingress and admin endpoints will reject every request until one exists. %s",
+            FULL_SCOPE_RECOVERY_HINT,
+        )
+    if not settings.main_key and not settings.feed_key:
+        logger.warning(
+            "Booting without env-var API keys — auth relies entirely on %d DB-backed key(s). "
+            "If this is unintentional, the compose file may have been re-upped without the key env vars.",
+            key_repo.count_active_keys(),
         )
 
     app = FastAPI(
@@ -185,8 +223,11 @@ def create_app() -> FastAPI:
         )
         return response
 
-    @app.exception_handler(HTTPException)
-    async def _http_exception_handler(request: Request, exc: HTTPException) -> JSONResponse:
+    # Registered for the *Starlette* base class so routing-raised errors
+    # (405 method-not-allowed, 404 no-route) get problem+json too —
+    # fastapi.HTTPException subclasses it, so app-raised errors still match.
+    @app.exception_handler(StarletteHTTPException)
+    async def _http_exception_handler(request: Request, exc: StarletteHTTPException) -> JSONResponse:
         detail = exc.detail
         if isinstance(detail, dict):
             code = detail.get("code", "http_error")
@@ -194,17 +235,14 @@ def create_app() -> FastAPI:
             detail_text = detail.get("detail", "")
             extras = {k: v for k, v in detail.items() if k not in {"code", "title", "detail"}}
         else:
-            code = str(detail) if isinstance(detail, str) else "http_error"
+            code = (
+                re.sub(r"[^a-z0-9_.\-]+", "_", detail.lower()).strip("_") if isinstance(detail, str) else "http_error"
+            )
             title = _title_for_status(exc.status_code)
             detail_text = str(detail) if not isinstance(detail, str) else detail
             extras = {}
 
-        # Use the sanitized request ID stored by the middleware, or sanitize
-        # the raw header if the middleware hasn't run yet.
-        rid = getattr(request.state, "request_id", None) or ""
-        if not rid:
-            raw = request.headers.get("X-Request-ID", "")
-            rid = _sanitize_request_id(raw) if raw else ""
+        rid = _request_id_of(request)
         body = {
             "type": f"https://pcap-hunter.io/errors/{code}",
             "title": title,
@@ -222,6 +260,26 @@ def create_app() -> FastAPI:
             media_type="application/problem+json",
             headers=headers,
         )
+
+    @app.exception_handler(RequestValidationError)
+    async def _validation_exception_handler(request: Request, exc: RequestValidationError) -> JSONResponse:
+        rid = _request_id_of(request)
+        # Deliberately drop the raw `input` values — submitted secrets must
+        # not echo back into error bodies.
+        errors = [
+            {"loc": list(e.get("loc", [])), "msg": e.get("msg", ""), "type": e.get("type", "")} for e in exc.errors()
+        ]
+        body = {
+            "type": "https://pcap-hunter.io/errors/validation_error",
+            "title": "Unprocessable Entity",
+            "status": 422,
+            "detail": "Request validation failed.",
+            "instance": str(request.url.path),
+            "code": "validation_error",
+            "request_id": rid,
+            "errors": errors,
+        }
+        return JSONResponse(status_code=422, content=body, media_type="application/problem+json")
 
     app.include_router(health.router)
     app.include_router(pcaps.router)

@@ -59,6 +59,15 @@ def _j(url, headers=None, params=None):
                 return r.json()
             except Exception:
                 return {"_raw": r.text}
+        if r.status_code == 404:
+            # Normal negative result — Shodan returns 404 for IPs it has never
+            # scanned, VT/OTX return 404 for unknown domains. The provider is
+            # working; it simply knows nothing about this indicator.
+            return {"_nodata": True, "_url": url}
+        if r.status_code in (401, 403):
+            return {"_error": f"auth failed (HTTP {r.status_code})", "_url": url}
+        if r.status_code == 429:
+            return {"_error": "rate limited", "_detail": _rate_limit_detail(r), "_url": url}
         return {"_error": f"HTTP {r.status_code}", "_url": url}
     except Exception as e:
         return {"_error": str(e), "_url": url}
@@ -87,11 +96,50 @@ def _cached_query(indicator: str, provider: str, query_fn) -> dict:
     # Cache miss - make API call
     result = query_fn()
 
-    # Only cache successful responses
+    # Cache successful payloads AND clean negative results (_nodata) — the
+    # provider will answer 404 for the same unknown indicator every time, so
+    # re-querying only burns quota. Transient failures (_error: auth, rate
+    # limit, network) stay uncached so they retry on the next run.
     if "_error" not in result:
         cache.set(indicator, provider, result)
 
     return result
+
+
+def provider_status(results: list[dict | None]) -> str:
+    """Classify a provider's health from all its per-indicator results.
+
+    Returns one of: "ok" (any successful payload), "rate_limited", "auth_failed",
+    "error", "nodata" (queried, every answer was a clean 404), "none" (never queried).
+    Precedence: ok > rate_limited > auth_failed > error > nodata > none.
+    """
+    seen_rate_limited = seen_auth_failed = seen_error = seen_nodata = False
+    for r in results or []:
+        if not isinstance(r, dict):
+            continue
+        err = r.get("_error")
+        if err:
+            err_text = str(err).lower()
+            if "rate limited" in err_text:
+                seen_rate_limited = True
+            elif "auth failed" in err_text:
+                seen_auth_failed = True
+            else:
+                seen_error = True
+        elif r.get("_nodata"):
+            seen_nodata = True
+        else:
+            # Any successful payload proves the provider works.
+            return "ok"
+    if seen_rate_limited:
+        return "rate_limited"
+    if seen_auth_failed:
+        return "auth_failed"
+    if seen_error:
+        return "error"
+    if seen_nodata:
+        return "nodata"
+    return "none"
 
 
 def _query_provider(
@@ -175,6 +223,105 @@ _DOMAIN_PROVIDERS = [
         None,
     ),
 ]
+
+
+# ---------------------------------------------------------------------------
+# Provider connectivity probes
+# ---------------------------------------------------------------------------
+
+PROBE_RESULT_OK = "ok"
+PROBE_RESULT_INVALID_KEY = "invalid_key"
+PROBE_RESULT_RATE_LIMITED = "rate_limited"
+PROBE_RESULT_UNREACHABLE = "unreachable"
+PROBE_RESULT_NO_KEY = "no_key"
+
+# Benign, well-known indicators used for live probes
+_PROBE_IP = "8.8.8.8"
+_PROBE_DOMAIN = "google.com"
+
+# Display names consistent with the Config tab key inputs
+_PROVIDER_DISPLAY_NAMES = {
+    "greynoise": "GreyNoise",
+    "abuseipdb": "AbuseIPDB",
+    "vt": "VirusTotal",
+    "shodan": "Shodan",
+    "otx": "OTX",
+}
+
+
+def _rate_limit_detail(response) -> str:
+    """Extract plan/quota text from a 429 body for display (e.g. GreyNoise plan info)."""
+    try:
+        body = response.json()
+    except Exception:
+        body = None
+    if isinstance(body, dict):
+        parts = [str(body[k]) for k in ("message", "plan", "rate_limit") if body.get(k)]
+        if parts:
+            return "; ".join(parts)[:300]
+        return str(body)[:300]
+    text = (getattr(response, "text", "") or "").strip()
+    return text[:300] or "HTTP 429"
+
+
+def probe_providers(keys: dict[str, str], timeout: float = 12.0) -> list[dict]:
+    """Live-check every configured OSINT provider with a benign indicator.
+
+    Returns one dict per provider: {"provider", "status", "detail"} where status
+    is one of the PROBE_RESULT_* constants. 401/403 → invalid_key, 429 →
+    rate_limited (include any plan/message text from the body in detail),
+    2xx → ok, network errors → unreachable, missing key → no_key.
+
+    Probes bypass the OSINT cache (must be live) and run independently — one
+    provider failing never stops the others.
+    """
+    probes: list[tuple[str, str, str, str, dict | None, dict | None]] = []
+    seen: set[str] = set()
+    for provider_defs, indicator in ((_IP_PROVIDERS, _PROBE_IP), (_DOMAIN_PROVIDERS, _PROBE_DOMAIN)):
+        for result_key, _cache_prov, key_name, url_tpl, hdr_tpl, param_tpl in provider_defs:
+            if result_key in seen:
+                continue  # vt appears in both IP and domain defs — probe once
+            seen.add(result_key)
+            probes.append((result_key, indicator, key_name, url_tpl, hdr_tpl, param_tpl))
+
+    results: list[dict] = []
+    session = _get_session()
+    for result_key, indicator, key_name, url_tpl, hdr_tpl, param_tpl in probes:
+        provider = _PROVIDER_DISPLAY_NAMES.get(result_key, result_key)
+        api_key = (keys or {}).get(key_name) or ""
+        if not api_key:
+            results.append({"provider": provider, "status": PROBE_RESULT_NO_KEY, "detail": "no API key configured"})
+            continue
+
+        url = url_tpl.replace("{indicator}", quote(indicator, safe=""))
+        headers = {
+            k: (api_key if v == "__KEY__" else v.replace("{indicator}", indicator)) if isinstance(v, str) else v
+            for k, v in (hdr_tpl or {}).items()
+        }
+        params = {
+            k: (api_key if v == "__KEY__" else v.replace("{indicator}", indicator)) if isinstance(v, str) else v
+            for k, v in (param_tpl or {}).items()
+        }
+
+        try:
+            resp = session.get(url, headers=headers or None, params=params or None, timeout=timeout)
+        except Exception as e:
+            results.append({"provider": provider, "status": PROBE_RESULT_UNREACHABLE, "detail": str(e)[:300]})
+            continue
+
+        code = getattr(resp, "status_code", 0)
+        if 200 <= code < 300:
+            results.append({"provider": provider, "status": PROBE_RESULT_OK, "detail": f"HTTP {code}"})
+        elif code in (401, 403):
+            results.append({"provider": provider, "status": PROBE_RESULT_INVALID_KEY, "detail": f"HTTP {code}"})
+        elif code == 429:
+            results.append(
+                {"provider": provider, "status": PROBE_RESULT_RATE_LIMITED, "detail": _rate_limit_detail(resp)}
+            )
+        else:
+            results.append({"provider": provider, "status": PROBE_RESULT_UNREACHABLE, "detail": f"HTTP {code}"})
+
+    return results
 
 
 def _query_single_provider_task(

@@ -90,3 +90,64 @@ def test_streamlit_progress_satisfies_protocol():
     # The adapter wraps the inner handle in a thread-safe wrapper
     assert isinstance(handle, _ThreadSafePhaseHandle)
     assert handle._inner == "handle:Packet counting"
+
+
+def test_thread_safe_handle_attaches_script_run_ctx_to_worker_threads(monkeypatch):
+    """Worker-thread set()/done() must re-attach the main thread's ScriptRunContext.
+
+    Without this, Streamlit drops widget updates from pipeline worker threads
+    ("missing ScriptRunContext") and the progress bars freeze at 0% while the
+    analysis runs invisibly — the exact symptom seen on Streamlit 1.58.
+    """
+    import threading
+
+    from app.pipeline import state as state_mod
+
+    sentinel_ctx = object()
+    attached: list[tuple[threading.Thread, object]] = []
+
+    monkeypatch.setattr(state_mod, "get_script_run_ctx", lambda: sentinel_ctx)
+    monkeypatch.setattr(state_mod, "add_script_run_ctx", lambda th, ctx: attached.append((th, ctx)))
+
+    class _StubInner:
+        def __init__(self) -> None:
+            self.calls: list[tuple] = []
+
+        def set(self, pct, msg=""):
+            self.calls.append(("set", pct, msg))
+
+        def done(self, msg="Done"):
+            self.calls.append(("done", msg))
+
+    inner = _StubInner()
+    handle = state_mod._ThreadSafePhaseHandle(inner)  # created on the "main" thread
+
+    worker = threading.Thread(target=lambda: (handle.set(50, "halfway"), handle.done("ok")))
+    worker.start()
+    worker.join()
+
+    assert ("set", 50, "halfway") in inner.calls
+    assert ("done", "ok") in inner.calls
+    # The captured context was attached to the worker thread for both calls.
+    assert attached and all(ctx is sentinel_ctx for _, ctx in attached)
+    assert all(th is worker for th, _ in attached)
+
+
+def test_thread_safe_handle_tolerates_missing_ctx(monkeypatch):
+    """Headless contexts (API worker, bare pytest) have no ScriptRunContext — the
+    handle must degrade to plain pass-through without raising."""
+    from app.pipeline import state as state_mod
+
+    monkeypatch.setattr(state_mod, "get_script_run_ctx", lambda: None)
+
+    class _StubInner:
+        def __init__(self) -> None:
+            self.calls: list[tuple] = []
+
+        def set(self, pct, msg=""):
+            self.calls.append(("set", pct, msg))
+
+    inner = _StubInner()
+    handle = state_mod._ThreadSafePhaseHandle(inner)
+    handle.set(10, "ok")
+    assert inner.calls == [("set", 10, "ok")]

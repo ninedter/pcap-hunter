@@ -57,3 +57,24 @@ def test_get_result_returns_409_when_not_done(client_with_job):
     body = r.json()
     assert body["code"] == "result_not_ready"
     assert body["current_status"] == "queued"
+
+
+def test_job_to_response_done_percent_is_100():
+    from datetime import datetime
+
+    from app.api.routers.jobs import _job_to_response
+    from app.database.models import Job, JobStatus
+
+    job = Job(
+        case_id="c1",
+        pcap_path="x.pcap",
+        status=JobStatus.DONE,
+        progress_stage="Complete",
+        progress_done=10,
+        progress_total=10,
+        submitted_at=datetime.now(),
+    )
+    job.id = "j_test"
+    resp = _job_to_response(job)
+    assert resp.progress.percent == 100
+    assert resp.progress.stage == "Complete"

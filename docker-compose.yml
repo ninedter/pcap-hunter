@@ -3,25 +3,49 @@ services:
   pcap-hunter-ui:
     build: .
     image: pcap-hunter:latest
-    command: ["streamlit", "run", "/app/main.py", "--server.port=8501", "--server.address=0.0.0.0"]
+    command: ["streamlit", "run", "app/main.py", "--server.port=8501", "--server.address=0.0.0.0"]
+    # Pin the hostname: the config encryption key is derived from
+    # user@platform.node() (config_manager.py), so a random per-recreate
+    # container hostname would make saved API keys undecryptable.
+    hostname: pcap-hunter
     ports:
       - "127.0.0.1:8501:8501"
+    environment:
+      # LM Studio runs on the HOST — localhost inside the container is the container.
+      LM_BASE_URL: "${LM_BASE_URL:-http://host.docker.internal:1234/v1}"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     volumes:
       - ./data:/app/data
+      - pcap-hunter-home:/home/runner
     restart: unless-stopped
 
   pcap-hunter-api:
     image: pcap-hunter:latest
     command: ["uvicorn", "app.api.app:create_app", "--factory", "--host", "0.0.0.0", "--port", "8000"]
+    hostname: pcap-hunter
     ports:
       - "127.0.0.1:8000:8000"
     environment:
-      PCAP_HUNTER_API_KEY: "${PCAP_HUNTER_API_KEY:?must be set}"
+      # Required for the API to authenticate requests (app/api/settings.py reads
+      # it softly, so we default empty here — a `:?` guard would abort even
+      # UI-only `docker compose up pcap-hunter-ui` at interpolation time).
+      PCAP_HUNTER_API_KEY: "${PCAP_HUNTER_API_KEY:-}"
       PCAP_HUNTER_FEED_KEY: "${PCAP_HUNTER_FEED_KEY:-}"
       PCAP_HUNTER_API_HOST: "0.0.0.0"
       PYTHONPATH: "."
+      # LM Studio runs on the HOST — localhost inside the container is the container.
+      LM_BASE_URL: "${LM_BASE_URL:-http://host.docker.internal:1234/v1}"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     volumes:
       - ./data:/app/data
+      - pcap-hunter-home:/home/runner
     depends_on:
       - pcap-hunter-ui
     restart: unless-stopped
+
+volumes:
+  # Persists /home/runner (~/.pcap_hunter_config.json) so encrypted API keys
+  # survive container recreation.
+  pcap-hunter-home:

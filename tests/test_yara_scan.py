@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 
+import app.config as config_module
 from app.pipeline.yara_scan import (
     YARA_AVAILABLE,
     YARAMatch,
@@ -241,3 +242,57 @@ class TestFileSizeLimit:
         """Test that MAX_SCAN_TIMEOUT is set correctly."""
         scanner = YARAScanner()
         assert scanner.MAX_SCAN_TIMEOUT == 60  # 60 seconds
+
+
+# Minimal valid YARA rule used across default-lookup tests
+_TRIVIAL_YARA_RULE = b"rule trivial { condition: false }"
+
+
+class TestDefaultLookup:
+    """Tests for the zero-config DATA_DIR/yara_rules default lookup."""
+
+    def test_default_lookup_picks_up_yara_rules_dir(self, monkeypatch, tmp_path):
+        """YARAScanner picks up DATA_DIR/yara_rules when it exists."""
+        # Create tmp DATA_DIR / yara_rules with a trivial rule file
+        yara_rules_dir = tmp_path / "yara_rules"
+        yara_rules_dir.mkdir()
+        rule_file = yara_rules_dir / "test.yar"
+        rule_file.write_bytes(_TRIVIAL_YARA_RULE)
+
+        # Patch config.DATA_DIR so the scanner resolves to our tmp dir
+        monkeypatch.setattr(config_module, "DATA_DIR", tmp_path)
+
+        scanner = YARAScanner()
+        # The scanner should have discovered the directory
+        assert any(d == yara_rules_dir for d in scanner._rules_dirs)
+
+    def test_explicit_rules_dirs_wins_over_default(self, monkeypatch, tmp_path):
+        """An explicit rules_dirs argument is used instead of defaults."""
+        # Create the default fallback dir — it must NOT be picked when explicit is given
+        yara_rules_dir = tmp_path / "yara_rules"
+        yara_rules_dir.mkdir()
+        monkeypatch.setattr(config_module, "DATA_DIR", tmp_path)
+
+        # Create a separate explicit dir
+        explicit_dir = tmp_path / "custom_rules"
+        explicit_dir.mkdir()
+        (explicit_dir / "custom.yar").write_bytes(_TRIVIAL_YARA_RULE)
+
+        scanner = YARAScanner(rules_dirs=[str(explicit_dir)])
+        assert any(d == explicit_dir for d in scanner._rules_dirs)
+        # Default yara_rules dir should NOT be present
+        assert not any(d == yara_rules_dir for d in scanner._rules_dirs)
+
+    def test_nonexistent_configured_dir_excluded(self, tmp_path):
+        """A nonexistent explicit rules_dir is excluded; scanner does not crash."""
+        nonexistent = str(tmp_path / "does_not_exist")
+        scanner = YARAScanner(rules_dirs=[nonexistent])
+        # Should not crash, and the nonexistent dir should not be in _rules_dirs
+        assert not any(str(d) == nonexistent for d in scanner._rules_dirs)
+
+    def test_nonexistent_configured_dir_scan_graceful(self, tmp_path):
+        """scan_carved_files with a nonexistent configured dir falls back gracefully."""
+        nonexistent = str(tmp_path / "missing_rules")
+        # Should not raise; returns a result dict with scanned=0
+        result = scan_carved_files([], rules_dirs=[nonexistent])
+        assert result["scanned"] == 0

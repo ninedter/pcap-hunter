@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import json
+import logging
 import os
 import platform
 from pathlib import Path
@@ -13,6 +14,8 @@ from cryptography.fernet import Fernet
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
 
+logger = logging.getLogger(__name__)
+
 # Keys that should be encrypted
 SENSITIVE_KEYS = {
     "cfg_vt_key",
@@ -20,7 +23,9 @@ SENSITIVE_KEYS = {
     "cfg_shodan_key",
     "cfg_abuseipdb_key",
     "cfg_otx_key",
-    "cfg_openai_key",
+    "cfg_openai_key",  # LM Studio API key (legacy name, encrypted at rest)
+    "cfg_openai_cloud_key",  # OpenAI cloud provider key
+    "cfg_anthropic_key",  # Anthropic provider key
 }
 
 # Default configuration values
@@ -28,15 +33,22 @@ DEFAULT_CONFIG = {
     "cfg_llm_endpoint": "http://localhost:11434/v1",
     "cfg_llm_model": "llama3.1:8b",
     "cfg_llm_language": "US English",
+    "cfg_llm_provider": "lmstudio",
+    "cfg_openai_model": "gpt-4o",
+    "cfg_openai_base_url": "",
+    "cfg_anthropic_model": "claude-opus-4-8",
     "cfg_pyshark_limit": 200000,
     "cfg_osint_top_ips": 50,
     "cfg_osint_cache_enabled": False,  # Enable/disable OSINT response caching
+    "cfg_yara_rules_dir": "",  # User-configured YARA rules directory
     "cfg_vt_key": "",
     "cfg_greynoise_key": "",
     "cfg_shodan_key": "",
     "cfg_abuseipdb_key": "",
     "cfg_otx_key": "",
     "cfg_openai_key": "",
+    "cfg_openai_cloud_key": "",
+    "cfg_anthropic_key": "",
 }
 
 
@@ -116,7 +128,8 @@ class ConfigManager:
         try:
             encrypted = value[4:-1]  # Remove "ENC[" and "]"
             return self._fernet.decrypt(encrypted.encode()).decode()
-        except Exception:
+        except Exception as e:
+            logger.warning("config operation failed: %s", e)
             return ""  # Return empty on decryption failure
 
     def load(self) -> dict[str, Any]:

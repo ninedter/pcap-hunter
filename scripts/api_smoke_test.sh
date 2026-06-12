@@ -51,12 +51,46 @@ echo "=== GET /api/v1/jobs/$JOB_ID/result ==="
 curl -fsS "$API/api/v1/jobs/$JOB_ID/result" \
     -H "Authorization: Bearer $KEY" | python3 -m json.tool
 
+echo "=== analysis persisted? ==="
+AID=$(curl -fsS "$API/api/v1/jobs/$JOB_ID/result" -H "Authorization: Bearer $KEY" \
+    | python3 -c "import json,sys; print(json.load(sys.stdin)['analysis_id'] or '')")
+[[ -n "$AID" ]] || { echo "analysis_id missing — persistence broken"; exit 1; }
+
+echo "=== case shows the analysis ==="
+N=$(curl -fsS "$API/api/v1/cases/$CASE_ID" -H "Authorization: Bearer $KEY" \
+    | python3 -c "import json,sys; print(len(json.load(sys.stdin)['analyses']))")
+[[ "$N" -ge 1 ]] || { echo "case has no analyses"; exit 1; }
+
+echo "=== report.pdf renders on demand ==="
+SMOKE_PDF=$(mktemp /tmp/smoke_report.XXXXXX.pdf)
+PDF_CODE=$(curl -sS -o "$SMOKE_PDF" -w "%{http_code}" \
+    "$API/api/v1/cases/$CASE_ID/report.pdf" -H "Authorization: Bearer $KEY")
+if [[ "$PDF_CODE" == "200" ]]; then
+    head -c4 "$SMOKE_PDF" | grep -q "%PDF" || { rm -f "$SMOKE_PDF"; echo "not a pdf"; exit 1; }
+elif [[ "$PDF_CODE" == "503" ]]; then
+    echo "report.pdf skipped (503 pdf_unavailable)"
+else
+    rm -f "$SMOKE_PDF"; echo "report.pdf unexpected status: $PDF_CODE"; exit 1
+fi
+rm -f "$SMOKE_PDF"
+
+echo "=== feed serves this case's iocs ==="
+CNT=$(curl -fsS "$API/api/v1/iocs.json?case_id=$CASE_ID" -H "Authorization: Bearer $FEED" \
+    | python3 -c "import json,sys; print(json.load(sys.stdin)['count'])")
+echo "feed count: $CNT"
+[[ "$CNT" -ge 1 ]] || { echo "expected >=1 ioc pre-delete (tiny.pcap yields 2)"; exit 1; }
+
 echo "=== GET /api/v1/iocs.json ==="
 curl -fsS "$API/api/v1/iocs.json" \
-    -H "Authorization: Bearer $FEED" | python3 -m json.tool | head -30
+    -H "Authorization: Bearer $FEED" \
+    | python3 -c "import json,sys; print(json.dumps(json.load(sys.stdin), indent=2)[:2000])"
 
 echo "=== DELETE /api/v1/cases/$CASE_ID ==="
 curl -fsS -X DELETE "$API/api/v1/cases/$CASE_ID" \
     -H "Authorization: Bearer $KEY" -o /dev/null -w "%{http_code}\n"
+
+echo "=== feed empty for deleted case (cascade) ==="
+curl -fsS "$API/api/v1/iocs.json?case_id=$CASE_ID" -H "Authorization: Bearer $FEED" \
+    | python3 -c "import json,sys; d=json.load(sys.stdin); assert d['count'] == 0, f'orphans: {d}'; print('clean')"
 
 echo "✓ smoke test passed"

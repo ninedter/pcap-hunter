@@ -24,7 +24,10 @@ from __future__ import annotations
 
 import logging
 import pathlib
+import re
+import shutil
 import time
+import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from typing import Callable
@@ -55,6 +58,38 @@ WARNING_DNS_ANALYSIS_FAILED = "dns_analysis_failed"
 WARNING_TLS_CERTS_FAILED = "tls_certs_failed"
 WARNING_BEACON_FAILED = "beacon_failed"
 WARNING_CARVE_FAILED = "carve_failed"
+
+
+def _derive_run_id(case_id: str) -> str:
+    """Unique, path-safe directory name for one pipeline run.
+
+    The API job queue runs up to two pipeline processes concurrently, and Zeek
+    writes fixed-name logs (conn.log, dns.log, ...) into its output cwd — so
+    runs must never share an output directory or they silently clobber each
+    other's logs. The uuid suffix keeps concurrent and repeated runs of the
+    same case distinct; sanitization keeps hostile case_ids inside the base dir.
+    """
+    safe = re.sub(r"[^A-Za-z0-9._-]", "_", case_id or "")[:40].lstrip(".") or "run"
+    return f"{safe}_{uuid.uuid4().hex[:8]}"
+
+
+def _prune_stale_run_dirs(base_dir: pathlib.Path, max_age_seconds: float) -> None:
+    """Best-effort removal of per-run subdirectories older than the retention window.
+
+    Only directories are touched — loose files from the old flat layout are left
+    alone. Errors are swallowed: pruning must never break an analysis run.
+    """
+    try:
+        entries = list(base_dir.iterdir())
+    except OSError:
+        return
+    cutoff = time.time() - max_age_seconds
+    for entry in entries:
+        try:
+            if entry.is_dir() and not entry.is_symlink() and entry.stat().st_mtime < cutoff:
+                shutil.rmtree(entry, ignore_errors=True)
+        except OSError:
+            continue
 
 
 @dataclass
@@ -89,10 +124,13 @@ class PipelineResult:
     beacon_df_records: list[dict] = field(default_factory=list)
 
     # Intermediate state — available to callers (e.g. Streamlit) that need to run
-    # further stages (YARA, OSINT) on top of the runner output.  Not serialized by
-    # to_dict() since the API constructs its response from the fields above.
+    # further stages (YARA, OSINT, JA3) on top of the runner output.  Not serialized
+    # by to_dict() since the API constructs its response from the fields above.
+    # zeek_log_paths points at this run's private output dir (ZEEK_DIR/<run_id>) —
+    # consumers must use it instead of reconstructing paths from the shared base dir.
     features: dict = field(default_factory=dict)
     zeek_tables: dict = field(default_factory=dict)
+    zeek_log_paths: dict[str, str] = field(default_factory=dict)
     carved_items: list[dict] = field(default_factory=list)
 
     def to_dict(self) -> dict:
@@ -123,14 +161,27 @@ def run_pipeline(
 
     Stages 2 (PyShark) and 3 (Zeek) run concurrently via ThreadPoolExecutor when both
     are enabled — they're I/O-bound subprocesses against the same pcap and independent
-    until the merge step.  Each stage is gated by its corresponding ``PipelineOptions``
-    flag. Failures in individual stages are recorded in ``result.warnings`` rather than
-    aborting the run.
+    until the merge step.  After that join, stages 4–7 (DNS, TLS, beaconing, carving)
+    fan out into a second ThreadPoolExecutor — they are mutually independent, and the
+    main thread assembles ``stages_run``/``warnings`` in canonical order after the join
+    so the output stays deterministic.  Each stage is gated by its corresponding
+    ``PipelineOptions`` flag. Failures in individual stages are recorded in
+    ``result.warnings`` rather than aborting the run.
     """
     start = time.time()
     filename = pathlib.Path(pcap_path).name
     stages_run: list[str] = []
     warnings: list[str] = []
+
+    # Per-run output dirs: concurrent jobs (API queue, max_workers=2) must never
+    # share Zeek/carve output or they clobber each other's fixed-name artifacts.
+    run_id = _derive_run_id(case_id)
+    zeek_run_dir = C.ZEEK_DIR / run_id
+    carve_run_dir = C.CARVE_DIR / run_id
+    if options.do_zeek:
+        _prune_stale_run_dirs(C.ZEEK_DIR, C.RUN_DIR_RETENTION_SECONDS)
+    if options.do_carve:
+        _prune_stale_run_dirs(C.CARVE_DIR, C.RUN_DIR_RETENTION_SECONDS)
 
     # Working state accumulated across stages — declared up front so analyzer
     # returns always have safe defaults even when their stage is skipped or fails.
@@ -139,6 +190,7 @@ def run_pipeline(
         "artifacts": {"ips": [], "domains": [], "urls": [], "hashes": [], "ja3": []},
     }
     zeek_tables: dict = {}
+    zeek_log_paths: dict[str, str] = {}
     total_pkts: int | None = None
     dns_result: dict = {}
     tls_result: dict = {}
@@ -196,12 +248,13 @@ def run_pipeline(
     def _run_zeek(h) -> None:
         nonlocal zeek_tables
         try:
-            logs = run_zeek(pcap_path, str(C.ZEEK_DIR), phase=h)
+            logs = run_zeek(pcap_path, str(zeek_run_dir), phase=h)
         except Exception as exc:
             logger.error("Zeek failed for %s: %s", filename, exc)
             logs = {}
             warnings.append(WARNING_ZEEK_FAILED)
         if logs:
+            zeek_log_paths.update(logs)
             for name, log_path in logs.items():
                 try:
                     df = load_zeek_any(log_path)
@@ -241,72 +294,108 @@ def run_pipeline(
         except Exception as exc:
             logger.warning("merge_zeek_dns failed: %s", exc)
 
-    # --- Stage 4: DNS Analysis (depends on Zeek) ---
-    if options.do_zeek and zeek_tables:
-        h = progress.start_phase("DNS Analysis")
+    # --- Stages 4-7: post-parse analysis fan-out ---
+    # DNS + TLS read zeek_tables; beacon reads features["flows"]; carve reads only the
+    # pcap. They are mutually independent, so run them concurrently. Phase handles are
+    # created on the main thread (Streamlit ScriptRunContext requirement) — workers only
+    # call set()/done(). Workers never mutate shared state: each writes its own key in
+    # `outcomes`, and the carve hash-backfill happens after the join.
+    canonical = ("dns_analysis", "tls_certs", "beacon", "carve")
+    outcomes: dict[str, dict] = {}
+
+    def _run_dns(h) -> None:
         try:
-            dns_result = analyze_dns(zeek_tables, features, phase=h) or {}
-            stages_run.append("dns_analysis")
+            outcomes["dns_analysis"] = {"result": analyze_dns(zeek_tables, phase=h) or {}}
             h.done("DNS analysis complete.")
         except Exception as exc:
             logger.error("DNS analysis failed: %s", exc)
-            warnings.append(WARNING_DNS_ANALYSIS_FAILED)
+            outcomes.setdefault("dns_analysis", {"warning": WARNING_DNS_ANALYSIS_FAILED})
             h.done("DNS analysis failed.")
-        _emit_heartbeat()
 
-    # --- Stage 5: TLS Certificate Analysis (depends on Zeek) ---
-    if options.do_zeek and zeek_tables:
-        h = progress.start_phase("TLS Certificate Analysis")
+    def _run_tls(h) -> None:
         try:
-            tls_result = analyze_certificates(pcap_path=pcap_path, zeek_tables=zeek_tables, phase=h) or {}
-            stages_run.append("tls_certs")
+            outcomes["tls_certs"] = {
+                "result": analyze_certificates(pcap_path=pcap_path, zeek_tables=zeek_tables, phase=h) or {}
+            }
             h.done("TLS analysis complete.")
         except Exception as exc:
             logger.error("TLS analysis failed: %s", exc)
-            warnings.append(WARNING_TLS_CERTS_FAILED)
+            outcomes.setdefault("tls_certs", {"warning": WARNING_TLS_CERTS_FAILED})
             h.done("TLS analysis failed.")
-        _emit_heartbeat()
 
-    # --- Stage 6: Beaconing ranking (uses features.flows) ---
-    if features.get("flows"):
-        h = progress.start_phase("Beaconing ranking")
+    def _run_beacon(h) -> None:
         try:
             h.set(30, "Scoring flows…")
             beacon_df = rank_beaconing(features["flows"], top_n=20)
             if not isinstance(beacon_df, pd.DataFrame):
                 beacon_df = pd.DataFrame()
             h.set(90, "Sorting top candidates…")
-            beacon_records = beacon_df.to_dict("records") if not beacon_df.empty else []
-            stages_run.append("beacon")
+            records = beacon_df.to_dict("records") if not beacon_df.empty else []
+            # pkt_times/pkt_lens are analysis inputs, not outputs — keep records lean for session state
+            for rec in records:
+                rec.pop("pkt_times", None)
+                rec.pop("pkt_lens", None)
+            outcomes["beacon"] = {"result": records}
             h.done("Beaconing step complete.")
         except Exception as exc:
             logger.error("Beaconing failed: %s", exc)
-            warnings.append(WARNING_BEACON_FAILED)
+            outcomes.setdefault("beacon", {"warning": WARNING_BEACON_FAILED})
             h.done("Beaconing failed.")
-        _emit_heartbeat()
 
-    # --- Stage 7: HTTP carving ---
-    if options.do_carve:
-        h = progress.start_phase("HTTP carving (tshark)")
+    def _run_carve(h) -> None:
         try:
-            carved = carve_http_payloads(pcap_path, str(C.CARVE_DIR), phase=h)
-            # Backfill carved hashes into features.artifacts.hashes
-            for item in carved:
-                sha = item.get("sha256")
-                if sha:
-                    features["artifacts"]["hashes"].append(sha)
-            features["artifacts"]["hashes"] = uniq_sorted(features["artifacts"]["hashes"])
-            stages_run.append("carve")
+            outcomes["carve"] = {"result": carve_http_payloads(pcap_path, str(carve_run_dir), phase=h)}
             h.done("HTTP carving complete.")
         except CarveError as exc:
             logger.error("HTTP carving failed: %s", exc)
-            warnings.append(WARNING_CARVE_FAILED)
+            outcomes.setdefault("carve", {"warning": WARNING_CARVE_FAILED})
             h.done("HTTP carving failed.")
         except Exception as exc:
             logger.error("HTTP carving raised unexpected error: %s", exc)
-            warnings.append(WARNING_CARVE_FAILED)
+            outcomes.setdefault("carve", {"warning": WARNING_CARVE_FAILED})
             h.done("HTTP carving failed.")
+
+    jobs = []
+    if options.do_zeek and zeek_tables:
+        jobs.append((_run_dns, progress.start_phase("DNS Analysis")))
+        jobs.append((_run_tls, progress.start_phase("TLS Certificate Analysis")))
+    if features.get("flows"):
+        jobs.append((_run_beacon, progress.start_phase("Beaconing ranking")))
+    if options.do_carve:
+        jobs.append((_run_carve, progress.start_phase("HTTP carving (tshark)")))
+
+    if jobs:
+        with ThreadPoolExecutor(max_workers=len(jobs), thread_name_prefix="analysis") as pool:
+            futures = [pool.submit(fn, h) for fn, h in jobs]
+            for fut in as_completed(futures):
+                fut.result()
         _emit_heartbeat()
+
+    # Assemble results in canonical order so stages_run/warnings stay deterministic.
+    for name in canonical:
+        out = outcomes.get(name)
+        if out is None:
+            continue
+        if "warning" in out:
+            warnings.append(out["warning"])
+            continue
+        stages_run.append(name)
+        if name == "dns_analysis":
+            dns_result = out["result"]
+        elif name == "tls_certs":
+            tls_result = out["result"]
+        elif name == "beacon":
+            beacon_records = out["result"]
+        elif name == "carve":
+            carved = out["result"]
+
+    # Carve hash-backfill (moved out of the worker so no thread mutates `features`).
+    if carved:
+        for item in carved:
+            sha = item.get("sha256")
+            if sha:
+                features["artifacts"]["hashes"].append(sha)
+        features["artifacts"]["hashes"] = uniq_sorted(features["artifacts"]["hashes"])
 
     return PipelineResult(
         case_id=case_id,
@@ -320,5 +409,6 @@ def run_pipeline(
         beacon_df_records=beacon_records,
         features=features,
         zeek_tables=zeek_tables,
+        zeek_log_paths=zeek_log_paths,
         carved_items=carved if options.do_carve else [],
     )

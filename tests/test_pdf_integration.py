@@ -13,6 +13,7 @@ end-to-end assertion here. When adding new PDF sections, extend the
 
 from __future__ import annotations
 
+import re
 from datetime import datetime
 
 import pandas as pd
@@ -128,12 +129,12 @@ def realistic_correlations() -> list[CorrelationResult]:
 
 @pytest.fixture
 def realistic_beacon_df() -> pd.DataFrame:
-    """beacon_df shape matching rank_beaconing output."""
+    """beacon_df shape matching rank_beaconing output (emits "pkts", not "count")."""
     return pd.DataFrame(
         [
-            {"src": "10.0.0.5", "dst": "34.12.37.224", "dport": 6888, "score": 0.964, "cv": 0.106, "count": 120},
-            {"src": "54.254.33.127", "dst": "10.0.0.5", "dport": 58663, "score": 0.949, "cv": 0.052, "count": 85},
-            {"src": "10.0.0.5", "dst": "142.250.204.110", "dport": 443, "score": 0.542, "cv": 0.312, "count": 42},
+            {"src": "10.0.0.5", "dst": "34.12.37.224", "dport": 6888, "score": 0.964, "cv": 0.106, "pkts": 120},
+            {"src": "54.254.33.127", "dst": "10.0.0.5", "dport": 58663, "score": 0.949, "cv": 0.052, "pkts": 85},
+            {"src": "10.0.0.5", "dst": "142.250.204.110", "dport": 443, "score": 0.542, "cv": 0.312, "pkts": 42},
         ]
     )
 
@@ -212,6 +213,39 @@ def realistic_geoip_data() -> list[dict]:
         {"ip": "1.1.1.1", "country": "Australia", "city": "Sydney", "lat": -33.494, "lon": 143.210},
         {"ip": "34.12.37.224", "country": "United States", "city": "Kansas City", "lat": 39.099, "lon": -94.578},
     ]
+
+
+@pytest.fixture
+def full_report_html(
+    realistic_features,
+    realistic_correlations,
+    realistic_beacon_df,
+    realistic_osint,
+    realistic_dns_analysis,
+    realistic_tls_analysis,
+    realistic_yara_results,
+    realistic_geoip_data,
+) -> str:
+    """Complete report HTML built from the production-shape fixtures above.
+
+    Section structure (numbering, TOC, headings, timestamps) is asserted on
+    the HTML directly, so no WeasyPrint render is required.
+    """
+    gen = PDFReportGenerator(ReportConfig(title="Section Registry Test"))
+    return gen._build_html(
+        # Realistic LLM output includes its own numbered headings — they must
+        # never collide with the registry's numbered section <h2>s.
+        report_md="# Test\n\n## 2. Key Findings\n\nBody.\n\n## 3. Recommendations\n\nMore.",
+        features=realistic_features,
+        osint=realistic_osint,
+        yara_results=realistic_yara_results,
+        dns_analysis=realistic_dns_analysis,
+        tls_analysis=realistic_tls_analysis,
+        case_info={"id": "CASE-001", "title": "Registry Test"},
+        beacon_df=realistic_beacon_df,
+        correlations=realistic_correlations,
+        geoip_data=realistic_geoip_data,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -319,6 +353,8 @@ class TestFullPDFGeneration:
 
         # Beacon DataFrame rendering
         assert "0.964" in html or "0.96" in html  # beacon score
+        # Packets column must read the "pkts" key emitted by rank_beaconing
+        assert "<td>120</td>" in html
 
         # YARA match rendering
         assert "CobaltStrike_Beacon" in html
@@ -380,3 +416,134 @@ class TestFullPDFGeneration:
         )
         assert pdf is not None
         assert b"%PDF" in pdf.content[:10]
+
+
+class TestSectionRegistry:
+    """One ordered registry drives section numbering and the TOC.
+
+    Regression targets: the report used to ship TWO sections numbered "2.",
+    unnumbered correlation/beacon sections, a beacon heading duplicated across
+    the empty/data code paths, and a hand-built TOC that could disagree with
+    the rendered body.
+    """
+
+    def test_section_numbering_is_sequential_and_unique(self, full_report_html):
+        nums = [int(m.group(1)) for m in re.finditer(r"<h2>(\d+)\. ", full_report_html)]
+        assert nums, "no numbered <h2> section headings found"
+        assert nums == list(range(1, len(nums) + 1)), f"section numbers broken: {nums}"
+
+    def test_toc_entries_match_rendered_sections_in_order(self, full_report_html):
+        toc_ids = re.findall(r'<li><a href="#([a-z]+)">', full_report_html)
+        body_ids = [b for b in re.findall(r'<section id="([a-z]+)"', full_report_html) if b in toc_ids]
+        assert toc_ids, "TOC rendered no entries"
+        assert toc_ids == body_ids
+
+    def test_beacon_heading_appears_once(self, full_report_html):
+        assert full_report_html.count("C2 Beacon Analysis</h2>") == 1
+
+    def test_llm_content_headings_demoted_below_section_level(self, full_report_html):
+        """LLM markdown headings (## N. Foo) must become h4 inside the summary,
+        never h2 — h2 is reserved for registry-numbered section headings."""
+        assert "<h4>2. Key Findings</h4>" in full_report_html
+        assert "<h2>2. Key Findings</h2>" not in full_report_html
+        assert "<h4>3. Recommendations</h4>" in full_report_html
+
+    def test_beacon_heading_appears_once_with_empty_dataframe(self, realistic_features):
+        """The empty-DataFrame path must emit the same single heading."""
+        gen = PDFReportGenerator(ReportConfig(include_charts=False))
+        html = gen._build_html(
+            report_md="# T\n\nBody.",
+            features=realistic_features,
+            osint=None,
+            yara_results=None,
+            dns_analysis=None,
+            tls_analysis=None,
+            case_info=None,
+            beacon_df=pd.DataFrame(),
+            correlations=None,
+        )
+        assert html.count("C2 Beacon Analysis</h2>") == 1
+
+    def test_numbering_stays_sequential_when_conditional_sections_absent(self, realistic_features):
+        """With charts/correlations/beacons/osint/dns/tls/yara absent, the
+        surviving sections must still be numbered 1..N and match the TOC."""
+        gen = PDFReportGenerator(ReportConfig(include_charts=False))
+        html = gen._build_html(
+            report_md="# T\n\nBody.",
+            features=realistic_features,
+            osint=None,
+            yara_results=None,
+            dns_analysis=None,
+            tls_analysis=None,
+            case_info=None,
+            beacon_df=None,
+            correlations=None,
+        )
+        nums = [int(m.group(1)) for m in re.finditer(r"<h2>(\d+)\. ", html)]
+        assert nums == list(range(1, len(nums) + 1)), f"section numbers broken: {nums}"
+        toc_ids = re.findall(r'<li><a href="#([a-z]+)">', html)
+        body_ids = [b for b in re.findall(r'<section id="([a-z]+)"', html) if b in toc_ids]
+        assert toc_ids == body_ids
+        assert toc_ids == ["summary", "iocs", "flows", "appendix"]
+
+    def test_report_timestamp_is_timezone_aware(self, full_report_html):
+        assert re.search(r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}(:\d{2})? [A-Z]{2,5}", full_report_html)
+
+
+class TestLLMMarkdownTableRendering:
+    """The LLM Risk Matrix / IOC Summary are emitted as GitHub-flavored pipe
+    tables. They must render as real <table> HTML inside the summary section,
+    not leak as literal pipe characters."""
+
+    RISK_MATRIX_MD = (
+        "## Risk Assessment\n\n"
+        "Overall risk is HIGH.\n\n"
+        "| Category | Key Findings | Likelihood | Impact | Risk |\n"
+        "|---|---|---|---|---|\n"
+        "| Network / C2 | Beacon to 34.12.37.224 at 60s intervals | High | High | Critical |\n"
+        "| DNS | None observed | Low | Low | Low |\n"
+        "| TLS / Encryption | Self-signed cert on port 6888 | Medium | Medium | Medium |\n"
+    )
+
+    def _summary_html(self, realistic_features) -> str:
+        gen = PDFReportGenerator(ReportConfig(include_charts=False))
+        html = gen._build_html(
+            report_md=self.RISK_MATRIX_MD,
+            features=realistic_features,
+            osint=None,
+            yara_results=None,
+            dns_analysis=None,
+            tls_analysis=None,
+            case_info=None,
+            beacon_df=None,
+            correlations=None,
+        )
+        # Slice out the summary section so assertions can't pass via the
+        # registry-rendered .data-table sections elsewhere in the document.
+        start = html.index('class="summary-content"')
+        end = html.index("</section>", start)
+        return html[start:end]
+
+    def test_pipe_table_renders_as_html_table_in_summary(self, realistic_features):
+        summary = self._summary_html(realistic_features)
+        assert "<table>" in summary
+        assert "<th>Category</th>" in summary
+        assert "<th>Likelihood</th>" in summary
+        assert "<td>None observed</td>" in summary
+        assert "34.12.37.224" in summary
+
+    def test_pipe_table_does_not_leak_as_literal_text(self, realistic_features):
+        summary = self._summary_html(realistic_features)
+        assert "| Category |" not in summary
+        assert "|---|" not in summary
+
+    def test_summary_tables_are_styled_by_generic_table_css(self):
+        """LLM content lives in .summary-content; the stylesheet's generic
+        table/th/td rules (border, navy header, padding) must cover it."""
+        styles = PDFReportGenerator(ReportConfig())._get_styles()
+        # Generic selectors — not scoped to .data-table — so summary tables inherit them
+        assert re.search(r"(^|\})\s*table\s*\{[^}]*border-collapse", styles, re.DOTALL)
+        assert re.search(r"th,\s*td\s*\{[^}]*border", styles, re.DOTALL)
+        assert re.search(r"(^|\})\s*th\s*\{[^}]*background-color", styles, re.DOTALL)
+        # No .summary-content rule may disable table display
+        assert ".summary-content table { display: none" not in styles

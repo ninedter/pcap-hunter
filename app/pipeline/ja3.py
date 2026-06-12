@@ -399,3 +399,36 @@ def analyze_ja3_results(df: pd.DataFrame) -> dict[str, Any]:
         "unknown_ja3": unknown_count,
         "top_clients": top_clients,
     }
+
+
+def extract_ja3_from_multiple_runs(paths_list: list[dict[str, str]]) -> tuple[pd.DataFrame, dict[str, Any]]:
+    """
+    Extract and combine JA3 data across several per-run Zeek log mappings.
+
+    Batch mode runs Zeek once per PCAP, each into its own per-run directory,
+    so every run has its own ssl.log. This extracts JA3 rows from each run's
+    ssl.log (when present), concatenates and de-duplicates them, and analyzes
+    the combined frame so batch results reflect all files rather than only
+    the last ssl.log encountered.
+
+    Args:
+        paths_list: One mapping per run of Zeek log name (e.g. "ssl.log")
+            to its on-disk path.
+
+    Returns:
+        Tuple of (combined JA3 DataFrame, analysis summary dict). Returns an
+        empty DataFrame and empty dict when no run produced JA3 data.
+    """
+    frames: list[pd.DataFrame] = []
+    for zeek_logs in paths_list:
+        if not zeek_logs or "ssl.log" not in zeek_logs:
+            continue
+        df = extract_ja3_from_zeek(zeek_logs["ssl.log"])
+        if not df.empty:
+            frames.append(df)
+
+    if not frames:
+        return pd.DataFrame(), {}
+
+    combined = pd.concat(frames, ignore_index=True).drop_duplicates().reset_index(drop=True)
+    return combined, analyze_ja3_results(combined)

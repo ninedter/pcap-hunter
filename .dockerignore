@@ -1,0 +1,18 @@
+# Keep the build context lean — data/ alone is ~770MB of runtime artifacts.
+.git
+.gitignore
+data/
+docs/
+htmlcov/
+.pytest_cache/
+.ruff_cache/
+__pycache__/
+**/__pycache__/
+*.pyc
+.claude/
+.dockerignore
+Dockerfile
+docker-compose.yml
+*.db
+*.pcap
+*.pcapng

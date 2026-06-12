@@ -12,6 +12,7 @@ from app.database.models import (
     Case,
     CaseStatus,
     IOCType,
+    Job,
     Note,
     Severity,
 )
@@ -357,6 +358,21 @@ class TestCaseRepository:
         assert repo.get_statistics()["total_cases"] == 0
         assert repo.get_statistics()["total_analyses"] == 0
 
+    def test_clear_all_reaps_jobs(self, repo):
+        """clear_all must delete job rows along with the case data."""
+        case_id = repo.create_case(Case(title="With Job"))
+        job_id = repo.create_job(Job(case_id=case_id, pcap_path="/p.pcap"))
+        assert repo.get_job(job_id) is not None
+
+        assert repo.clear_all() is True
+
+        assert repo.get_job(job_id) is None
+        conn = repo._get_conn()
+        try:
+            assert conn.execute("SELECT COUNT(*) FROM jobs").fetchone()[0] == 0
+        finally:
+            conn.close()
+
     def test_save_analysis_to_case(self, repo):
         """Test saving analysis to case."""
         case_id = repo.create_case(Case(title="With Analysis"))
@@ -461,6 +477,84 @@ class TestCaseRepository:
         assert "by_status" in stats
         assert stats["by_status"].get("open", 0) == 1
         assert stats["by_status"].get("closed", 0) == 1
+
+
+class TestCascadeDeletion:
+    """Deleting a case must remove every related row — the FK pragma is off, so
+    the schema's declared ON DELETE CASCADE clauses never fire on their own."""
+
+    def test_delete_case_cascades_all_related_rows(self, tmp_path):
+        repo = CaseRepository(db_path=str(tmp_path / "t.db"))
+        repo.create_case(
+            Case(id="del00001", title="t", status=CaseStatus.IN_PROGRESS, severity=Severity.LOW, tags=["x"])
+        )
+        analysis = Analysis(case_id="del00001", pcap_path="x.pcap", packet_count=1, features={"artifacts": {}})
+        analysis.iocs = [IOC(ioc_type=IOCType.IP, value="203.0.113.9", context="t", severity=Severity.HIGH)]
+        aid = repo.save_analysis(analysis)
+        repo.add_note("del00001", "investigation note", analysis_id=aid)
+        job_id = repo.create_job(Job(case_id="del00001", pcap_path="x.pcap", options_json="{}"))
+
+        assert repo.delete_case("del00001") is True
+
+        conn = repo._get_conn()
+        try:
+            for table, where, arg in [
+                ("analyses", "id = ?", aid),
+                ("iocs", "analysis_id = ?", aid),
+                ("jobs", "id = ?", job_id),
+                ("case_tags", "case_id = ?", "del00001"),
+                ("notes", "case_id = ?", "del00001"),
+            ]:
+                n = conn.execute(f"SELECT COUNT(*) FROM {table} WHERE {where}", (arg,)).fetchone()[0]
+                assert n == 0, f"{table} row survived case deletion"
+        finally:
+            conn.close()
+
+    def test_delete_case_returns_false_for_unknown_case(self, tmp_path):
+        repo = CaseRepository(db_path=str(tmp_path / "t.db"))
+        assert repo.delete_case("nonexistent-id") is False
+
+    def test_delete_case_leaves_other_cases_intact(self, tmp_path):
+        """The explicit child-table deletes must be scoped to the deleted case only."""
+        repo = CaseRepository(db_path=str(tmp_path / "t.db"))
+        for cid, ip in [("del00003", "203.0.113.3"), ("keep0001", "203.0.113.4")]:
+            repo.create_case(Case(id=cid, title="t", status=CaseStatus.OPEN, severity=Severity.MEDIUM, tags=["x"]))
+            analysis = Analysis(case_id=cid, pcap_path="x.pcap", packet_count=1, features={"artifacts": {}})
+            analysis.iocs = [IOC(ioc_type=IOCType.IP, value=ip, context="t", severity=Severity.HIGH)]
+            aid = repo.save_analysis(analysis)
+            repo.add_note(cid, "note", analysis_id=aid)
+            repo.create_job(Job(case_id=cid, pcap_path="x.pcap", options_json="{}"))
+
+        assert repo.delete_case("del00003") is True
+
+        survivor = repo.get_case("keep0001")
+        assert survivor is not None
+        assert len(survivor.analyses) == 1
+        assert len(survivor.analyses[0].iocs) == 1
+        assert len(survivor.notes) == 1
+        assert survivor.tags == ["x"]
+        conn = repo._get_conn()
+        try:
+            n = conn.execute("SELECT COUNT(*) FROM jobs WHERE case_id = ?", ("keep0001",)).fetchone()[0]
+            assert n == 1
+        finally:
+            conn.close()
+
+    def test_feed_does_not_serve_iocs_from_deleted_case(self, tmp_path):
+        """Regression: a deleted case's IOCs kept serving in the feed forever,
+        because only the cases row was removed and the feed joins iocs->analyses."""
+        from app.api.feed import IOCFilter, query_iocs
+
+        repo = CaseRepository(db_path=str(tmp_path / "t.db"))
+        repo.create_case(Case(id="del00002", title="t", status=CaseStatus.OPEN, severity=Severity.MEDIUM))
+        analysis = Analysis(case_id="del00002", pcap_path="x.pcap", packet_count=1, features={"artifacts": {}})
+        analysis.iocs = [IOC(ioc_type=IOCType.IP, value="203.0.113.9", context="t", severity=Severity.HIGH)]
+        repo.save_analysis(analysis)
+        assert query_iocs(repo, IOCFilter()) != [], "sanity: IOC must serve before deletion"
+
+        assert repo.delete_case("del00002") is True
+
+        assert query_iocs(repo, IOCFilter()) == []
 
 
 class TestRepositoryCompression:

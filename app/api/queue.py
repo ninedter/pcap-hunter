@@ -4,15 +4,58 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from abc import ABC, abstractmethod
 from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass, field
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
+from app import config as C
 from app.database.models import Job, JobStatus
 from app.database.repository import CaseRepository
+from app.pipeline.osint import enrich as osint_enrich
+from app.utils.network_utils import bulk_resolve_ips, is_public_ipv4, pick_top_public_ips
+
+if TYPE_CHECKING:
+    from app.pipeline.runner import PipelineResult
 
 logger = logging.getLogger(__name__)
+
+# Wire-format warning code added by the worker when analysis persistence fails.
+WARNING_PERSISTENCE_FAILED = "analysis_persistence_failed"
+# Wire-format warning codes for the post-runner stages the worker runs itself.
+WARNING_OSINT_NOT_CONFIGURED = "osint_not_configured"
+WARNING_OSINT_FAILED = "osint_failed"
+WARNING_YARA_FAILED = "yara_failed"
+WARNING_LLM_UNSUPPORTED = "llm_unsupported_on_api_path"
+
+
+def _load_osint_keys() -> dict[str, str]:
+    """OSINT provider keys for the headless worker: saved config first, env fallback.
+
+    Mirrors the UI seeding in app/ui/config_ui.py (saved ``cfg_*_key`` values,
+    ``OTX_KEY``/``VT_KEY``/... env overrides). Empty values are dropped so the
+    caller can treat an empty dict as "OSINT not configured".
+
+    Returns:
+        Provider key mapping in the shape ``app.pipeline.osint.enrich`` expects.
+    """
+    saved: dict = {}
+    try:
+        from app.utils.config_manager import get_config_manager
+
+        saved = get_config_manager().load() or {}
+    except Exception:
+        logger.info("ConfigManager unavailable; falling back to env keys only")
+
+    keys = {
+        "OTX_KEY": saved.get("cfg_otx_key") or os.getenv("OTX_KEY", ""),
+        "VT_KEY": saved.get("cfg_vt_key") or os.getenv("VT_KEY", ""),
+        "ABUSEIPDB_KEY": saved.get("cfg_abuseipdb_key") or os.getenv("ABUSEIPDB_KEY", ""),
+        "GREYNOISE_KEY": saved.get("cfg_greynoise_key") or os.getenv("GREYNOISE_KEY", ""),
+        "SHODAN_KEY": saved.get("cfg_shodan_key") or os.getenv("SHODAN_KEY", ""),
+    }
+    return {k: v for k, v in keys.items() if v}
 
 
 @dataclass
@@ -40,15 +83,142 @@ class QueueFullError(Exception):
     """Raised when the queue's depth cap is exceeded."""
 
 
+def _sha256_file(path: str) -> str:
+    """Streaming SHA-256 of a file (used for Analysis.pcap_hash)."""
+    import hashlib
+
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1024 * 1024), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _run_yara_stage(result: PipelineResult, opts: dict, job_id: str, repo: CaseRepository) -> dict | None:
+    """Stage 8: YARA over carved files (mirrors app/main.py); returns results, or None when skipped or failed.
+
+    Appends to result.stages_run/warnings and touches the job heartbeat.
+    """
+    yara_results = None
+    if opts.get("do_yara", True) and result.carved_items:
+        try:
+            from app.pipeline.yara_scan import scan_carved_files
+
+            rules_dir = ""
+            try:
+                from app.utils.config_manager import get_config_manager
+
+                rules_dir = (get_config_manager().load() or {}).get("cfg_yara_rules_dir") or ""
+            except Exception:
+                logger.info("ConfigManager unavailable; using default YARA rules")
+            yara_results = scan_carved_files(result.carved_items, rules_dirs=[rules_dir] if rules_dir.strip() else None)
+            result.stages_run.append("yara_scan")
+        except Exception:
+            logger.exception("Job %s: yara stage failed", job_id)
+            result.warnings.append(WARNING_YARA_FAILED)
+        repo.touch_job_heartbeat(job_id)
+    return yara_results
+
+
+def _run_osint_stage(result: PipelineResult, opts: dict, job_id: str, repo: CaseRepository) -> dict:
+    """Stage 9: OSINT enrichment + rDNS (mirrors app/main.py); returns osint data, empty when skipped or failed.
+
+    Appends to result.stages_run/warnings and touches the job heartbeat.
+    """
+    osint_data: dict = {}
+    if opts.get("osint_enabled", True):
+        keys = _load_osint_keys()
+        if not keys:
+            result.warnings.append(WARNING_OSINT_NOT_CONFIGURED)
+        else:
+            try:
+                feats = result.features if isinstance(result.features, dict) else {}
+                arts = dict(feats.get("artifacts", {}))
+                top_n = int(opts.get("osint_top_n") or 50)
+                arts["ips"] = (
+                    pick_top_public_ips(feats, top_n)
+                    if top_n > 0
+                    else [ip for ip in arts.get("ips", []) if is_public_ipv4(ip)]
+                )
+                osint_data = osint_enrich(arts, keys)
+                osint_data = osint_data if isinstance(osint_data, dict) else {}
+                all_public = [ip for ip in feats.get("artifacts", {}).get("ips", []) if is_public_ipv4(ip)]
+                for ip, hostname in bulk_resolve_ips(all_public, max_workers=C.RDNS_MAX_WORKERS).items():
+                    if ip in osint_data.get("ips", {}) and "ptr" not in osint_data["ips"][ip]:
+                        osint_data["ips"][ip]["ptr"] = hostname
+                result.stages_run.append("osint")
+            except Exception:
+                logger.exception("Job %s: osint stage failed", job_id)
+                result.warnings.append(WARNING_OSINT_FAILED)
+        repo.touch_job_heartbeat(job_id)
+    return osint_data
+
+
+def _persist_analysis(
+    result: PipelineResult,
+    job: Job,
+    pcap_path: str,
+    osint_data: dict,
+    yara_results: dict | None,
+    repo: CaseRepository,
+) -> None:
+    """Persist the pipeline result as an Analysis so the case completes and IOCs reach the feed.
+
+    On success sets result.analysis_id; on failure appends WARNING_PERSISTENCE_FAILED.
+    """
+    # Mirrors app/ui/cases_tab.py:_quick_save_analysis. Persistence failures
+    # must not lose the pipeline result -> warn, keep analysis_id None.
+    from app.database.models import Analysis
+
+    try:
+        analysis = Analysis(
+            case_id=job.case_id,
+            pcap_path=pcap_path,
+            pcap_hash=_sha256_file(pcap_path),
+            packet_count=result.packet_count,
+            features=result.features,
+            osint=osint_data or {},
+            yara_results=yara_results,
+            dns_analysis=result.dns_analysis or None,
+            tls_analysis=result.tls_analysis or None,
+        )
+        if result.beacon_df_records:
+            analysis.features["beacon_records"] = result.beacon_df_records
+        analysis.iocs = repo.extract_iocs(analysis)
+        result.analysis_id = repo.save_analysis(analysis)
+    except Exception:
+        logger.exception("Job %s: analysis persistence failed", job.id)
+        result.warnings.append(WARNING_PERSISTENCE_FAILED)
+
+
 def _worker_run(job_id: str, db_path: str, pcap_path: str, options_dict: dict) -> None:
     """Top-level worker function (must be picklable for ProcessPoolExecutor)."""
+    from app.utils.logger import get_logger
+
+    get_logger("app")  # spawn-platform children inherit no handlers
+
     from app.database.models import JobStatus as JS
     from app.database.repository import CaseRepository as Repo
     from app.pipeline.progress import CallbackProgress, ProgressEvent
     from app.pipeline.runner import PipelineOptions, run_pipeline
 
     repo = Repo(db_path=db_path)
-    repo.update_job_status(job_id, JS.RUNNING)
+
+    # A job can be cancelled (or its row removed — the FK pragma is off, so
+    # delete_case deletes child job rows explicitly, not via cascade) between
+    # enqueue and execution — the submitted future still runs. Abort before
+    # burning a worker slot on a dead job.
+    job = repo.get_job(job_id)
+    if job is None or job.status == JS.CANCELLED:
+        logger.info("Job %s gone or cancelled before start; skipping", job_id)
+        return
+
+    # CAS flip closes the residual race: a cancel/delete can still land
+    # between the guard above and this write. Losing the UPDATE means the
+    # job is no longer queued — skip instead of resurrecting it.
+    if not repo.start_job_if_queued(job_id):
+        logger.info("Job %s no longer queued at start; skipping", job_id)
+        return
 
     def _on_event(event: ProgressEvent) -> None:
         if event.kind == "phase_start":
@@ -64,16 +234,26 @@ def _worker_run(job_id: str, db_path: str, pcap_path: str, options_dict: dict) -
     options = PipelineOptions(**{k: v for k, v in options_dict.items() if k in PipelineOptions.__dataclass_fields__})
 
     try:
-        job = repo.get_job(job_id)
         result = run_pipeline(
             pcap_path=pcap_path,
-            case_id=job.case_id if job else "",
+            case_id=job.case_id,
             options=options,
             progress=progress,
             heartbeat=lambda: repo.touch_job_heartbeat(job_id),
         )
+
+        opts = options_dict  # raw dict: includes keys PipelineOptions doesn't model (e.g. do_yara)
+        yara_results = _run_yara_stage(result, opts, job_id, repo)
+        osint_data = _run_osint_stage(result, opts, job_id, repo)
+
+        # --- LLM report: not yet supported headless (needs UI correlation context) ---
+        if opts.get("llm_enabled", True):
+            result.warnings.append(WARNING_LLM_UNSUPPORTED)
+
+        _persist_analysis(result, job, pcap_path, osint_data, yara_results, repo)
+
         result_blob = json.dumps(result.to_dict()).encode("utf-8")
-        repo.update_job_status(job_id, JS.DONE, result_json=result_blob)
+        repo.complete_job(job_id, result_blob)
     except Exception as exc:
         logger.exception("Job %s failed: %s", job_id, exc)
         repo.update_job_status(
@@ -132,9 +312,9 @@ def recover_stale_running_jobs(repo: CaseRepository, stale_after_seconds: int = 
 
 
 def cancel_queued_job(repo: CaseRepository, job_id: str) -> bool:
-    """Cancel a job that is still in QUEUED state. Returns True if cancelled."""
-    job = repo.get_job(job_id)
-    if not job or job.status != JobStatus.QUEUED:
-        return False
-    repo.update_job_status(job_id, JobStatus.CANCELLED)
-    return True
+    """Cancel a job that is still in QUEUED state. Returns True if cancelled.
+
+    Compare-and-set: the conditional UPDATE in the repo makes this race-free
+    against the worker's RUNNING flip — missing or non-queued jobs return False.
+    """
+    return repo.cancel_job_if_queued(job_id)

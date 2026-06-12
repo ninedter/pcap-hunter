@@ -3,6 +3,7 @@ from __future__ import annotations
 import pandas as pd
 import streamlit as st
 
+from app.ui.colors import SEVERITY_COLORS, SEVERITY_ORDER, severity_color
 from app.utils.common import is_public_ipv4
 from app.utils.export import (
     export_dataframe_to_csv,
@@ -194,16 +195,18 @@ def render_threat_summary(
             ]
         )
 
+        # If you add a branch here, add a matching reasons.append() in the
+        # explainability expander below so analysts can reconstruct the rating.
         if critical > 0:
-            risk, color = "CRITICAL", "#ff6b6b"
+            risk, color = "CRITICAL", severity_color("critical")
         elif high > 0 or yara_count > 0:
-            risk, color = "HIGH", "#ffa94d"
+            risk, color = "HIGH", severity_color("high")
         elif medium > 0 or (beacon_count >= 3 and corroboration >= 2) or (tls_issues > 0 and dns_alerts > 0):
-            risk, color = "MEDIUM", "#ffd43b"
+            risk, color = "MEDIUM", severity_color("medium")
         elif correlations or beacon_count > 0 or tls_issues > 0 or dns_alerts > 0:
-            risk, color = "LOW", "#51cf66"
+            risk, color = "LOW", severity_color("low")
         else:
-            risk, color = "N/A", "#adb5bd"
+            risk, color = "N/A", severity_color("unknown")
 
         # --- Render ---
         st.markdown(
@@ -242,6 +245,81 @@ def render_threat_summary(
             st.caption(" | ".join(parts))
         elif correlations:
             st.caption("No high-severity indicators detected.")
+
+        # --- Explainability expander ---
+        # Keep in sync with the risk-decision ladder above: every input to the
+        # decision gets a reasons.append() here.
+        with st.expander("Why this risk level?", expanded=False):
+            st.caption(
+                "Risk is the highest tier triggered below. Correlated, multi-signal findings "
+                "outrank isolated heuristics."
+            )
+            reasons: list[str] = []
+            if critical:
+                reasons.append(f"🔴 {critical} critical correlation finding(s)")
+            if high:
+                reasons.append(f"🟠 {high} high-severity correlation finding(s)")
+            if medium:
+                reasons.append(f"🟡 {medium} medium-severity correlation finding(s)")
+            if yara_count:
+                reasons.append(f"🔍 {yara_count} YARA match(es) in carved files")
+            if beacon_count:
+                reasons.append(f"📡 {beacon_count} beaconing candidate(s) (score ≥ 0.6; alone does not escalate risk)")
+            if tls_issues:
+                reasons.append(f"🔒 {tls_issues} TLS certificate trust issue(s) (expired + self-signed)")
+            if dns_alerts:
+                reasons.append(f"🌐 {dns_alerts} DNS anomaly signal(s) (DGA + tunneling)")
+            if corroboration >= 2 and beacon_count >= 3:
+                reasons.append(
+                    f"⚠️ MEDIUM escalation: {beacon_count} beacon candidate(s) corroborated "
+                    f"by {corroboration} distinct signal categories"
+                )
+            if tls_issues > 0 and dns_alerts > 0:
+                reasons.append("⚠️ MEDIUM escalation: TLS trust issues corroborated by DNS anomalies")
+            if not reasons:
+                reasons.append("✅ No threat signals fired — nothing exceeded thresholds")
+            for r in reasons:
+                st.markdown(f"- {r}")
+
+
+def analysis_has_run() -> bool:
+    """True once a pipeline run (or case restore) has populated session state."""
+    feats = st.session_state.get("features") or {}
+    return bool(feats.get("flows") or st.session_state.get("zeek_tables"))
+
+
+# Backward-compatible alias for internal call sites that predate the public name.
+_analysis_has_run = analysis_has_run
+
+
+def render_empty_state(
+    found_nothing_msg: str,
+    *,
+    not_run_msg: str = "Upload a PCAP and run analysis to populate this section.",
+) -> None:
+    """Empty-state that distinguishes 'ran, clean' from 'not run yet'.
+
+    Only call this for results that genuinely ran and came back empty (e.g.
+    correlations/flow-asymmetry/port-anomalies hold ``[]`` after a clean run;
+    their ``None`` means "not computed" and is handled inline). DNS/TLS/YARA
+    engines always return a truthy dict when they execute, so for those a
+    session value of ``None`` means skipped-or-failed and must never render
+    as a green success — their renderers handle empty paths inline too.
+    """
+    if _analysis_has_run():
+        st.success(f"✅ {found_nothing_msg}")
+    else:
+        st.info(f"📭 {not_run_msg}")
+
+
+def render_severity_legend() -> None:
+    """One-line color legend so analysts calibrate once, not per-tab."""
+    chips = " ".join(
+        f'<span style="background:{SEVERITY_COLORS[lvl]["bg"]};color:{SEVERITY_COLORS[lvl]["fg"]};'
+        f'padding:1px 8px;border-radius:8px;font-size:0.75rem;margin-right:4px;">{lvl.upper()}</span>'
+        for lvl in SEVERITY_ORDER
+    )
+    st.markdown(f'<div style="margin:4px 0 8px 0;">{chips}</div>', unsafe_allow_html=True)
 
 
 def render_overview(result_col, features):
@@ -361,15 +439,8 @@ def show_whois_dialog(target: str):
 
 def _verdict_badge(verdict: str) -> str:
     """Return a colored HTML badge for an IOC verdict."""
-    colors = {
-        "critical": ("#ff6b6b", "#fff"),
-        "high": ("#ffa94d", "#fff"),
-        "medium": ("#ffd43b", "#333"),
-        "low": ("#51cf66", "#fff"),
-        "clean": ("#4dabf7", "#fff"),
-        "unknown": ("#adb5bd", "#fff"),
-    }
-    bg, fg = colors.get(verdict.lower(), colors["unknown"])
+    bg = severity_color(verdict)
+    fg = severity_color(verdict, "fg")
     return (
         f'<span style="display:inline-block;padding:2px 10px;border-radius:12px;'
         f"background:{bg};color:{fg};font-weight:600;font-size:0.8rem;"
@@ -377,20 +448,45 @@ def _verdict_badge(verdict: str) -> str:
     )
 
 
+def _verdict_label(verdict: str) -> str:
+    """Return a plain-text/markdown-safe verdict label (emoji dot + uppercase word).
+
+    Streamlit expander labels are rendered as markdown, not HTML, so
+    ``_verdict_badge`` (which returns a ``<span>`` element) must never appear
+    in a label.  Use this helper for labels; keep ``_verdict_badge`` for body
+    content only.
+    """
+    dot = {
+        "critical": "🔴",
+        "high": "🟠",
+        "medium": "🟡",
+        "low": "🟢",
+        "clean": "🔵",
+        "unknown": "⚪",
+    }.get(verdict.lower(), "⚪")
+    return f"{dot} {verdict.upper()}"
+
+
 def _provider_pill(name: str, status: str) -> str:
-    """Return a small pill showing provider status."""
-    if status == "ok":
-        bg, icon = "rgba(81,207,102,0.18)", "✅"
-    elif status == "error":
-        bg, icon = "rgba(255,107,107,0.18)", "❌"
-    elif status == "cached":
-        bg, icon = "rgba(77,171,247,0.18)", "💾"
-    else:  # not configured
-        bg, icon = "rgba(173,181,189,0.18)", "⚪"
+    """Return a small pill showing provider status.
+
+    Statuses: ok, error, cached, rate_limited (amber), auth_failed (red),
+    nodata (neutral gray — provider answered, nothing known), none (not configured).
+    """
+    styles = {
+        "ok": ("rgba(81,207,102,0.18)", "✅", ""),
+        "error": ("rgba(255,107,107,0.18)", "❌", ""),
+        "cached": ("rgba(77,171,247,0.18)", "💾", ""),
+        "rate_limited": (severity_color("medium", "rgba"), "⏳", " rate limited"),
+        "auth_failed": (severity_color("critical", "rgba"), "🔑", " key rejected"),
+        "nodata": (severity_color("unknown", "rgba"), "➖", " no data"),
+        "none": ("rgba(173,181,189,0.18)", "⚪", ""),
+    }
+    bg, icon, suffix = styles.get(status, styles["none"])
     return (
         f'<span style="display:inline-block;padding:2px 8px;margin:2px;'
         f'border-radius:10px;background:{bg};font-size:0.75rem;">'
-        f"{icon} {name}</span>"
+        f"{icon} {name}{suffix}</span>"
     )
 
 
@@ -555,7 +651,10 @@ def _render_ip_detail_card(ip: str, obj: dict, vt: dict, abuse: dict, gn: dict, 
     """Render an expandable detail card for a single IP."""
     verdict = _determine_ip_verdict(vt, abuse, gn, shodan)
 
-    with st.expander(f"🔍 {ip}  —  {_verdict_badge(verdict)}", expanded=False):
+    with st.expander(f"🔍 {ip}  —  {_verdict_label(verdict)}", expanded=False):
+        # Verdict badge (HTML) rendered at the top of the body — expander labels are
+        # markdown-only and cannot contain raw <span> HTML.
+        st.markdown(_verdict_badge(verdict), unsafe_allow_html=True)
         # Provider status pills
         providers_html = ""
         ip_providers_map = [
@@ -568,6 +667,9 @@ def _render_ip_detail_card(ip: str, obj: dict, vt: dict, abuse: dict, gn: dict, 
             raw = obj.get(data_key)
             if raw is None:
                 providers_html += _provider_pill(name, "none")
+            elif raw.get("_nodata"):
+                # Clean 404 — provider answered, knows nothing about this IP
+                providers_html += _provider_pill(name, "nodata")
             elif raw.get("_error"):
                 providers_html += _provider_pill(name, "error")
             elif raw.get("_cached"):
@@ -639,46 +741,37 @@ def _render_ip_detail_card(ip: str, obj: dict, vt: dict, abuse: dict, gn: dict, 
 
 
 def _render_provider_status_bar(osint_data: dict):
-    """Render provider configuration and response status indicators."""
+    """Render provider health pills aggregated across ALL queried indicators.
+
+    Sampling a single indicator used to paint a provider ❌ when that one
+    answer happened to be a clean 404 (Shodan unscanned IP, VT/OTX unknown
+    domain) even though every other indicator returned data. Aggregating via
+    provider_status keeps one negative answer from masking a working provider.
+    """
+    from app.pipeline.osint import provider_status
+
     ips_data = osint_data.get("ips") or {}
-    if not ips_data:
+    doms_data = osint_data.get("domains") or {}
+    if not ips_data and not doms_data:
         return
 
-    # Sample first IP to determine provider status
-    sample = next(iter(ips_data.values()), {})
-    providers = {
-        "VirusTotal": "vt",
-        "AbuseIPDB": "abuseipdb",
-        "GreyNoise": "greynoise",
-        "Shodan": "shodan",
-    }
-
     pills = []
-    for name, key in providers.items():
-        raw = sample.get(key)
-        if raw is None:
-            pills.append(_provider_pill(name, "none"))
-        elif raw.get("_error"):
-            pills.append(_provider_pill(name, "error"))
-        elif raw.get("_cached"):
-            pills.append(_provider_pill(name, "cached"))
-        else:
-            pills.append(_provider_pill(name, "ok"))
+    if ips_data:
+        ip_providers = [
+            ("VirusTotal", "vt"),
+            ("AbuseIPDB", "abuseipdb"),
+            ("GreyNoise", "greynoise"),
+            ("Shodan", "shodan"),
+        ]
+        for name, key in ip_providers:
+            status = provider_status([obj.get(key) for obj in ips_data.values()])
+            pills.append(_provider_pill(name, status))
 
     # Domain providers
-    doms_data = osint_data.get("domains") or {}
     if doms_data:
-        sample_dom = next(iter(doms_data.values()), {})
         for name, key in [("VT (Domain)", "vt"), ("OTX", "otx")]:
-            raw = sample_dom.get(key)
-            if raw is None:
-                pills.append(_provider_pill(name, "none"))
-            elif raw.get("_error"):
-                pills.append(_provider_pill(name, "error"))
-            elif raw.get("_cached"):
-                pills.append(_provider_pill(name, "cached"))
-            else:
-                pills.append(_provider_pill(name, "ok"))
+            status = provider_status([obj.get(key) for obj in doms_data.values()])
+            pills.append(_provider_pill(name, status))
 
     st.markdown("**Provider Status:** " + " ".join(pills), unsafe_allow_html=True)
 
@@ -690,10 +783,15 @@ def _render_osint_coverage_heatmap(osint_data: dict):
     if not ips_data and not doms_data:
         return
 
+    def _has_data(raw) -> bool:
+        # _error = provider failed; _nodata = provider answered "nothing known" —
+        # neither counts as actual data for this IOC.
+        return bool(raw) and not raw.get("_error") and not raw.get("_nodata")
+
     full = partial = none_count = 0
     ip_providers = ["vt", "abuseipdb", "greynoise", "shodan"]
     for obj in ips_data.values():
-        has = sum(1 for p in ip_providers if obj.get(p) and not obj.get(p, {}).get("_error"))
+        has = sum(1 for p in ip_providers if _has_data(obj.get(p)))
         if has == len(ip_providers):
             full += 1
         elif has > 0:
@@ -703,7 +801,7 @@ def _render_osint_coverage_heatmap(osint_data: dict):
 
     dom_providers = ["vt", "otx"]
     for obj in doms_data.values():
-        has = sum(1 for p in dom_providers if obj.get(p) and not obj.get(p, {}).get("_error"))
+        has = sum(1 for p in dom_providers if _has_data(obj.get(p)))
         if has == len(dom_providers):
             full += 1
         elif has > 0:
@@ -1068,7 +1166,7 @@ def render_osint(result_col, osint_data, *, correlations=None, features=None, be
 
         # ==================== IP TRIAGE TAB ====================
         with tab_ips:
-            st.caption("Prioritized IP table — select a row for WHOIS lookup.")
+            st.caption("Prioritized IP table — click a row's checkbox **or** use the WHOIS lookup control below.")
             ip_rows = []
             for ip, obj in (osint_data.get("ips") or {}).items():
                 vt = _extract_vt_ip_stats(obj)
@@ -1113,19 +1211,12 @@ def render_osint(result_col, osint_data, *, correlations=None, features=None, be
                 # Color-code verdict column using Streamlit column_config
                 render_export_buttons(df_ips, "osint_ips", key_suffix="ips_v2", is_dataframe=True)
 
-                # Apply row coloring via HTML
-                verdict_colors = {
-                    "CRITICAL": "background-color: rgba(255,107,107,0.15);",
-                    "HIGH": "background-color: rgba(255,169,77,0.15);",
-                    "MEDIUM": "background-color: rgba(255,212,59,0.10);",
-                    "LOW": "",
-                    "CLEAN": "background-color: rgba(77,171,247,0.08);",
-                    "UNKNOWN": "",
-                }
-
+                # Apply row coloring via HTML (low/unknown rows stay untinted)
                 def _color_rows(row):
-                    color = verdict_colors.get(row.get("Verdict", ""), "")
-                    return [color] * len(row)
+                    v = (row.get("Verdict") or "").lower()
+                    if v in ("low", "unknown") or not v:
+                        return [""] * len(row)
+                    return [f"background-color: {severity_color(v, 'rgba')};"] * len(row)
 
                 styled = df_ips.style.apply(_color_rows, axis=1)
 
@@ -1136,6 +1227,11 @@ def render_osint(result_col, osint_data, *, correlations=None, features=None, be
                     on_select="rerun",
                     selection_mode="single-row",
                     key=f"osint_ips_v2_{len(ip_rows)}",
+                    column_config={
+                        "Verdict": st.column_config.TextColumn("Verdict", width="small"),
+                        "IP": st.column_config.TextColumn("IP Address"),
+                        "PTR": st.column_config.TextColumn("PTR / rDNS"),
+                    },
                 )
 
                 current_sel = event.selection.rows
@@ -1145,6 +1241,18 @@ def render_osint(result_col, osint_data, *, correlations=None, features=None, be
                         idx = current_sel[0]
                         target_ip = df_ips.iloc[idx]["IP"]
                         show_whois_dialog(target_ip)
+
+                # Explicit WHOIS lookup control (clearer affordance than row-click alone)
+                ip_options = [r["IP"] for r in ip_rows]
+                whois_ip_choice = st.selectbox(
+                    "Look up WHOIS for…",
+                    options=ip_options,
+                    index=None,
+                    placeholder="Choose an IP",
+                    key="whois_ip_select",
+                )
+                if st.button("🔎 WHOIS lookup", key="whois_ip_btn") and whois_ip_choice:
+                    show_whois_dialog(whois_ip_choice)
 
                 # Verdict summary
                 from collections import Counter
@@ -1172,7 +1280,7 @@ def render_osint(result_col, osint_data, *, correlations=None, features=None, be
 
         # ==================== DOMAINS TAB ====================
         with tab_doms:
-            st.caption("Domain enrichment — select a row for WHOIS lookup.")
+            st.caption("Domain enrichment — click a row's checkbox **or** use the WHOIS lookup control below.")
             dom_rows = []
             for dom, obj in (osint_data.get("domains") or {}).items():
                 vt = obj.get("vt") or {}
@@ -1237,17 +1345,11 @@ def render_osint(result_col, osint_data, *, correlations=None, features=None, be
                 df_doms = pd.DataFrame(dom_rows)
                 render_export_buttons(df_doms, "osint_domains", key_suffix="doms_v2", is_dataframe=True)
 
-                verdict_colors = {
-                    "CRITICAL": "background-color: rgba(255,107,107,0.15);",
-                    "HIGH": "background-color: rgba(255,169,77,0.15);",
-                    "MEDIUM": "background-color: rgba(255,212,59,0.10);",
-                    "LOW": "",
-                    "CLEAN": "background-color: rgba(77,171,247,0.08);",
-                }
-
                 def _color_dom_rows(row):
-                    color = verdict_colors.get(row.get("Verdict", ""), "")
-                    return [color] * len(row)
+                    v = (row.get("Verdict") or "").lower()
+                    if v in ("low", "unknown") or not v:
+                        return [""] * len(row)
+                    return [f"background-color: {severity_color(v, 'rgba')};"] * len(row)
 
                 styled = df_doms.style.apply(_color_dom_rows, axis=1)
 
@@ -1267,6 +1369,18 @@ def render_osint(result_col, osint_data, *, correlations=None, features=None, be
                         idx = current_sel[0]
                         target_dom = df_doms.iloc[idx]["Domain"]
                         show_whois_dialog(target_dom)
+
+                # Explicit WHOIS lookup control (clearer affordance than row-click alone)
+                dom_options = [r["Domain"] for r in dom_rows]
+                whois_dom_choice = st.selectbox(
+                    "Look up WHOIS for…",
+                    options=dom_options,
+                    index=None,
+                    placeholder="Choose a domain",
+                    key="whois_dom_select",
+                )
+                if st.button("🔎 WHOIS lookup", key="whois_dom_btn") and whois_dom_choice:
+                    show_whois_dialog(whois_dom_choice)
 
                 # Verdict summary
                 from collections import Counter
@@ -1414,15 +1528,37 @@ def render_flows(result_col, flows: list[dict] | None):
         with st.expander("Flow Data", expanded=False):
             if flows:
                 df = pd.DataFrame(flows)
-                # Select key columns if available
-                display_cols = ["src", "dst", "sport", "dport", "proto", "count"]
+                # Core display columns; add timestamps/bytes when present
+                display_cols = ["src", "dst", "sport", "dport", "proto", "count", "bytes", "first_ts", "last_ts"]
                 display_cols = [c for c in display_cols if c in df.columns]
-                if display_cols:
-                    render_export_buttons(df[display_cols], "flows", key_suffix="flows", is_dataframe=True)
-                    st.dataframe(df[display_cols], width="stretch", hide_index=True)
-                else:
-                    render_export_buttons(df, "flows", key_suffix="flows_all", is_dataframe=True)
-                    st.dataframe(df, width="stretch", hide_index=True)
+                if not display_cols:
+                    display_cols = list(df.columns)
+
+                display_df = df[display_cols].copy()
+
+                # Convert epoch float timestamps to datetime for DatetimeColumn
+                for ts_col in ("first_ts", "last_ts"):
+                    if ts_col in display_df.columns:
+                        display_df[ts_col] = pd.to_datetime(display_df[ts_col], unit="s", errors="coerce")
+
+                col_cfg: dict = {}
+                if "count" in display_df.columns:
+                    col_cfg["count"] = st.column_config.NumberColumn("Packets", format="%d")
+                if "bytes" in display_df.columns:
+                    col_cfg["bytes"] = st.column_config.NumberColumn("Bytes", format="%d")
+                # Epoch → naive UTC; label the columns so analysts don't read them as local time.
+                if "first_ts" in display_df.columns:
+                    col_cfg["first_ts"] = st.column_config.DatetimeColumn(
+                        "First Seen (UTC)", format="YYYY-MM-DD HH:mm:ss"
+                    )
+                if "last_ts" in display_df.columns:
+                    col_cfg["last_ts"] = st.column_config.DatetimeColumn(
+                        "Last Seen (UTC)", format="YYYY-MM-DD HH:mm:ss"
+                    )
+
+                # Export uses the raw numeric df (no datetime conversion needed for CSV/JSON)
+                render_export_buttons(df[display_cols], "flows", key_suffix="flows", is_dataframe=True)
+                st.dataframe(display_df, width="stretch", hide_index=True, column_config=col_cfg or None)
             else:
                 st.caption("No flow data available.")
 
@@ -1478,8 +1614,10 @@ def render_report(result_col, report_md):
         st.markdown("#### LLM Report")
         if report_md:
             st.markdown(report_md)
+        elif _analysis_has_run():
+            st.info("📝 No LLM report yet — generate one from the LLM Analysis tab.")
         else:
-            st.caption("No report yet.")
+            st.info("📭 Upload a PCAP and run analysis to populate this section.")
 
 
 def render_dns_analysis(result_col, dns_analysis: dict | None):
@@ -1494,8 +1632,18 @@ def render_dns_analysis(result_col, dns_analysis: dict | None):
             )
         )
         with st.expander("DNS Analysis", expanded=expanded):
-            if dns_analysis is None or dns_analysis.get("error") or dns_analysis.get("skipped"):
-                st.caption("No DNS analysis data available.")
+            # analyze_dns always returns a truthy dict when it executes, so
+            # None means the stage was skipped or failed — never "ran clean".
+            if dns_analysis is None:
+                st.info(
+                    "📭 DNS analysis didn't run in this session (stage skipped or failed) — re-run with Zeek enabled."
+                )
+                return
+            if dns_analysis.get("skipped"):
+                st.info("📭 DNS analysis was skipped for this run.")
+                return
+            if dns_analysis.get("error"):
+                st.info(f"📭 DNS analysis: {dns_analysis['error']}")
                 return
 
             # Summary metrics
@@ -1604,8 +1752,19 @@ def render_tls_certificates(result_col, tls_analysis: dict | None):
             )
         )
         with st.expander("TLS Certificates", expanded=expanded):
-            if tls_analysis is None or tls_analysis.get("skipped"):
-                st.caption("No TLS certificate data available.")
+            # analyze_certificates always returns a truthy dict when it executes,
+            # so None means the stage was skipped or failed — never "ran clean".
+            if tls_analysis is None:
+                st.info(
+                    "📭 TLS certificate analysis didn't run in this session (stage skipped or failed) — "
+                    "re-run with Zeek enabled."
+                )
+                return
+            if tls_analysis.get("skipped"):
+                st.info("📭 TLS certificate analysis was skipped for this run.")
+                return
+            if tls_analysis.get("error"):
+                st.info(f"📭 TLS certificate analysis: {tls_analysis['error']}")
                 return
 
             # Summary metrics
@@ -1619,9 +1778,21 @@ def render_tls_certificates(result_col, tls_analysis: dict | None):
             with col4:
                 high_risk = tls_analysis.get("high_risk", 0)
                 if high_risk:
-                    st.metric("High Risk", high_risk, delta="Warning", delta_color="inverse")
+                    st.metric(
+                        "Trust Issues",
+                        high_risk,
+                        delta="Warning",
+                        delta_color="inverse",
+                        help="Certificates with a composite risk score ≥ 0.5 (expired, self-signed, weak keys, "
+                        "suspicious CN patterns, etc.). Neither proves malice; all warrant review.",
+                    )
                 else:
-                    st.metric("High Risk", 0)
+                    st.metric(
+                        "Trust Issues",
+                        0,
+                        help="Certificates with a composite risk score ≥ 0.5 (expired, self-signed, weak keys, "
+                        "suspicious CN patterns, etc.). Neither proves malice; all warrant review.",
+                    )
 
             # Alerts
             alerts = tls_analysis.get("alerts", {})
@@ -1654,9 +1825,9 @@ def render_tls_certificates(result_col, tls_analysis: dict | None):
                 def highlight_risk(row):
                     risk = row.get("risk_score", 0)
                     if risk >= 0.5:
-                        return ["background-color: #ffcccb"] * len(row)  # Light red for high risk
+                        return [f"background-color: {severity_color('high', 'rgba')};"] * len(row)
                     elif risk >= 0.3:
-                        return ["background-color: #fff3cd"] * len(row)  # Light yellow for medium risk
+                        return [f"background-color: {severity_color('medium', 'rgba')};"] * len(row)
                     return [""] * len(row)
 
                 styled_df = df_certs[display_cols].style.apply(highlight_risk, axis=1)
@@ -1798,8 +1969,13 @@ def render_yara_results(result_col, yara_results: dict | None):
     with result_col:
         expanded = bool(yara_results and yara_results.get("matched", 0) > 0)
         with st.expander("YARA Scan Results", expanded=expanded):
+            # scan_carved_files always returns a truthy dict when it executes, so
+            # None/empty means the stage was skipped or failed — never "ran clean".
             if not yara_results:
-                st.caption("No YARA scan data available.")
+                st.info(
+                    "📭 YARA scan didn't run in this session (stage skipped or failed) — "
+                    "re-run with the YARA phase enabled."
+                )
                 return
 
             if not yara_results.get("yara_available"):
@@ -1807,7 +1983,7 @@ def render_yara_results(result_col, yara_results: dict | None):
                 return
 
             if yara_results.get("error"):
-                st.error(f"YARA Error: {yara_results['error']}")
+                st.info(f"📭 YARA scan: {yara_results['error']}")
                 return
 
             # Summary metrics
@@ -1880,11 +2056,9 @@ def render_yara_results(result_col, yara_results: dict | None):
 
                         # Color-code by severity
                         def highlight_severity(row):
-                            sev = row.get("Severity", "")
-                            if sev == "critical":
-                                return ["background-color: #ffcccb"] * len(row)
-                            elif sev == "high":
-                                return ["background-color: #fff3cd"] * len(row)
+                            sev = (row.get("Severity") or "").lower()
+                            if sev in ("critical", "high"):
+                                return [f"background-color: {severity_color(sev, 'rgba')};"] * len(row)
                             return [""] * len(row)
 
                         styled_df = df_matches.style.apply(highlight_severity, axis=1)
@@ -1971,9 +2145,9 @@ def render_attack_mapping(result_col, attack_mapping):
                     conf_str = row.get("Confidence", "0%")
                     conf = float(conf_str.replace("%", "")) / 100
                     if conf >= 0.8:
-                        return ["background-color: #ffcccb"] * len(row)
+                        return [f"background-color: {severity_color('high', 'rgba')};"] * len(row)
                     elif conf >= 0.6:
-                        return ["background-color: #fff3cd"] * len(row)
+                        return [f"background-color: {severity_color('medium', 'rgba')};"] * len(row)
                     return [""] * len(row)
 
                 styled_df = df.style.apply(highlight_confidence, axis=1)
@@ -2122,12 +2296,8 @@ def render_ioc_scores(result_col, scored_iocs: list | None):
 
                 def highlight_priority(row):
                     priority = row.get("Priority", "").lower()
-                    if priority == "critical":
-                        return ["background-color: #ff6b6b"] * len(row)
-                    elif priority == "high":
-                        return ["background-color: #ffa94d"] * len(row)
-                    elif priority == "medium":
-                        return ["background-color: #ffd43b"] * len(row)
+                    if priority in ("critical", "high", "medium"):
+                        return [f"background-color: {severity_color(priority, 'rgba')};"] * len(row)
                     return [""] * len(row)
 
                 styled_df = df.style.apply(highlight_priority, axis=1)
@@ -2227,64 +2397,91 @@ def render_ioc_search(
         query_lower = query.lower().strip()
         results_found = False
 
-        # Search IPs
-        if features:
-            ips = features.get("artifacts", {}).get("ips", [])
-            matched_ips = [ip for ip in ips if query_lower in ip.lower()]
-            if matched_ips:
-                results_found = True
-                with st.expander(f"IPs ({len(matched_ips)} matches)", expanded=True):
-                    for ip in matched_ips[:10]:
-                        osint_ip = (osint or {}).get("ips", {}).get(ip, {})
-                        gn = osint_ip.get("greynoise", {}).get("classification", "n/a")
-                        ptr = osint_ip.get("ptr", "n/a")
-                        st.markdown(f"**{ip}** — PTR: {ptr}, GreyNoise: {gn}")
+        # --- Pre-compute full match lists so we can check whether any category exceeds 10
+        matched_ips: list[str] = []
+        matched_doms: list[str] = []
+        matched_ja3: list[str] = []
 
-        # Search domains
         if features:
-            domains = features.get("artifacts", {}).get("domains", [])
-            matched_doms = [d for d in domains if query_lower in d.lower()]
-            if matched_doms:
-                results_found = True
-                with st.expander(f"Domains ({len(matched_doms)} matches)", expanded=True):
-                    for dom in matched_doms[:10]:
-                        # Check DNS analysis
-                        dga_hit = ""
-                        if dns_analysis:
-                            for dga in dns_analysis.get("dga_detections", []):
-                                if dga.get("domain") == dom and dga.get("is_dga"):
-                                    dga_hit = " **[DGA]**"
-                                    break
-                        st.markdown(f"**{dom}**{dga_hit}")
-
-        # Search JA3 hashes
-        if features:
+            matched_ips = [ip for ip in features.get("artifacts", {}).get("ips", []) if query_lower in ip.lower()]
+            matched_doms = [d for d in features.get("artifacts", {}).get("domains", []) if query_lower in d.lower()]
             ja3s = features.get("artifacts", {}).get("ja3", [])
             if isinstance(ja3s, list):
                 matched_ja3 = [j for j in ja3s if isinstance(j, str) and query_lower in j.lower()]
-                if matched_ja3:
-                    results_found = True
-                    with st.expander(f"JA3 ({len(matched_ja3)} matches)", expanded=True):
-                        for j in matched_ja3[:10]:
-                            st.code(j)
 
-        # Search beacon destinations
+        # Beacon matches computed separately (DataFrame)
+        matched_beacon = None
         if beacon_df is not None and not beacon_df.empty:
             try:
                 mask = beacon_df["dst"].str.contains(query_lower, case=False, na=False)
-                matched = beacon_df[mask]
-                if not matched.empty:
-                    results_found = True
-                    with st.expander(
-                        f"Beacon Candidates ({len(matched)} matches)",
-                        expanded=True,
-                    ):
-                        st.dataframe(
-                            matched[["src", "dst", "dport", "score"]],
-                            hide_index=True,
-                        )
+                matched_beacon = beacon_df[mask]
+                if matched_beacon.empty:
+                    matched_beacon = None
             except Exception:
-                pass
+                matched_beacon = None
+
+        # Show-all checkbox only when at least one category has more than 10 matches
+        any_truncated = (
+            len(matched_ips) > 10
+            or len(matched_doms) > 10
+            or len(matched_ja3) > 10
+            or (matched_beacon is not None and len(matched_beacon) > 10)
+        )
+        if any_truncated:
+            st.checkbox("Show all results", key="ioc_search_show_all")
+        limit = None if st.session_state.get("ioc_search_show_all") else 10
+
+        # Search IPs
+        if matched_ips:
+            results_found = True
+            with st.expander(f"IPs ({len(matched_ips)} matches)", expanded=True):
+                for ip in matched_ips[:limit]:
+                    osint_ip = (osint or {}).get("ips", {}).get(ip, {})
+                    gn = osint_ip.get("greynoise", {}).get("classification", "n/a")
+                    ptr = osint_ip.get("ptr", "n/a")
+                    st.markdown(f"**{ip}** — PTR: {ptr}, GreyNoise: {gn}")
+                if limit is not None and len(matched_ips) > limit:
+                    st.caption(f"Showing 10 of {len(matched_ips)} — enable 'Show all results' above.")
+
+        # Search domains
+        if matched_doms:
+            results_found = True
+            with st.expander(f"Domains ({len(matched_doms)} matches)", expanded=True):
+                for dom in matched_doms[:limit]:
+                    # Check DNS analysis
+                    dga_hit = ""
+                    if dns_analysis:
+                        for dga in dns_analysis.get("dga_detections", []):
+                            if dga.get("domain") == dom and dga.get("is_dga"):
+                                dga_hit = " **[DGA]**"
+                                break
+                    st.markdown(f"**{dom}**{dga_hit}")
+                if limit is not None and len(matched_doms) > limit:
+                    st.caption(f"Showing 10 of {len(matched_doms)} — enable 'Show all results' above.")
+
+        # Search JA3 hashes
+        if matched_ja3:
+            results_found = True
+            with st.expander(f"JA3 ({len(matched_ja3)} matches)", expanded=True):
+                for j in matched_ja3[:limit]:
+                    st.code(j)
+                if limit is not None and len(matched_ja3) > limit:
+                    st.caption(f"Showing 10 of {len(matched_ja3)} — enable 'Show all results' above.")
+
+        # Search beacon destinations
+        if matched_beacon is not None:
+            results_found = True
+            with st.expander(
+                f"Beacon Candidates ({len(matched_beacon)} matches)",
+                expanded=True,
+            ):
+                display_beacon = matched_beacon if limit is None else matched_beacon.head(limit)
+                st.dataframe(
+                    display_beacon[["src", "dst", "dport", "score"]],
+                    hide_index=True,
+                )
+                if limit is not None and len(matched_beacon) > limit:
+                    st.caption(f"Showing 10 of {len(matched_beacon)} — enable 'Show all results' above.")
 
         if not results_found:
             st.caption(f"No results for '{query}'")
@@ -2402,7 +2599,13 @@ def render_hunting_checklist(
 def render_correlation_results(result_col, correlations: list | None):
     """Render cross-indicator correlation results."""
     with result_col:
+        if correlations is None:
+            # Not computed in this session (fresh start, restored case, or the
+            # post-analysis step failed) — never claim "ran clean" here.
+            st.info("📭 Correlation results aren't available in this session — run an analysis to compute them.")
+            return
         if not correlations:
+            render_empty_state("Correlation ran — no cross-indicator threats found.")
             return
 
         with st.expander("Cross-Indicator Correlations", expanded=True):
@@ -2429,12 +2632,8 @@ def render_correlation_results(result_col, correlations: list | None):
 
                 def highlight_verdict(row):
                     v = row.get("Verdict", "").lower()
-                    if v == "critical":
-                        return ["background-color: #ff6b6b"] * len(row)
-                    elif v == "high":
-                        return ["background-color: #ffa94d"] * len(row)
-                    elif v == "medium":
-                        return ["background-color: #ffd43b"] * len(row)
+                    if v in ("critical", "high", "medium"):
+                        return [f"background-color: {severity_color(v, 'rgba')};"] * len(row)
                     return [""] * len(row)
 
                 styled_df = df.style.apply(highlight_verdict, axis=1)
@@ -2444,7 +2643,12 @@ def render_correlation_results(result_col, correlations: list | None):
 def render_flow_asymmetry(result_col, asymmetry_results: list | None):
     """Render flow asymmetry (data exfiltration) detection results."""
     with result_col:
+        if asymmetry_results is None:
+            # Not computed in this session — never claim "ran clean" here.
+            st.info("📭 Flow-asymmetry results aren't available in this session — run an analysis to compute them.")
+            return
         if not asymmetry_results:
+            render_empty_state("Flow analysis ran — no asymmetric exfiltration patterns found.")
             return
 
         suspicious = [
@@ -2453,6 +2657,7 @@ def render_flow_asymmetry(result_col, asymmetry_results: list | None):
             if (hasattr(r, "is_suspicious") and r.is_suspicious) or (isinstance(r, dict) and r.get("is_suspicious"))
         ]
         if not suspicious:
+            render_empty_state("Flow analysis ran — no asymmetric exfiltration patterns found.")
             return
 
         expanded = len(suspicious) > 0
@@ -2468,10 +2673,10 @@ def render_flow_asymmetry(result_col, asymmetry_results: list | None):
                     {
                         "Source": d.get("src", ""),
                         "Destination": d.get("dst", ""),
-                        "Outbound": f"{out_mb:.1f} MB",
-                        "Inbound": f"{in_mb:.1f} MB",
-                        "Ratio": f"{d.get('ratio', 0):.1f}:1",
-                        "Score": f"{d.get('score', 0):.1%}",
+                        "Outbound MB": out_mb,
+                        "Inbound MB": in_mb,
+                        "Ratio": float(d.get("ratio", 0)),
+                        "Score": float(d.get("score", 0)),
                         "Reason": d.get("reason", ""),
                     }
                 )
@@ -2484,13 +2689,30 @@ def render_flow_asymmetry(result_col, asymmetry_results: list | None):
                     key_suffix="asymm",
                     is_dataframe=True,
                 )
-                st.dataframe(df, width="stretch", hide_index=True)
+                st.dataframe(
+                    df,
+                    width="stretch",
+                    hide_index=True,
+                    column_config={
+                        "Outbound MB": st.column_config.NumberColumn("Outbound", format="%.1f MB"),
+                        "Inbound MB": st.column_config.NumberColumn("Inbound", format="%.1f MB"),
+                        "Ratio": st.column_config.NumberColumn("Ratio (:1)", format="%.1f"),
+                        "Score": st.column_config.ProgressColumn(
+                            "Score", min_value=0.0, max_value=1.0, format="%.0f%%"
+                        ),
+                    },
+                )
 
 
 def render_port_anomalies(result_col, anomaly_results: list | None):
     """Render port/protocol anomaly detection results."""
     with result_col:
+        if anomaly_results is None:
+            # Not computed in this session — never claim "ran clean" here.
+            st.info("📭 Port-anomaly results aren't available in this session — run an analysis to compute them.")
+            return
         if not anomaly_results:
+            render_empty_state("Flow analysis ran — no suspicious port usage found.")
             return
 
         with st.expander(f"Port Anomalies ({len(anomaly_results)})", expanded=bool(anomaly_results)):
@@ -2504,7 +2726,7 @@ def render_port_anomalies(result_col, anomaly_results: list | None):
                         "Port": d.get("port", ""),
                         "Proto": d.get("proto", ""),
                         "Type": d.get("anomaly_type", "").replace("_", " ").title(),
-                        "Score": f"{d.get('score', 0):.1%}",
+                        "Score": float(d.get("score", 0)),
                         "Reason": d.get("reason", ""),
                     }
                 )
@@ -2517,7 +2739,16 @@ def render_port_anomalies(result_col, anomaly_results: list | None):
                     key_suffix="port",
                     is_dataframe=True,
                 )
-                st.dataframe(df, width="stretch", hide_index=True)
+                st.dataframe(
+                    df,
+                    width="stretch",
+                    hide_index=True,
+                    column_config={
+                        "Score": st.column_config.ProgressColumn(
+                            "Score", min_value=0.0, max_value=1.0, format="%.0f%%"
+                        ),
+                    },
+                )
 
 
 def render_nxdomain_analysis(result_col, dns_analysis: dict | None):

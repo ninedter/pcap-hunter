@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import concurrent.futures
+import functools
 import ipaddress
 import logging
 import re
@@ -61,8 +62,8 @@ def bulk_resolve_ips(
             cached = cache.get_batch(unique_ips)
             result.update(cached)
             uncached = [ip for ip in unique_ips if ip not in cached]
-        except Exception:
-            pass  # cache unavailable — resolve everything
+        except Exception as e:
+            logger.debug("rdns lookup failed: %s", e)  # cache unavailable — resolve everything
 
     if not uncached:
         return result
@@ -78,8 +79,8 @@ def bulk_resolve_ips(
                 if hostname:
                     result[ip] = hostname
                     new_entries.append((ip, hostname))
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("rdns lookup failed: %s", e)
 
     # Store new resolutions in cache
     if use_cache and new_entries:
@@ -182,10 +183,44 @@ def get_whois_info(target: str) -> dict | str:
         return f"WHOIS lookup failed for {target}: {e}"
 
 
+@functools.lru_cache(maxsize=4096)
 def is_public_ipv4(s: str) -> bool:
-    """Check if string is a valid *public* IPv4 address."""
+    """Check if string is a valid *public* IPv4 address.
+
+    Pure string -> bool; cached because it is called repeatedly for the same
+    IPs across pipeline stages, correlation, and UI rendering.
+    """
     try:
         ip = ipaddress.ip_address(s)
         return isinstance(ip, ipaddress.IPv4Address) and ip.is_global
     except (ValueError, TypeError):
         return False
+
+
+def pick_top_public_ips(features: dict, n: int) -> list[str]:
+    """
+    Return top-N public IPv4s by packet volume across flows.
+    If n <= 0, return all public IPv4s from artifacts.
+    """
+    if not isinstance(features, dict) or n <= 0:
+        return [ip for ip in (features or {}).get("artifacts", {}).get("ips", []) if is_public_ipv4(ip)]
+
+    flows = (features or {}).get("flows", [])
+    if not flows:
+        return [ip for ip in (features or {}).get("artifacts", {}).get("ips", []) if is_public_ipv4(ip)]
+
+    counts = {}
+    for f in flows:
+        pkts = int(f.get("count") or 0)
+        src = f.get("src")
+        dst = f.get("dst")
+        if src and is_public_ipv4(src):
+            counts[src] = counts.get(src, 0) + pkts
+        if dst and is_public_ipv4(dst):
+            counts[dst] = counts.get(dst, 0) + pkts
+
+    if not counts:
+        return [ip for ip in (features or {}).get("artifacts", {}).get("ips", []) if is_public_ipv4(ip)]
+
+    ranked = sorted(counts.items(), key=lambda kv: kv[1], reverse=True)
+    return [ip for ip, _ in ranked[: max(1, n)]]

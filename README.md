@@ -192,6 +192,7 @@ with per-section clear buttons.
 - **Persistent View Options** — "Exclude Private IPs" toggle persists during interactive exploration.
 - **TopN Charts** — Top IPs, Ports, Protocols, Domains with aggregated bar charts, metrics, and **reverse DNS hostnames**.
 - **Dashboard Detections** — Beaconing candidates, YARA matches, and TLS certificate risks surfaced directly on the dashboard.
+- **Severity Legend & UTC Timestamps** — One-line severity color legend for at-a-glance calibration; flow time-series axes are explicitly labeled UTC.
 - **Network Communication Graph** — Force-directed graph with threat-colored nodes and equal-aspect-ratio rendering.
 
 ### OSINT Enrichment
@@ -228,7 +229,7 @@ PCAP Hunter ships a FastAPI-based REST API alongside the Streamlit UI so SOAR pl
 
 ```bash
 # Start the API server (port 8000)
-PCAP_HUNTER_API_KEY=changeme uvicorn app.api.app:app --host 0.0.0.0 --port 8000
+PCAP_HUNTER_API_KEY=changeme uvicorn app.api.app:create_app --factory --host 0.0.0.0 --port 8000
 
 # Submit a PCAP for analysis
 curl -X POST http://localhost:8000/api/v1/pcaps \

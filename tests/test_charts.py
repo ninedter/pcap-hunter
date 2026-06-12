@@ -82,3 +82,35 @@ def test_plot_flow_timeline():
     # Volume trace covers the time range, typically 1 or more points depending on sampling.
     scatter_points = sum(len(trace.x) for trace in fig.data if trace.mode == "markers")
     assert scatter_points == 2
+
+
+def test_plot_flow_timeline_uses_true_extent_beyond_sample_cap():
+    # Sampled pkt_times stop at t=105 (per-flow cap, keep-first), but the flow
+    # truly ran until t=400 — duration must come from first_ts/last_ts (300s),
+    # not max(pkt_times) - min(pkt_times) (5s).
+    flows = [
+        {
+            "pkt_times": [100.0, 105.0],
+            "first_ts": 100.0,
+            "last_ts": 400.0,
+            "proto": "TCP",
+            "count": 500,
+            "src": "1.1.1.1",
+            "dst": "2.2.2.2",
+        },
+    ]
+    fig = plot_flow_timeline(flows)
+    marker_traces = [t for t in fig.data if t.mode == "markers"]
+    assert len(marker_traces) == 1
+    assert marker_traces[0].y[0] == 300.0
+
+
+def test_plot_flow_timeline_falls_back_to_pkt_times_extent():
+    # Legacy flows without first_ts/last_ts keep the old min/max(pkt_times) path.
+    flows = [
+        {"pkt_times": [100.0, 105.0], "proto": "TCP", "count": 5, "src": "1.1.1.1", "dst": "2.2.2.2"},
+    ]
+    fig = plot_flow_timeline(flows)
+    marker_traces = [t for t in fig.data if t.mode == "markers"]
+    assert len(marker_traces) == 1
+    assert marker_traces[0].y[0] == 5.0

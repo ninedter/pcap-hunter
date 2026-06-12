@@ -8,6 +8,7 @@ from app.utils.network_utils import (
     _validate_domain,
     bulk_resolve_ips,
     is_public_ipv4,
+    pick_top_public_ips,
     resolve_ip,
 )
 
@@ -36,6 +37,18 @@ class TestIsPublicIPv4:
 
     def test_ipv6(self):
         assert is_public_ipv4("::1") is False
+
+    def test_lru_cached(self):
+        """is_public_ipv4 is lru_cache-decorated and stays correct on repeat calls."""
+        is_public_ipv4.cache_clear()
+        assert is_public_ipv4("8.8.8.8") is True
+        assert is_public_ipv4("10.0.0.1") is False
+        info = is_public_ipv4.cache_info()
+        assert info.currsize >= 2
+        # Repeat calls hit the cache and return the same results
+        assert is_public_ipv4("8.8.8.8") is True
+        assert is_public_ipv4("10.0.0.1") is False
+        assert is_public_ipv4.cache_info().hits > info.hits
 
 
 class TestValidateDomain:
@@ -100,3 +113,16 @@ class TestBulkResolveIPs:
         mock_resolve.side_effect = Exception("network error")
         result = bulk_resolve_ips(["1.1.1.1"], use_cache=False)
         assert result == {}
+
+
+def test_pick_top_public_ips_ranks_by_packet_volume():
+    features = {
+        "flows": [
+            {"src": "8.8.8.8", "dst": "10.0.0.1", "count": 100},
+            {"src": "1.1.1.1", "dst": "10.0.0.1", "count": 5},
+        ],
+        "artifacts": {"ips": ["8.8.8.8", "1.1.1.1", "10.0.0.1"]},
+    }
+    assert pick_top_public_ips(features, 1) == ["8.8.8.8"]
+    # n <= 0 -> all public ips from artifacts
+    assert set(pick_top_public_ips(features, 0)) == {"8.8.8.8", "1.1.1.1"}

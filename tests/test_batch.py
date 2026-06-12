@@ -83,6 +83,30 @@ class TestCorrelateResults:
         assert correlation.total_packets == 100
         assert len(correlation.shared_ips) == 0  # No sharing (error file excluded)
 
+    def test_time_range_prefers_true_flow_extent(self):
+        """Capped flows: first_ts/last_ts survive the per-flow sample cap, so the
+        batch time range must prefer them over the sampled pkt_times."""
+        capped_flow = {
+            "src": "10.0.0.1",
+            "dst": "1.2.3.4",
+            "proto": "tcp",
+            "count": 9000,
+            # Sampled timestamps stop early; the flow really ran 50.0 → 2000.0.
+            "pkt_times": [100.0, 150.0, 200.0],
+            "first_ts": 50.0,
+            "last_ts": 2000.0,
+        }
+        results = [create_pcap_result("file1.pcap", flows=[capped_flow])]
+        correlation = correlate_results(results)
+        assert correlation.time_range == (50.0, 2000.0)
+
+    def test_time_range_falls_back_to_pkt_times(self):
+        """Legacy flows without first_ts/last_ts still produce a time range."""
+        legacy_flow = {"src": "10.0.0.1", "dst": "1.2.3.4", "pkt_times": [100.0, 300.0]}
+        results = [create_pcap_result("file1.pcap", flows=[legacy_flow])]
+        correlation = correlate_results(results)
+        assert correlation.time_range == (100.0, 300.0)
+
     def test_common_indicators(self):
         results = [
             create_pcap_result("file1.pcap", ips=["1.2.3.4"], domains=["c2.evil.com"]),
@@ -97,6 +121,46 @@ class TestCorrelateResults:
         ip_indicator = next((i for i in correlation.common_indicators if i["value"] == "1.2.3.4"), None)
         assert ip_indicator is not None
         assert ip_indicator["file_count"] == 3
+
+
+class TestPCAPResultShape:
+    """PCAPResult carries per-run zeek log paths, rDNS results, and carved items downstream."""
+
+    def test_zeek_log_paths_defaults_empty(self):
+        result = PCAPResult(path="/data/test.pcap", filename="test.pcap")
+        assert result.zeek_log_paths == {}
+
+    def test_zeek_log_paths_accepts_mapping(self):
+        paths = {"ssl.log": "/data/zeek/run_ab12cd34/ssl.log"}
+        result = PCAPResult(path="/data/test.pcap", filename="test.pcap", zeek_log_paths=paths)
+        assert result.zeek_log_paths == paths
+
+    def test_rdns_map_defaults_empty(self):
+        result = PCAPResult(path="/data/test.pcap", filename="test.pcap")
+        assert result.rdns_map == {}
+
+    def test_rdns_map_accepts_mapping(self):
+        rdns = {"8.8.8.8": "dns.google"}
+        result = PCAPResult(path="/data/test.pcap", filename="test.pcap", rdns_map=rdns)
+        assert result.rdns_map == rdns
+
+    def test_carved_items_defaults_empty(self):
+        result = PCAPResult(path="/data/test.pcap", filename="test.pcap")
+        assert result.carved_items == []
+
+    def test_carved_items_accepts_records(self):
+        carved = [
+            {
+                "time": "2026-01-01 00:00:00",
+                "tcp_stream": 3,
+                "content_type": "application/octet-stream",
+                "content_length": 1024,
+                "sha256": "a" * 64,
+                "path": "/data/carved/run_ab12cd34/stream3.bin",
+            }
+        ]
+        result = PCAPResult(path="/data/test.pcap", filename="test.pcap", carved_items=carved)
+        assert result.carved_items == carved
 
 
 class TestMergeZeekTables:

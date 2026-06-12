@@ -14,7 +14,8 @@ import pandas as pd
 import streamlit as st
 
 from app import config as C
-from app.llm.client import generate_report
+from app.analysis.flow_aggregates import compute_flow_aggregates
+from app.llm import providers as llm_providers
 from app.pipeline.batch import BatchProcessor, PCAPResult
 from app.pipeline.geoip import GeoIP
 from app.pipeline.osint import enrich as osint_enrich
@@ -39,6 +40,7 @@ from app.ui.charts import (
 )
 from app.ui.config_ui import init_config_defaults, render_config_tab
 from app.ui.layout import (
+    analysis_has_run,
     inject_css,
     make_progress_panel,
     make_results_panel,
@@ -62,12 +64,14 @@ from app.ui.layout import (
     render_port_anomalies,
     render_query_velocity,
     render_report,
+    render_severity_legend,
     render_threat_summary,
     render_tls_certificates,
     render_yara_results,
     render_zeek,
 )
 from app.utils.common import ensure_dir, find_bin, is_public_ipv4, make_slug, uniq_sorted
+from app.utils.network_utils import pick_top_public_ips
 
 logger = logging.getLogger(__name__)
 
@@ -97,6 +101,15 @@ def validate_pcap_path(path_str: str) -> str | None:
 def get_df_state(key: str) -> pd.DataFrame:
     val = st.session_state.get(key, None)
     return val if isinstance(val, pd.DataFrame) else pd.DataFrame()
+
+
+def _precompute_dash_aggregates(flows: list | None) -> None:
+    """Cache dashboard top-N aggregates for the unfiltered fast path.
+
+    Flow-count semantics — one increment per flow row, matching the legacy
+    dashboard behaviour.
+    """
+    st.session_state["dash_aggregates"] = compute_flow_aggregates(flows, top_n=10, weight="flows")
 
 
 def _ss_default(key: str, value):
@@ -164,7 +177,8 @@ def _run_single_pcap_pipeline(
             p = tracker.next_phase("YARA Scanning")
             from app.pipeline.yara_scan import scan_carved_files
 
-            _yara = scan_carved_files(result.carved_items, phase=p)
+            _yara_dir = (st.session_state.get("cfg_yara_rules_dir") or "").strip()
+            _yara = scan_carved_files(result.carved_items, rules_dirs=[_yara_dir] if _yara_dir else None, phase=p)
             st.session_state["yara_results"] = _yara
 
         # --- Stage 9: OSINT enrichment ---
@@ -204,41 +218,15 @@ def _run_single_pcap_pipeline(
         filename=filename,
         features=features,
         zeek_tables=zeek_tables,
+        zeek_log_paths=result.zeek_log_paths,
+        rdns_map=rdns_map,
+        carved_items=result.carved_items,
         osint=osint_data,
         beacon_df=beacon_df if isinstance(beacon_df, pd.DataFrame) else None,
         dns_analysis=result.dns_analysis or {},
         tls_analysis=result.tls_analysis or {},
         packet_count=result.packet_count,
     )
-
-
-def pick_top_public_ips(features: dict, n: int) -> list[str]:
-    """
-    Return top-N public IPv4s by packet volume across flows.
-    If n <= 0, return all public IPv4s from artifacts.
-    """
-    if not isinstance(features, dict) or n <= 0:
-        return [ip for ip in (features or {}).get("artifacts", {}).get("ips", []) if is_public_ipv4(ip)]
-
-    flows = (features or {}).get("flows", [])
-    if not flows:
-        return [ip for ip in (features or {}).get("artifacts", {}).get("ips", []) if is_public_ipv4(ip)]
-
-    counts = {}
-    for f in flows:
-        pkts = int(f.get("count") or 0)
-        src = f.get("src")
-        dst = f.get("dst")
-        if src and is_public_ipv4(src):
-            counts[src] = counts.get(src, 0) + pkts
-        if dst and is_public_ipv4(dst):
-            counts[dst] = counts.get(dst, 0) + pkts
-
-    if not counts:
-        return [ip for ip in (features or {}).get("artifacts", {}).get("ips", []) if is_public_ipv4(ip)]
-
-    ranked = sorted(counts.items(), key=lambda kv: kv[1], reverse=True)
-    return [ip for ip, _ in ranked[: max(1, n)]]
 
 
 # ---------------------------------------------------------------------------
@@ -346,6 +334,25 @@ for k, v in [
 # ---------------------- 1) Upload ----------------------
 with tab_upload:
     st.subheader("1) Load PCAP")
+
+    # --- Getting-started panel (first-run onboarding, dismissable) ---
+    if not st.session_state.get("_onboard_dismissed") and not analysis_has_run():
+        with st.container(border=True):
+            st.markdown("##### 🚀 Getting started")
+            st.markdown(
+                "1. **Upload a PCAP** below (or type a container path).\n"
+                "2. Click **Extract & Analyze** — the 10-stage pipeline parses packets (tshark/PyShark), "
+                "runs Zeek, hunts DNS/TLS/beaconing anomalies, carves HTTP payloads, scans with YARA, "
+                "and enriches IOCs via OSINT.\n"
+                "3. Review findings in **📊 Dashboard** (verdict + visuals), **🕵️ OSINT** (per-IOC triage), and "
+                "**📋 Raw Data** (full evidence). Generate an AI report in **🤖 LLM Analysis**.\n\n"
+                "*Optional:* add OSINT API keys (**🔑 API Keys** tab) and an LM Studio endpoint (**⚙️ Config** tab) "
+                "to unlock enrichment and AI reports."
+            )
+            if st.button("Got it — don't show again", key="_onboard_dismiss_btn"):
+                st.session_state["_onboard_dismissed"] = True
+                st.rerun()
+
     col_a, col_b = st.columns([1, 1])
     with col_a:
         uploaded_files = st.file_uploader(
@@ -458,6 +465,7 @@ with tab_upload:
                 "__batch_result": None,
             }
         )
+        st.toast("Analysis started — follow progress in the Progress tab", icon="🚀")
         st.success("Analysis started. Switch to the **Progress** tab to monitor.")
         st.rerun()
 
@@ -469,10 +477,23 @@ with tab_progress:
         pcap_paths = st.session_state.get("__pcap_paths") or ([pcap_path] if pcap_path else [])
         batch_mode = st.session_state.get("__batch_mode", False) and len(pcap_paths) > 1
 
-        base_url = cfg_get("cfg_lm_base_url", "LMSTUDIO_BASE_URL", C.LM_BASE_URL)
-        api_key = cfg_get("cfg_lm_api_key", "LMSTUDIO_API_KEY", C.LM_API_KEY)
-        model = cfg_get("cfg_lm_model", "LMSTUDIO_MODEL", C.LM_MODEL)
+        llm_provider = cfg_get("cfg_llm_provider", "LLM_PROVIDER", C.LLM_PROVIDER_DEFAULT)
+        if llm_provider not in llm_providers.PROVIDERS:
+            llm_provider = C.LLM_PROVIDER_DEFAULT
+        if llm_provider == llm_providers.PROVIDER_OPENAI:
+            base_url = cfg_get("cfg_openai_base_url", "OPENAI_BASE_URL", "")
+            api_key = cfg_get("cfg_openai_api_key", "OPENAI_API_KEY", "")
+            model = cfg_get("cfg_openai_model", "OPENAI_MODEL", C.OPENAI_MODEL_DEFAULT)
+        elif llm_provider == llm_providers.PROVIDER_ANTHROPIC:
+            base_url = ""  # Anthropic SDK ignores base_url
+            api_key = cfg_get("cfg_anthropic_api_key", "ANTHROPIC_API_KEY", "")
+            model = cfg_get("cfg_anthropic_model", "ANTHROPIC_MODEL", C.ANTHROPIC_MODEL_DEFAULT)
+        else:  # LM Studio
+            base_url = cfg_get("cfg_lm_base_url", "LMSTUDIO_BASE_URL", C.LM_BASE_URL)
+            api_key = cfg_get("cfg_lm_api_key", "LMSTUDIO_API_KEY", C.LM_API_KEY)
+            model = cfg_get("cfg_lm_model", "LMSTUDIO_MODEL", C.LM_MODEL)
         language = cfg_get("cfg_lm_language", "LMSTUDIO_LANGUAGE", C.LM_LANGUAGE)
+        provider_label = llm_providers.provider_label(llm_provider)
 
         try:
             limit_packets = int(st.session_state.get("cfg_limit_packets", C.DEFAULT_PYSHARK_LIMIT)) or None
@@ -590,6 +611,14 @@ with tab_progress:
             st.session_state["beacon_df"] = batch_result.merged_beacons
             st.session_state["dns_analysis"] = batch_result.aggregated_dns
             st.session_state["tls_analysis"] = batch_result.aggregated_tls
+            # Carved payloads concatenated across all successful files
+            st.session_state["carved"] = [
+                item for r in batch_result.pcap_results if not r.error for item in r.carved_items
+            ]
+
+            _precompute_dash_aggregates((st.session_state.get("features") or {}).get("flows"))
+            # a fresh run supersedes any restored case
+            st.session_state.pop("restored_analysis_id", None)
 
             # rDNS for merged IPs
             from app.utils.network_utils import bulk_resolve_ips
@@ -598,11 +627,14 @@ with tab_progress:
             _pub = [ip for ip in merged_feats.get("artifacts", {}).get("ips", []) if is_public_ipv4(ip)]
             st.session_state["rdns_map"] = bulk_resolve_ips(_pub, max_workers=C.RDNS_MAX_WORKERS)
 
-            # Extract JA3 from merged Zeek
-            from app.pipeline.zeek import extract_ja3_from_zeek_tables
+            # Extract JA3 from every successful run's own zeek logs (each run
+            # writes into its own ZEEK_DIR/<run_id> subdir) and combine them,
+            # so batch JA3 reflects all files instead of only the last ssl.log.
+            from app.pipeline.ja3 import extract_ja3_from_multiple_runs
 
-            zeek_log_paths = {name: str(C.ZEEK_DIR / name) for name in batch_result.merged_zeek.keys()}
-            ja3_df, ja3_analysis = extract_ja3_from_zeek_tables(zeek_log_paths)
+            ja3_df, ja3_analysis = extract_ja3_from_multiple_runs(
+                [r.zeek_log_paths for r in batch_result.pcap_results if not r.error]
+            )
             st.session_state["ja3_df"] = ja3_df
             st.session_state["ja3_analysis"] = ja3_analysis
 
@@ -659,26 +691,27 @@ with tab_progress:
             zeek_tables = result.zeek_tables
             beacon_df = result.beacon_df if isinstance(result.beacon_df, pd.DataFrame) else pd.DataFrame()
             osint_data = result.osint
-            carved = []  # carved is handled inside the pipeline now
 
             st.session_state["features"] = features
             st.session_state["zeek_tables"] = zeek_tables
             st.session_state["beacon_df"] = beacon_df
             st.session_state["osint"] = osint_data
+            st.session_state["carved"] = result.carved_items
             st.session_state["dns_analysis"] = result.dns_analysis or None
             st.session_state["tls_analysis"] = result.tls_analysis or None
 
-            # rDNS map for dashboard hostname display
-            from app.utils.network_utils import bulk_resolve_ips
+            _precompute_dash_aggregates(features.get("flows"))
+            # a fresh run supersedes any restored case
+            st.session_state.pop("restored_analysis_id", None)
 
-            _pub = [ip for ip in features.get("artifacts", {}).get("ips", []) if is_public_ipv4(ip)]
-            st.session_state["rdns_map"] = bulk_resolve_ips(_pub, max_workers=C.RDNS_MAX_WORKERS)
+            # rDNS map for dashboard hostname display — already resolved once
+            # inside the pipeline; reuse it instead of re-resolving.
+            st.session_state["rdns_map"] = result.rdns_map
 
-            # Extract JA3
+            # Extract JA3 from this run's actual log paths (per-run ZEEK_DIR subdir)
             from app.pipeline.zeek import extract_ja3_from_zeek_tables
 
-            zeek_log_paths = {name: str(C.ZEEK_DIR / name) for name in zeek_tables.keys()}
-            ja3_df, ja3_analysis = extract_ja3_from_zeek_tables(zeek_log_paths)
+            ja3_df, ja3_analysis = extract_ja3_from_zeek_tables(result.zeek_log_paths)
             st.session_state["ja3_df"] = ja3_df
             st.session_state["ja3_analysis"] = ja3_analysis
 
@@ -711,7 +744,9 @@ with tab_progress:
         report_md = st.session_state.get("report")
 
         llm_tracker = PhaseTracker(1, progress_container=progress_panel)
-        p = llm_tracker.next_phase("LLM report")
+        # Keep the phase KEY "LLM report" (stable slug / skip-state) but show a
+        # generic, provider-agnostic label to the user.
+        p = llm_tracker.next_phase("LLM report", display_title="LLM Report Analysis")
 
         llm_slug = make_slug("LLM report")
         llm_done = st.session_state.get(f"done_{llm_slug}", False)
@@ -719,7 +754,7 @@ with tab_progress:
 
         if not llm_done:
             if not llm_skip:
-                with st.spinner("Generating LLM report via LM Studio\u2026"):
+                with st.spinner(f"Generating LLM report via {provider_label}\u2026"):
                     zeek_json = {
                         name: (df.to_dict(orient="records") if isinstance(df, pd.DataFrame) else [])
                         for name, df in zeek_tables.items()
@@ -728,7 +763,8 @@ with tab_progress:
                     try:
                         if isinstance(beacon_df, pd.DataFrame):
                             beacon_rows = beacon_df.to_dict(orient="records")
-                    except Exception:
+                    except Exception as e:
+                        logger.debug("beacon rows conversion for LLM context failed: %s", e)
                         beacon_rows = []
 
                     context = {
@@ -742,6 +778,10 @@ with tab_progress:
                         "dns_analysis": st.session_state.get("dns_analysis"),
                         "tls_analysis": st.session_state.get("tls_analysis"),
                         "yara_results": st.session_state.get("yara_results"),
+                        "flow_asymmetry": st.session_state.get("flow_asymmetry"),
+                        "port_anomalies": st.session_state.get("port_anomalies"),
+                        "ja3_analysis": st.session_state.get("ja3_analysis"),
+                        "rdns_map": st.session_state.get("rdns_map"),
                         "config": {
                             "limit_packets": limit_packets,
                             "do_pyshark": do_pyshark,
@@ -754,16 +794,23 @@ with tab_progress:
 
                     # Include batch context if in batch mode
                     if batch_mode and st.session_state.get("__batch_result"):
-                        br = st.session_state["__batch_result"]
+                        br = st.session_state.get("__batch_result")
                         context["batch_summary"] = br.summary
                         context["cross_file_indicators"] = [ind for ind in br.correlation.common_indicators[:20]]
 
                     try:
                         current_lang = st.session_state.get("cfg_lm_language", "US English")
-                        logger.debug("Generating report with language='%s'", current_lang)
+                        logger.debug("Generating report via provider='%s' language='%s'", llm_provider, current_lang)
                         st.toast(f"Generating report in {current_lang}...", icon="\U0001f4dd")
 
-                        report_md = generate_report(base_url, api_key, model, context, language=current_lang)
+                        report_md = llm_providers.synthesize_report(
+                            llm_provider,
+                            base_url=base_url,
+                            api_key=api_key,
+                            model=model,
+                            context=context,
+                            language=current_lang,
+                        )
                     except Exception as e:
                         st.error(f"LLM call failed: {e}")
                         report_md = "_LLM generation failed. Check server/model settings._"
@@ -803,6 +850,7 @@ with tab_dashboard:
         tls_analysis=st.session_state.get("tls_analysis"),
         dns_analysis=st.session_state.get("dns_analysis"),
     )
+    render_severity_legend()
 
     feats = st.session_state.get("features") or {}
     all_flows = feats.get("flows") or []
@@ -1023,11 +1071,8 @@ with tab_dashboard:
             )
 
         if filtered_flows:
-            # Calculate Top 10s
-            top_src_ips = {}
-            top_dst_ips = {}
-            top_dst_ports = {}
-            top_protos = {}
+            # Calculate Top 10s — use precomputed aggregates when no filters
+            # are active (avoid rescanning all flows on every Streamlit rerun).
             top_domains = {}
             top_src_domains = {}
             top_dst_domains = {}
@@ -1035,22 +1080,29 @@ with tab_dashboard:
             # Use the global toggle from session state
             exclude_private = st.session_state.get("dashboard_exclude_private", False)
 
-            for f in filtered_flows:
-                src = f.get("src")
-                dst = f.get("dst")
-                dport = str(f.get("dport", "N/A"))
-                proto = f.get("proto", "Unknown")
+            _any_filter_active = bool(
+                st.session_state.get("filter_ips")
+                or st.session_state.get("filter_protos")
+                or st.session_state.get("filter_time")
+            )
+            _precomputed = st.session_state.get("dash_aggregates") if not _any_filter_active else None
 
-                if src:
-                    if not exclude_private or is_public_ipv4(src):
-                        top_src_ips[src] = top_src_ips.get(src, 0) + 1
-                if dst:
-                    if not exclude_private or is_public_ipv4(dst):
-                        top_dst_ips[dst] = top_dst_ips.get(dst, 0) + 1
-                if dport:
-                    top_dst_ports[dport] = top_dst_ports.get(dport, 0) + 1
-                if proto:
-                    top_protos[proto] = top_protos.get(proto, 0) + 1
+            if _precomputed and not exclude_private:
+                # Fast path: convert list-of-tuples back to dict for chart calls
+                top_src_ips = dict(_precomputed["top_src_ips"])
+                top_dst_ips = dict(_precomputed["top_dst_ips"])
+                top_dst_ports = dict(_precomputed["top_dst_ports"])
+                top_protos = dict(_precomputed["top_protos"])
+            else:
+                # Slow path: live one-pass scan (used when filters are active or
+                # when exclude_private changes the IP set mid-session).
+                _agg = compute_flow_aggregates(
+                    filtered_flows, top_n=10, weight="flows", exclude_private=exclude_private
+                )
+                top_src_ips = dict(_agg["top_src_ips"])
+                top_dst_ips = dict(_agg["top_dst_ips"])
+                top_dst_ports = dict(_agg["top_dst_ports"])
+                top_protos = dict(_agg["top_protos"])
 
             # Domains from DNS analysis or Zeek logs
             dns_data = st.session_state.get("dns_analysis")
@@ -1213,8 +1265,8 @@ with tab_dashboard:
                 use_container_width=True,
             )
             render_chart_hint("Diamond markers show events by severity and time.")
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug("chart rendering failed: %s", e)
 
     # --- Traffic profiling charts ---
     if filtered_flows:
@@ -1252,11 +1304,23 @@ with tab_dashboard:
                 if high_beacons.empty:
                     st.caption("No high-confidence beacon candidates.")
                 else:
-                    show_cols = [c for c in ["dst", "score", "count"] if c in high_beacons.columns]
+                    show_cols = [c for c in ["dst", "score", "pkts", "mean_gap"] if c in high_beacons.columns]
+                    # Fallback: older DataFrames may use "count" instead of "pkts"
+                    if "pkts" not in show_cols and "count" in high_beacons.columns:
+                        show_cols = [c for c in ["dst", "score", "count", "mean_gap"] if c in high_beacons.columns]
                     display_df = high_beacons[show_cols].head(10).copy()
                     if "dst" in display_df.columns:
                         display_df["Hostname"] = display_df["dst"].map(lambda ip: rdns.get(ip, ""))
-                    st.dataframe(display_df, hide_index=True, use_container_width=True)
+                    beacon_col_cfg: dict = {
+                        "score": st.column_config.ProgressColumn("Score", min_value=0.0, max_value=1.0, format="%.2f"),
+                    }
+                    if "pkts" in display_df.columns:
+                        beacon_col_cfg["pkts"] = st.column_config.NumberColumn("Packets", format="%d")
+                    if "count" in display_df.columns:
+                        beacon_col_cfg["count"] = st.column_config.NumberColumn("Packets", format="%d")
+                    if "mean_gap" in display_df.columns:
+                        beacon_col_cfg["mean_gap"] = st.column_config.NumberColumn("Avg Gap (s)", format="%.1f")
+                    st.dataframe(display_df, hide_index=True, use_container_width=True, column_config=beacon_col_cfg)
 
     with detail_col2:
         if _yara and isinstance(_yara, dict) and _yara.get("matched", 0) > 0:
@@ -1382,6 +1446,7 @@ with tab_llm:
                     if pdf_report:
                         st.session_state["pdf_report"] = pdf_report
                         st.success(f"PDF generated: {pdf_report.filename}")
+                        st.toast("PDF report ready for download", icon="📄")
                     else:
                         st.error("PDF generation failed. Check logs.")
 
@@ -1453,5 +1518,6 @@ with st.expander("Notes & OPSEC"):
 - **Skip** is non-blocking; pipeline continues to next phase.
 - **OSINT limit**: configurable Top-N IPs by traffic; 0 = enrich all.
 - Zeek JSON-first with ASCII fallback; OSINT calls have safe timeouts.
-- Carved binaries stored locally in `/data/carved`; no uploads.
+- Carved binaries stored locally in per-run subfolders (`/data/carved/<run_id>/`); no uploads.
+  Run folders are auto-pruned after 7 days — export anything you need to keep.
 """)

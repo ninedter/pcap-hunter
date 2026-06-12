@@ -8,6 +8,23 @@ import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 
+from app.ui.colors import severity_color
+
+
+def _threat_score_color(score: float) -> str:
+    """Map a 0-1 threat score onto the shared severity palette.
+
+    Uses critical/high/medium/clean only — "low" and "unknown" aren't
+    meaningful buckets on a continuous threat-score scale.
+    """
+    if score >= 0.7:
+        return severity_color("critical")
+    elif score >= 0.4:
+        return severity_color("high")
+    elif score >= 0.2:
+        return severity_color("medium")
+    return severity_color("clean")
+
 
 def plot_world_map(
     ip_data: list[dict[str, Any]],
@@ -39,17 +56,7 @@ def plot_world_map(
     if not df.empty:
         # Add threat score to each IP for coloring
         df["threat"] = df["ip"].map(lambda ip: threat_scores.get(ip, 0))
-
-        def _threat_color(score):
-            if score >= 0.7:
-                return "red"
-            elif score >= 0.4:
-                return "orange"
-            elif score >= 0.2:
-                return "yellow"
-            return "cyan"
-
-        df["color"] = df["threat"].map(_threat_color)
+        df["color"] = df["threat"].map(_threat_score_color)
 
         df_agg = (
             df.groupby(["lat", "lon", "city", "country"])
@@ -57,7 +64,7 @@ def plot_world_map(
             .reset_index()
         )
         # Re-apply color based on max threat in cluster
-        df_agg["color"] = df_agg["threat"].map(_threat_color)
+        df_agg["color"] = df_agg["threat"].map(_threat_score_color)
 
         fig.add_trace(
             go.Scattergeo(
@@ -196,8 +203,13 @@ def plot_flow_timeline(flows: list[dict[str, Any]]) -> go.Figure:
     for f in flows:
         if not f.get("pkt_times"):
             continue
-        start_ts = min(f["pkt_times"])
-        duration = max(f["pkt_times"]) - start_ts
+        # Prefer the true flow extent (first_ts/last_ts survive the per-flow
+        # sample cap); fall back to sampled timestamps for legacy data.
+        first_ts = f.get("first_ts")
+        last_ts = f.get("last_ts")
+        start_ts = first_ts if first_ts is not None else min(f["pkt_times"])
+        end_ts = last_ts if last_ts is not None else max(f["pkt_times"])
+        duration = end_ts - start_ts
         proto = f.get("proto", "Unknown")
         size = f.get("count", 1)
         data.append(
@@ -265,7 +277,7 @@ def plot_flow_timeline(flows: list[dict[str, Any]]) -> go.Figure:
         title="Analysis Timeline (Flows & Volume)",
         template="plotly_dark",
         height=500,
-        xaxis_title=None,
+        xaxis_title="Time (UTC)",
         yaxis_title="Flow Duration (s)",
         yaxis=dict(gridcolor="rgba(255,255,255,0.05)", zerolinecolor="rgba(255,255,255,0.1)"),
         yaxis2=dict(
@@ -286,7 +298,7 @@ def plot_flow_timeline(flows: list[dict[str, Any]]) -> go.Figure:
             font=dict(size=10),
             bgcolor="rgba(0,0,0,0)",
         ),
-        hovermode="closest",
+        hovermode="x unified",
         margin=dict(l=50, r=50, t=80, b=40),
         xaxis=dict(
             gridcolor="rgba(255,255,255,0.05)",
@@ -296,10 +308,12 @@ def plot_flow_timeline(flows: list[dict[str, Any]]) -> go.Figure:
     return fig
 
 
-def plot_top_n_charts(data: dict[str, dict[str, int]], title: str) -> go.Figure:
+def plot_top_n_charts(data: dict[str, dict[str, int]], title: str, count_label: str = "Flows") -> go.Figure:
     """
     Plots horizontal bar charts for TopN analysis.
     data: { "category": { "label": count, ... }, ... }
+    count_label: what the values count — the dashboard passes flow counts
+    ("Flows"), the PDF passes packet sums ("Packets").
     Refined with 'premium' styling.
     """
     if not data:
@@ -321,7 +335,7 @@ def plot_top_n_charts(data: dict[str, dict[str, int]], title: str) -> go.Figure:
         orientation="h",
         title=title,
         template="plotly_dark",
-        labels={"x": "Frequency", "y": ""},  # Hide redundant 'Indicator' label
+        labels={"x": count_label, "y": ""},  # Hide redundant category label
         color_discrete_sequence=["#4A90E2"],  # Professional blue
     )
     fig.update_layout(
@@ -413,7 +427,7 @@ def plot_attack_timeline(timeline_events: list[dict[str, Any]]) -> go.Figure:
         title="Attack Timeline",
         template="plotly_dark",
         height=400,
-        xaxis_title="Time",
+        xaxis_title="Time (UTC)",
         yaxis=dict(
             title="Severity",
             tickvals=[0, 1, 2, 3, 4],
@@ -428,7 +442,7 @@ def plot_attack_timeline(timeline_events: list[dict[str, Any]]) -> go.Figure:
             x=0.5,
             font=dict(size=10),
         ),
-        hovermode="closest",
+        hovermode="x unified",
         margin=dict(l=60, r=20, t=50, b=40),
     )
     return fig
@@ -505,17 +519,7 @@ def plot_network_graph(
     node_x = [pos[n][0] for n in nodes]
     node_y = [pos[n][1] for n in nodes]
     node_sizes = [min(8 + (node_conns[n] / max(node_conns.values())) * 25, 35) for n in nodes]
-    node_colors = []
-    for n in nodes:
-        score = threat_scores.get(n, 0)
-        if score >= 0.7:
-            node_colors.append("#FF4444")
-        elif score >= 0.4:
-            node_colors.append("#FFA500")
-        elif score >= 0.2:
-            node_colors.append("#FFD700")
-        else:
-            node_colors.append("#4A90E2")
+    node_colors = [_threat_score_color(threat_scores.get(n, 0)) for n in nodes]
 
     node_text = [
         f"{n}<br>Connections: {node_conns[n]}" + (f"<br>Threat: {threat_scores[n]:.0%}" if n in threat_scores else "")
@@ -846,7 +850,7 @@ def plot_traffic_timeline_heatmap(flows: list[dict]) -> go.Figure | None:
     fig.update_layout(
         margin=dict(l=0, r=0, t=40, b=0),
         xaxis_title="Time (minutes from capture start)",
-        yaxis_title="",
+        yaxis_title="Destination IP",
     )
     return fig
 
@@ -881,7 +885,7 @@ def plot_packet_size_histogram(flows: list[dict]) -> go.Figure | None:
         x="Packet Size (bytes)",
         nbins=50,
         title="Packet Size Distribution",
-        labels={"count": "Frequency"},
+        labels={"Packet Size (bytes)": "Packet size (bytes)", "count": "Packet count"},
         height=350,
         color_discrete_sequence=["#4A90E2"],
     )
@@ -932,6 +936,7 @@ def plot_inter_arrival_histogram(flows: list[dict]) -> go.Figure | None:
         x="Inter-Arrival Time (seconds)",
         nbins=60,
         title="Inter-Arrival Time Distribution",
+        labels={"Inter-Arrival Time (seconds)": "Inter-arrival time (s)", "count": "Count"},
         height=350,
         color_discrete_sequence=["#51CF66"],
     )

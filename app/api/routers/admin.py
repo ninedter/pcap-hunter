@@ -2,18 +2,46 @@
 
 from __future__ import annotations
 
+import logging
 from datetime import datetime, timedelta
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 
 from app.api.auth import Scope
-from app.api.deps import get_key_repo, get_rate_limiter, require_full_scope
+from app.api.deps import get_key_repo, get_rate_limiter, get_settings, require_full_scope
 from app.api.key_models import APIKey, generate_api_key
 from app.api.key_repository import KeyRepository
 from app.api.rate_limiter import RateLimiter
+from app.api.settings import FULL_SCOPE_RECOVERY_HINT, APISettings
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/v1/admin", tags=["admin"])
+
+_LOCKOUT_WARNING = (
+    "No full-scope auth source remains — ingress and admin endpoints (including key "
+    "creation) will reject every request. " + FULL_SCOPE_RECOVERY_HINT
+)
+
+
+def _full_scope_lockout_warning(settings: APISettings, repo: KeyRepository) -> str | None:
+    """After a key mutation: warn if no full-scope auth source remains.
+
+    Args:
+        settings: Current API settings (checked for env main_key).
+        repo: KeyRepository for counting active full-scope DB keys.
+
+    Returns:
+        Warning message string if a lockout condition is detected, else None.
+    """
+    if settings.main_key:
+        return None
+    # Advisory check only — post-mutation count on a separate connection; gates no enforcement.
+    if repo.count_active_keys(scope=Scope.FULL.value) > 0:
+        return None
+    logger.warning(_LOCKOUT_WARNING)
+    return _LOCKOUT_WARNING
 
 
 # ==================== Request schemas ====================
@@ -108,6 +136,7 @@ def update_key(
     body: UpdateKeyRequest,
     _scope: Scope = Depends(require_full_scope),
     repo: KeyRepository = Depends(get_key_repo),
+    settings: APISettings = Depends(get_settings),
 ) -> dict:
     """Partially update an API key's mutable fields."""
     existing = repo.get_key_by_id(key_id)
@@ -146,7 +175,11 @@ def update_key(
             status_code=404,
             detail={"code": "key_not_found", "title": "Not Found", "detail": f"No key with id '{key_id}'."},
         )
-    return updated.to_dict(include_hash=False)
+    response = dict(updated.to_dict(include_hash=False))
+    warning = _full_scope_lockout_warning(settings, repo)
+    if warning:
+        response["warning"] = warning
+    return response
 
 
 @router.delete("/keys/{key_id}")
@@ -155,6 +188,7 @@ def revoke_key(
     _scope: Scope = Depends(require_full_scope),
     repo: KeyRepository = Depends(get_key_repo),
     rate_limiter: RateLimiter = Depends(get_rate_limiter),
+    settings: APISettings = Depends(get_settings),
 ) -> dict:
     """Revoke an API key (soft delete) and clear its rate limit state."""
     existing = repo.get_key_by_id(key_id)
@@ -166,7 +200,11 @@ def revoke_key(
 
     repo.revoke_key(key_id)
     rate_limiter.reset(key_id)
-    return {"status": "revoked", "id": key_id}
+    response: dict = {"status": "revoked", "id": key_id}
+    warning = _full_scope_lockout_warning(settings, repo)
+    if warning:
+        response["warning"] = warning
+    return response
 
 
 @router.get("/keys/{key_id}/usage")

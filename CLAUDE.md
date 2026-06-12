@@ -13,15 +13,33 @@ make test             # PYTHONPATH=. pytest tests/ -v --cov=app
 make lint             # ruff check .
 make format           # ruff format .
 make clean            # Remove caches
+make docker-up        # Build + run the UI in Docker (http://localhost:8501)
+make docker-verify    # Format + lint + full test suite INSIDE the image
 ```
 
 Always run tests with `PYTHONPATH=.` — this is required for absolute imports to resolve.
+
+### Docker is the canonical build-and-verify path
+
+**Any local verification that requires a build must go through Docker**
+(`make docker-up` to run the app, `make docker-verify` for the gate). The
+host machine has multiple coexisting Python installs (framework + Homebrew),
+so host-side "it works here" proves nothing about a clean environment —
+a fresh-install breakage shipped exactly that way once. `make verify` on the
+host remains fine for fast iteration; anything build-shaped (dependency
+changes, install paths, release checks, user-facing verification) runs in
+the container.
+
+API keys saved inside the container persist in the `pcap-hunter-home` volume
+(mounted at `/home/runner`, with a pinned `hostname:` so the config encryption
+key stays stable); LM Studio on the host is reachable via
+`host.docker.internal` — the compose file defaults `LM_BASE_URL` accordingly.
 
 ## Architecture
 
 ```
 app/
-├── main.py              # Streamlit entry point (session state, 8-tab UI)
+├── main.py              # Streamlit entry point (session state, 9-tab UI)
 ├── config.py            # App defaults & constants (thresholds, paths)
 ├── analysis/            # Scoring, correlation, flow analysis, narration
 ├── database/            # SQLite case management (models.py, repository.py)
@@ -49,6 +67,11 @@ data/                    # Runtime artifacts (carved/, zeek/, *.db) — gitignor
 8. `yara_scan.py` — YARA rule-based file scanning
 9. `osint.py` — Multi-provider OSINT enrichment (VT, AbuseIPDB, Shodan, etc.)
 10. LLM synthesis — AI-powered threat report generation
+
+Stages 2–3 (PyShark, Zeek) run in parallel; after that parse join, stages 4–7
+(DNS, TLS, beaconing, carving) run concurrently. Zeek and carve write into
+per-run output dirs (`data/zeek|carved/<case>_<uuid8>/`) so concurrent runs
+never clobber each other; stale run dirs are pruned after 7 days.
 
 ## Tech Stack
 
@@ -173,6 +196,9 @@ GitHub Actions (`.github/workflows/ci.yml`):
 - C2 common ports: {4444, 5555, 6666, 7777, 8888, 9999, 1337, 31337}
 - Default PyShark limit: 200,000 packets
 - OSINT top IPs default: 50
+- `MAX_FLOW_SAMPLES`: 5,000 per-flow packet timestamps/lengths (true totals kept in `count`/`first_ts`/`last_ts`)
+- `RUN_DIR_RETENTION_SECONDS`: 7 days — per-run `data/zeek|carved/<run_id>/` dirs pruned on the next run
+- Subprocess timeouts: `ZEEK_TIMEOUT_SECONDS` 600, `PCAP_COUNT_TIMEOUT_SECONDS` 120, `CARVE_TIMEOUT_SECONDS` 300, `TLS_EXTRACT_TIMEOUT_SECONDS` 300, `LLM_PROBE_TIMEOUT_SECONDS` 15
 
 ## Git Conventions
 

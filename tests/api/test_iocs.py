@@ -171,3 +171,45 @@ def test_iocs_pagination(client):
     body2 = r2.json()
     assert len(body2["iocs"]) == 1
     assert body1["iocs"][0]["value"] != body2["iocs"][0]["value"]
+
+
+# ── _http_date unit test ────────────────────────────────────────────────────
+
+
+def test_http_date_treats_naive_as_local():
+    from datetime import datetime, timezone
+    from email.utils import parsedate_to_datetime
+
+    from app.api.routers.iocs import _http_date
+
+    naive = datetime(2026, 6, 11, 13, 12, 46)
+    out = _http_date(naive.isoformat())
+    expected = naive.astimezone(timezone.utc)  # local -> utc
+    assert parsedate_to_datetime(out) == expected
+
+
+# ── Last-Modified (RFC 7231) ────────────────────────────────────────────────
+
+
+def test_last_modified_is_rfc7231(client):
+    from email.utils import parsedate_to_datetime
+
+    from app.api.deps import get_repo
+
+    repo = get_repo()
+    case = Case(id="case0004", title="lastmod")
+    repo.create_case(case)
+    repo.save_analysis(
+        Analysis(
+            case_id=case.id,
+            pcap_path="/tmp/lm.pcap",
+            analyzed_at=datetime(2026, 6, 11, 13, 12, 46),
+            iocs=[IOC(ioc_type=IOCType.IP, value="203.0.113.7", severity=Severity.HIGH)],
+        )
+    )
+
+    r = client.get("/api/v1/iocs.json", headers={"Authorization": "Bearer MAIN"})
+    assert r.status_code == 200
+    lm = r.headers.get("last-modified")
+    assert lm and lm.endswith("GMT")
+    assert parsedate_to_datetime(lm) is not None

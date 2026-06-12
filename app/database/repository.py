@@ -322,18 +322,36 @@ class CaseRepository:
         """
         Delete case and all related data.
 
+        The schema declares ON DELETE CASCADE foreign keys, but SQLite's
+        foreign_keys pragma is off per connection, so related rows in iocs,
+        notes, analyses, case_tags, and jobs are deleted explicitly here.
+
         Args:
             case_id: Case ID to delete.
 
         Returns:
-            True if deleted.
+            True if the case existed and was deleted.
         """
         conn = self._get_conn()
         try:
-            conn.execute("DELETE FROM cases WHERE id = ?", (case_id,))
+            # FK pragma is off (INSERT OR REPLACE in save_analysis would
+            # cascade-wipe children if enabled) -> delete related rows explicitly,
+            # children first.
+            conn.execute(
+                "DELETE FROM iocs WHERE analysis_id IN (SELECT id FROM analyses WHERE case_id = ?)",
+                (case_id,),
+            )
+            conn.execute(
+                "DELETE FROM notes WHERE case_id = ? OR analysis_id IN (SELECT id FROM analyses WHERE case_id = ?)",
+                (case_id, case_id),
+            )
+            conn.execute("DELETE FROM analyses WHERE case_id = ?", (case_id,))
+            conn.execute("DELETE FROM case_tags WHERE case_id = ?", (case_id,))
+            conn.execute("DELETE FROM jobs WHERE case_id = ?", (case_id,))
+            cur = conn.execute("DELETE FROM cases WHERE id = ?", (case_id,))
             conn.commit()
-            logger.info("Deleted case: %s", case_id)
-            return True
+            logger.info("Deleted case and related data: %s", case_id)
+            return cur.rowcount > 0
         except Exception as e:
             logger.error("Failed to delete case %s: %s", case_id, e)
             return False
@@ -354,6 +372,7 @@ class CaseRepository:
             conn.execute("DELETE FROM analyses")
             conn.execute("DELETE FROM case_tags")
             conn.execute("DELETE FROM tags")
+            conn.execute("DELETE FROM jobs")
             conn.execute("DELETE FROM cases")
             conn.commit()
             logger.info("Cleared all case data from database")
@@ -840,6 +859,53 @@ class CaseRepository:
                 )
             else:
                 conn.execute("UPDATE jobs SET status=? WHERE id=?", (status.value, job_id))
+            conn.commit()
+        finally:
+            conn.close()
+
+    def start_job_if_queued(self, job_id: str) -> bool:
+        """Atomically flip a QUEUED job to RUNNING; False if it is missing or no longer queued."""
+        now = datetime.now().isoformat()
+        conn = self._get_conn()
+        try:
+            cur = conn.execute(
+                "UPDATE jobs SET status='running', started_at=?, heartbeat_at=? WHERE id=? AND status='queued'",
+                (now, now, job_id),
+            )
+            conn.commit()
+            return cur.rowcount > 0
+        finally:
+            conn.close()
+
+    def cancel_job_if_queued(self, job_id: str) -> bool:
+        """Atomically cancel a job only while it is still QUEUED; False if missing or already started."""
+        conn = self._get_conn()
+        try:
+            cur = conn.execute(
+                "UPDATE jobs SET status='cancelled', finished_at=?, error_code=NULL, error_detail=NULL, "
+                "result_json=NULL WHERE id=? AND status='queued'",
+                (datetime.now().isoformat(), job_id),
+            )
+            conn.commit()
+            return cur.rowcount > 0
+        finally:
+            conn.close()
+
+    def complete_job(self, job_id: str, result_json: bytes) -> None:
+        """Mark a job done and reconcile its progress in one atomic write.
+
+        Skipped stages never emit progress events, so a finished job would
+        otherwise freeze at its last snapshot (e.g. 50%).
+        """
+        now = datetime.now().isoformat()
+        conn = self._get_conn()
+        try:
+            conn.execute(
+                "UPDATE jobs SET status='done', finished_at=?, heartbeat_at=?, error_code=NULL, "
+                "error_detail=NULL, result_json=?, progress_stage='Complete', progress_done=progress_total "
+                "WHERE id=?",
+                (now, now, result_json, job_id),
+            )
             conn.commit()
         finally:
             conn.close()

@@ -7,7 +7,9 @@ from datetime import datetime
 import pandas as pd
 import streamlit as st
 
+from app.analysis.flow_aggregates import compute_flow_aggregates
 from app.database import Analysis, Case, CaseRepository, CaseStatus, IOCType, Severity
+from app.ui.colors import severity_color
 from app.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -42,6 +44,50 @@ def _get_repo() -> CaseRepository:
     if "case_repo" not in st.session_state:
         st.session_state["case_repo"] = CaseRepository()
     return st.session_state["case_repo"]
+
+
+def _restore_analysis_to_session(analysis: Analysis) -> None:
+    """Load a saved analysis back into session state for the Dashboard/Results tabs.
+
+    Mirrors the session keys the pipeline populates after a live run. Keys that
+    are not persisted on Analysis (beacon_df, zeek_tables, carved files, JA3,
+    correlation/anomaly results) are reset instead of leaving stale data from a
+    previously analyzed capture. Dashboard filters are cleared because they
+    reference IPs/time ranges from the prior capture and would otherwise filter
+    the restored flows down to nothing.
+
+    Args:
+        analysis: The saved analysis to load into the current session.
+    """
+    features = analysis.features or {}
+    st.session_state["features"] = features
+    # Must match the dashboard fast path: top_n=10, weight="flows"
+    # (see _precompute_dash_aggregates in app.main).
+    st.session_state["dash_aggregates"] = compute_flow_aggregates(features.get("flows"), top_n=10, weight="flows")
+    st.session_state["osint"] = analysis.osint or {}
+    st.session_state["dns_analysis"] = analysis.dns_analysis
+    st.session_state["tls_analysis"] = analysis.tls_analysis
+    st.session_state["yara_results"] = analysis.yara_results
+    # Model default for report is "" but the app's no-report sentinel is None.
+    st.session_state["report"] = analysis.report or None
+    # Everything below isn't persisted on Analysis — reset it all, otherwise the
+    # dashboard mixes this case's data with leftovers from the previous live run.
+    st.session_state["beacon_df"] = pd.DataFrame()
+    st.session_state["ja3_df"] = pd.DataFrame()
+    st.session_state["ja3_analysis"] = {}
+    st.session_state["zeek_tables"] = {}
+    st.session_state["carved"] = []
+    # None (not []) so empty-state rendering says "not available — re-run", rather
+    # than a false "ran clean" for results that simply weren't persisted.
+    st.session_state["correlations"] = None
+    st.session_state["flow_asymmetry"] = None
+    st.session_state["port_anomalies"] = None
+    st.session_state["rdns_map"] = {}
+    st.session_state["filter_ips"] = set()
+    st.session_state["filter_protos"] = set()
+    st.session_state["filter_time"] = None
+    st.session_state["restored_analysis_id"] = analysis.id
+    logger.info("Restored analysis %s into session state", analysis.id)
 
 
 def render_cases_tab():
@@ -166,10 +212,8 @@ def _render_case_list():
     # Color-code by severity
     def highlight_severity(row):
         sev = row.get("Severity", "").lower()
-        if sev == "critical":
-            return ["background-color: #ffcccb"] * len(row)
-        elif sev == "high":
-            return ["background-color: #fff3cd"] * len(row)
+        if sev in ("critical", "high"):
+            return [f"background-color: {severity_color(sev, 'rgba')};"] * len(row)
         return [""] * len(row)
 
     styled_df = df.style.apply(highlight_severity, axis=1)
@@ -202,6 +246,17 @@ def _render_case_detail(case_id: str):
         st.session_state["cases_view"] = "list"
         st.rerun()
         return
+
+    # Restore the most recent analysis so the Dashboard/Results tabs show this
+    # case. st.tabs renders every tab on each rerun, so the marker guard keeps
+    # this a one-shot restore instead of clobbering session state repeatedly.
+    # The rerun is needed because the Dashboard tab renders earlier in the
+    # script pass and would otherwise show stale data until the next rerun.
+    if case.analyses:
+        latest = max(case.analyses, key=lambda a: a.analyzed_at or datetime.min)
+        if st.session_state.get("restored_analysis_id") != latest.id:
+            _restore_analysis_to_session(latest)
+            st.rerun()
 
     # Back button
     if st.button("← Back to Cases"):
@@ -307,6 +362,12 @@ def _render_case_analyses(case: Case, repo: CaseRepository):
                 st.markdown(f"**IOCs:** {len(analysis.iocs)}")
             with col2:
                 st.markdown(f"**Flows:** {len(analysis.features.get('flows', []))}")
+
+            if st.session_state.get("restored_analysis_id") == analysis.id:
+                st.caption("Loaded — the Dashboard and Results tabs show this analysis.")
+            elif st.button("Load into Dashboard", key=f"restore_{analysis.id}"):
+                _restore_analysis_to_session(analysis)
+                st.rerun()
 
 
 def _render_case_notes(case: Case, repo: CaseRepository):
@@ -547,6 +608,8 @@ def _quick_save_analysis():
     # Extract IOCs
     analysis.iocs = repo.extract_iocs(analysis)
     repo.save_analysis(analysis)
+    # the live session already holds this analysis — block the auto-restore from wiping non-persisted results
+    st.session_state["restored_analysis_id"] = analysis.id
 
     st.success(f"Created case {case_id} with analysis.")
     st.session_state["selected_case_id"] = case_id
@@ -577,6 +640,8 @@ def _add_current_analysis_to_case(case: Case):
 
     analysis.iocs = repo.extract_iocs(analysis)
     repo.save_analysis(analysis)
+    # the live session already holds this analysis — block the auto-restore from wiping non-persisted results
+    st.session_state["restored_analysis_id"] = analysis.id
 
     st.success(f"Added analysis to case {case.id}")
     st.rerun()

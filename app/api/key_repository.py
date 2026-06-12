@@ -354,23 +354,29 @@ class KeyRepository:
         finally:
             conn.close()
 
-    def count_active_keys(self) -> int:
-        """Count keys that are neither revoked nor expired.
+    def count_active_keys(self, scope: str | None = None) -> int:
+        """Count keys that are neither revoked nor expired, optionally filtered by scope.
+
+        Args:
+            scope: Optional scope value to filter on (e.g. "full" or "feed").
+                None counts active keys across all scopes.
 
         Returns:
-            Number of currently active keys.
+            Number of currently active keys (matching the scope, if given).
         """
         now = datetime.now().isoformat()
-        conn = self._get_conn()
-        try:
-            row = conn.execute(
-                """
+        query = """
                 SELECT COUNT(*) FROM api_keys
                 WHERE revoked_at IS NULL
                 AND (expires_at IS NULL OR expires_at > ?)
-                """,
-                (now,),
-            ).fetchone()
+                """
+        params: list[str] = [now]
+        if scope is not None:
+            query += " AND scope = ?"
+            params.append(scope)
+        conn = self._get_conn()
+        try:
+            row = conn.execute(query, params).fetchone()
             return int(row[0])
         finally:
             conn.close()

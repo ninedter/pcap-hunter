@@ -1,9 +1,20 @@
 from __future__ import annotations
 
+import functools
 import os
 import shutil
 import sys
 from pathlib import Path
+
+
+@functools.lru_cache(maxsize=32)
+def _which_cached(name: str) -> str | None:
+    """Cached $PATH probe — PATH contents don't change within a session.
+
+    Only the ``shutil.which`` lookup is cached; config/env overrides in
+    :func:`find_bin` stay live so mid-session changes still take effect.
+    """
+    return shutil.which(name)
 
 
 def _windows_common_paths(name: str) -> list[str]:
@@ -74,7 +85,7 @@ def find_bin(name: str, env_key: str = "", cfg_key: str = "") -> str | None:
             return val
 
     # 3. PATH
-    path = shutil.which(name)
+    path = _which_cached(name)
     if path:
         return path
 

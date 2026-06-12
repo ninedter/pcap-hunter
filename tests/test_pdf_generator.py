@@ -1,5 +1,6 @@
 """Tests for PDF report generation module."""
 
+import re
 from datetime import datetime
 
 import pytest
@@ -241,6 +242,18 @@ class TestPDFReportGenerator:
         )
         # HTML should contain flow data or network info
         assert html  # Just verify it generates without error
+
+    def test_cover_page_timestamp_is_timezone_aware(self):
+        """The cover 'Generated:' stamp must carry a timezone abbreviation."""
+        gen = PDFReportGenerator()
+        html = gen._render_cover_page(case_info=None)
+        assert re.search(r"Generated:</strong> \d{4}-\d{2}-\d{2} \d{2}:\d{2} [A-Z]{2,5}", html)
+
+    def test_appendix_timestamp_is_timezone_aware(self):
+        """The appendix 'Generated:' stamp must carry a timezone abbreviation."""
+        gen = PDFReportGenerator()
+        html = gen._render_appendix({"flows": [], "artifacts": {}})
+        assert re.search(r"Generated: \d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} [A-Z]{2,5}", html)
 
     def test_generate_without_weasyprint(self):
         """Test generation when weasyprint is not available."""

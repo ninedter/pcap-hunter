@@ -7,6 +7,17 @@ from typing import Any
 
 from app.database.repository import CaseRepository
 
+# SQL expression that maps the worst severity across grouped rows to a numeric score.
+# MAX ensures duplicates of the same indicator always surface the highest score.
+_SCORE_CASE = (
+    "MAX(CASE LOWER(COALESCE(i.severity, 'medium')) "
+    "WHEN 'low' THEN 25 WHEN 'medium' THEN 50 WHEN 'high' THEN 75 "
+    "WHEN 'critical' THEN 100 ELSE 50 END)"
+)
+
+# Reverse mapping: score → severity label used in the response payload.
+_SCORE_SEV = {25: "low", 50: "medium", 75: "high", 100: "critical"}
+
 
 @dataclass
 class IOCFilter:
@@ -24,11 +35,16 @@ class IOCFilter:
 def query_iocs(repo: CaseRepository, filt: IOCFilter) -> list[dict[str, Any]]:
     """Aggregate IOCs across all cases with derived fields.
 
+    Scoring and min_score filtering happen in SQL so that LIMIT/OFFSET-based
+    pagination is correct — post-filter Python filtering previously caused the
+    page window to shrink silently, dropping rows the caller never saw.
+
     Returns rows shaped like the API IOCEntry: type, value, score, severity,
     tags, first_seen, last_seen, case_ids, mitre_techniques.
     """
-    sql = """
-        SELECT i.ioc_type, i.value, i.severity,
+    sql = f"""
+        SELECT i.ioc_type, i.value,
+               {_SCORE_CASE} AS score,
                MIN(a.analyzed_at) AS first_seen,
                MAX(a.analyzed_at) AS last_seen,
                GROUP_CONCAT(DISTINCT a.case_id) AS case_ids,
@@ -59,8 +75,11 @@ def query_iocs(repo: CaseRepository, filt: IOCFilter) -> list[dict[str, Any]]:
 
     if where:
         sql += " WHERE " + " AND ".join(where)
-    sql += " GROUP BY i.ioc_type, i.value ORDER BY MAX(a.analyzed_at) DESC"
-    sql += " LIMIT ? OFFSET ?"
+    sql += " GROUP BY i.ioc_type, i.value"
+    if filt.min_score:
+        sql += f" HAVING {_SCORE_CASE} >= ?"
+        params.append(filt.min_score)
+    sql += " ORDER BY MAX(a.analyzed_at) DESC, i.value LIMIT ? OFFSET ?"
     params.extend([filt.limit, filt.offset])
 
     conn = repo._get_conn()
@@ -72,12 +91,13 @@ def query_iocs(repo: CaseRepository, filt: IOCFilter) -> list[dict[str, Any]]:
     out: list[dict[str, Any]] = []
     for row in rows:
         d = dict(row)
+        score = int(d["score"] or 50)
         out.append(
             {
                 "type": d["ioc_type"],
                 "value": d["value"],
-                "severity": d["severity"] or "medium",
-                "score": _severity_to_score(d["severity"]),
+                "severity": _SCORE_SEV.get(score, "medium"),
+                "score": score,
                 "tags": [t for t in (d.get("tag_names") or "").split(",") if t],
                 "first_seen": d["first_seen"],
                 "last_seen": d["last_seen"],
@@ -85,13 +105,4 @@ def query_iocs(repo: CaseRepository, filt: IOCFilter) -> list[dict[str, Any]]:
                 "mitre_techniques": [],  # Future: derive from analysis features
             }
         )
-    if filt.min_score:
-        out = [r for r in out if r["score"] >= filt.min_score]
     return out
-
-
-_SEV_SCORE = {"low": 25, "medium": 50, "high": 75, "critical": 100}
-
-
-def _severity_to_score(severity: str | None) -> int:
-    return _SEV_SCORE.get((severity or "medium").lower(), 50)

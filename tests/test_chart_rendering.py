@@ -63,6 +63,15 @@ class TestChartRendering:
         )
         _assert_renders(fig, "top-N chart")
 
+    def test_top_n_count_label_matches_call_site_semantics(self):
+        """The count axis must say what the values count: the dashboard passes
+        flow counts (default "Flows"), the PDF passes packet sums ("Packets")."""
+        default_fig = plot_top_n_charts({"8.8.8.8": 245}, "Top Destination IPs")
+        assert default_fig.layout.xaxis.title.text == "Flows"
+        pdf_fig = plot_top_n_charts({"8.8.8.8": 245}, "Top Destination IPs", count_label="Packets")
+        assert pdf_fig.layout.xaxis.title.text == "Packets"
+        _assert_renders(pdf_fig, "top-N chart with packet label")
+
     def test_flow_timeline(self):
         flows = [
             {"src": "10.0.0.1", "dst": "8.8.8.8", "proto": "TCP", "count": 10, "ts": 1_700_000_000},

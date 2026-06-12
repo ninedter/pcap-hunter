@@ -357,7 +357,7 @@ Returns the case record including IOCs, severity, tags, and analysis metadata.
 
 Renders the case's PDF report **on demand** from its most recent persisted analysis and returns it as `application/pdf`.
 
-- Rendered PDFs are cached under `PCAP_HUNTER_REPORTS_DIR` (default `data/reports/`) and served from cache on subsequent requests.
+- Rendered PDFs are cached under `PCAP_HUNTER_API_REPORTS_DIR` (default `data/reports/`; legacy alias `PCAP_HUNTER_REPORTS_DIR`) and served from cache on subsequent requests.
 - The cache is regenerated automatically when a newer analysis lands on the case (file mtime is compared against the latest analysis's `analyzed_at`).
 
 | Status | Code | Meaning |
@@ -682,7 +682,7 @@ All settings are read from environment variables. Defaults are suitable for loca
 | `PCAP_HUNTER_API_DB_PATH` | `data/api_keys.db` | API key + case database path |
 | `PCAP_HUNTER_API_UPLOADS_DIR` | `data/api_uploads` | Where submitted PCAPs are stored |
 | `PCAP_HUNTER_API_ARTIFACTS_DIR` | `data/carved` | Carved-artifact root swept by GC |
-| `PCAP_HUNTER_REPORTS_DIR` | `data/reports` | Cache directory for on-demand PDF reports |
+| `PCAP_HUNTER_API_REPORTS_DIR` | `data/reports` | Cache directory for on-demand PDF reports (legacy alias: `PCAP_HUNTER_REPORTS_DIR`) |
 
 ### Logging
 

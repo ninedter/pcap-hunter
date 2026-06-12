@@ -22,7 +22,9 @@ router = APIRouter(prefix="/api/v1/cases", tags=["ingress"])
 
 
 def _reports_dir() -> pathlib.Path:
-    return pathlib.Path(os.environ.get("PCAP_HUNTER_REPORTS_DIR", "data/reports"))
+    return pathlib.Path(
+        os.environ.get("PCAP_HUNTER_API_REPORTS_DIR") or os.environ.get("PCAP_HUNTER_REPORTS_DIR", "data/reports")
+    )
 
 
 @router.get("/{case_id}")
@@ -139,6 +141,9 @@ def delete_case(case_id: str, _scope=Depends(require_full_scope), repo=Depends(g
                 )
 
     if not repo.delete_case(case_id):
+        if repo.get_case(case_id) is None:
+            # Concurrent delete won the race between our existence check and the delete.
+            raise HTTPException(status_code=404, detail="case_not_found")
         raise HTTPException(
             status_code=500,
             detail={

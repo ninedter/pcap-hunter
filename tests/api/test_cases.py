@@ -340,6 +340,29 @@ def test_delete_case_409_when_queued_job_starts_mid_delete(client, monkeypatch):
     assert r2.status_code == 200
 
 
+def test_delete_case_404_when_concurrent_delete_wins(client, tmp_path, monkeypatch):
+    """When a concurrent DELETE removes the row between our existence check and our delete,
+    repo.delete_case returns False but the case no longer exists — must return 404, not 500."""
+    from app.database.repository import CaseRepository
+
+    case_id = _seed_case_with_analysis("delrace1")
+
+    # Patch delete_case to actually perform the deletion (simulating the concurrent winner)
+    # but return False (as if it detected a race).
+    real_delete = CaseRepository.delete_case
+
+    def race_delete(self, cid):
+        real_delete(self, cid)  # concurrent winner already removed it
+        return False
+
+    monkeypatch.setattr(CaseRepository, "delete_case", race_delete)
+
+    r = client.delete(f"/api/v1/cases/{case_id}", headers={"Authorization": "Bearer MAIN"})
+    assert r.status_code == 404
+    body = r.json()
+    assert body["code"] == "case_not_found"
+
+
 def test_delete_case_500_and_no_file_removal_when_db_delete_fails(client, tmp_path, monkeypatch):
     """When repo.delete_case returns False (DB failure), the route must return 500
     and must NOT destroy the analyst's evidence files."""
@@ -363,3 +386,33 @@ def test_delete_case_500_and_no_file_removal_when_db_delete_fails(client, tmp_pa
     assert body["code"] == "case_delete_failed"
     # Evidence files must be untouched — the analyst's pcap must still exist.
     assert pcap_file.exists(), "pcap must not be deleted when the DB delete fails"
+
+
+def test_api_reports_dir_env_takes_precedence(client, tmp_path, monkeypatch):
+    """PCAP_HUNTER_API_REPORTS_DIR must take precedence over the legacy PCAP_HUNTER_REPORTS_DIR.
+    Pre-place a fake PDF in the API-prefixed dir; the route must serve it.
+    The legacy dir must remain untouched."""
+    api_reports = tmp_path / "api_reports"
+    legacy_reports = tmp_path / "legacy_reports"
+    api_reports.mkdir()
+    legacy_reports.mkdir()
+
+    monkeypatch.setenv("PCAP_HUNTER_API_REPORTS_DIR", str(api_reports))
+    monkeypatch.setenv("PCAP_HUNTER_REPORTS_DIR", str(legacy_reports))
+
+    case_id = _seed_case_with_analysis("rptenv1")
+
+    # Pre-place a fake (but valid-looking) cached PDF in the API-prefixed dir.
+    # The route checks cache_fresh against analysis mtime; writing the file *after*
+    # seeding the analysis means mtime(file) >= analyzed_at, so it serves the cache.
+    fake_pdf = api_reports / f"{case_id}.pdf"
+    fake_pdf.write_bytes(b"%PDF-1.4 fake-for-env-test")
+
+    r = client.get(f"/api/v1/cases/{case_id}/report.pdf", headers={"Authorization": "Bearer MAIN"})
+    assert r.status_code == 200
+    assert r.content.startswith(b"%PDF")
+
+    # The legacy dir must be untouched — no PDF landed there.
+    assert not (legacy_reports / f"{case_id}.pdf").exists(), (
+        "PCAP_HUNTER_REPORTS_DIR must be ignored when PCAP_HUNTER_API_REPORTS_DIR is set"
+    )

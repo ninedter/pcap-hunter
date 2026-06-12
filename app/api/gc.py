@@ -24,7 +24,9 @@ def gc_sweep(
 ) -> dict[str, int]:
     """Run one GC pass. Returns counters for telemetry."""
     if reports_dir is None:
-        reports_dir = pathlib.Path(os.environ.get("PCAP_HUNTER_REPORTS_DIR", "data/reports"))
+        reports_dir = pathlib.Path(
+            os.environ.get("PCAP_HUNTER_API_REPORTS_DIR") or os.environ.get("PCAP_HUNTER_REPORTS_DIR", "data/reports")
+        )
     pcaps_deleted = _gc_files(uploads_dir, settings.pcap_ttl_days)
     artifacts_deleted = _gc_files(artifacts_dir, settings.artifact_ttl_days)
     # Cached PDFs are derived artifacts — reaping them is safe because the report

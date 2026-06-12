@@ -76,7 +76,9 @@ async def _gc_loop() -> None:
     settings = get_settings()
     uploads = pathlib.Path(os.environ.get("PCAP_HUNTER_API_UPLOADS_DIR", "data/api_uploads"))
     artifacts = pathlib.Path(os.environ.get("PCAP_HUNTER_API_ARTIFACTS_DIR", "data/carved"))
-    reports = pathlib.Path(os.environ.get("PCAP_HUNTER_REPORTS_DIR", "data/reports"))
+    reports = pathlib.Path(
+        os.environ.get("PCAP_HUNTER_API_REPORTS_DIR") or os.environ.get("PCAP_HUNTER_REPORTS_DIR", "data/reports")
+    )
 
     while True:
         try:

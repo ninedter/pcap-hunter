@@ -172,6 +172,7 @@ in `tests/test_pdf_generator.py` for the correct pattern.
 | PDF tests silently skipped on macOS despite working app | Test module imported `weasyprint` directly before `pdf_generator`, so DYLD fix hadn't run. Always import `pdf_generator` first. |
 | Empty dashboard after PCAP upload | `tshark` wasn't installed. Pre-flight check in `app/main.py` now shows a red banner. |
 | Chart API mismatch between function and call site | `plot_top_n_charts` expects a flat `dict[str, int]`, not nested. `plot_network_graph` takes `flows` positionally. Smoke tests in `test_chart_rendering.py` catch this. |
+| Header icon looked "cut off" on the dark theme | Two PIL bugs in `scripts/build_logo_assets.py`: `paste(im, box, mask)` *replaces* pixels (erased the lens disc with transparency) — composite via `putalpha(multiply)` + `alpha_composite` instead; and `ellipse(outline=, width=)` leaves moiré gaps at large widths — build rings from two filled circles. Logo is theme-aware (`resolve_logo_path` + `st.context.theme`); `tests/test_logo_assets.py` guards the generated PNGs. |
 
 ## CI/CD
 

@@ -1,0 +1,50 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      # Mirrors the Dockerfile runtime apt set, minus zeek (external OBS repo;
+      # zeek-dependent e2e tests also need pcap samples that aren't checked in,
+      # so they skip in CI either way):
+      # - tshark: packet parsing (pulls wireshark-common + libpcap)
+      # - libpango/cairo/gdk-pixbuf/mime/fonts: WeasyPrint PDF test suite
+      # (kaleido 0.2.1 bundles its own headless Chromium — no system browser)
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            tshark \
+            libpango-1.0-0 libpangocairo-1.0-0 libcairo2 libgdk-pixbuf-2.0-0 \
+            shared-mime-info fonts-dejavu-core
+
+      - name: Install Python dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run tests with coverage
+        run: PYTHONPATH=. pytest tests/ -v --cov=app
+
+      - name: Ruff lint
+        run: ruff check .
+
+      - name: Ruff format check
+        run: ruff format --check .

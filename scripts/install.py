@@ -148,12 +148,16 @@ def install_linux(dry_run: bool, assume_yes: bool) -> None:
             "zeek",
             "yara",
             "libpcap0.8",
-            # WeasyPrint (PDF export) runtime deps
+            # WeasyPrint (PDF export) runtime deps — keep in sync with the
+            # Dockerfile runtime stage and .github/workflows/ci.yml apt set.
             "libpango-1.0-0",
+            "libpangocairo-1.0-0",
             "libpangoft2-1.0-0",
             "libharfbuzz0b",
             "libcairo2",
             "libgdk-pixbuf-2.0-0",
+            "shared-mime-info",
+            "fonts-dejavu-core",
         ],
         dry_run=dry_run,
     )
@@ -228,11 +232,12 @@ def install_python_deps(dry_run: bool) -> None:
     run([sys.executable, "-m", "pip", "install", "--upgrade", "pip"], dry_run=dry_run)
     run([sys.executable, "-m", "pip", "install", "-r", str(REQUIREMENTS)], dry_run=dry_run)
 
-    # kaleido 1.x downloads a bundled Chromium on first use. Doing it here
-    # instead of at first-chart-render means the user isn't surprised by a
-    # 100+ MB network call when generating their first PDF. Best-effort —
-    # if it fails, the app still works and provisions on demand.
-    info("Pre-provisioning kaleido renderer (downloads Chromium on first run)...")
+    # kaleido 0.2.1 (pinned in requirements.txt) ships its own headless
+    # Chromium inside the wheel — no separate browser install or first-use
+    # download. Render a tiny PNG here to verify the static-image pipeline
+    # works end-to-end. Best-effort — if it fails, PDF charts are the only
+    # feature affected.
+    info("Verifying kaleido static-image renderer...")
     if not dry_run:
         try:
             import plotly.graph_objects as _go
@@ -240,7 +245,7 @@ def install_python_deps(dry_run: bool) -> None:
             _go.Figure().to_image(format="png", width=10, height=10)
             ok("kaleido renderer ready")
         except Exception as e:
-            warn(f"kaleido pre-provision skipped: {e}")
+            warn(f"kaleido render check skipped: {e}")
 
 
 # ---------------------------------------------------------------------------
@@ -299,8 +304,11 @@ def main() -> int:
         ok("Install complete. Start the app with:")
         cmd = "streamlit run app/main.py" if IS_WINDOWS else "make run"
         print(f"    {cmd}")
+        print("  or run everything in Docker (canonical build/verify path):")
+        print("    make docker-up        # UI at http://localhost:8501")
     else:
         fail("Install finished, but some dependencies are still missing (see above).")
+        warn("Alternative: run in Docker with all deps baked in — make docker-up")
     return rc
 
 

@@ -141,14 +141,29 @@ REQUIRED_BINARIES = [
     ),
 ]
 
-REQUIRED_PYTHON_PACKAGES = [
-    "streamlit",
-    "pandas",
-    "pyshark",
-    "scapy",
-    "openai",
-    "requests",
-    "cryptography",
+# Python packages checked by name as published on PyPI (importlib.metadata
+# normalizes case/dashes). Mirrors the binary pattern above: ``required=False``
+# entries degrade gracefully in the app (PDF export, YARA scanning) and print
+# a yellow "optional" instead of failing the check.
+PYTHON_PACKAGES: list[tuple[str, bool]] = [
+    # (distribution name, required)
+    ("streamlit", True),
+    ("pandas", True),
+    ("numpy", True),
+    ("pyshark", True),
+    ("scapy", True),
+    ("openai", True),
+    ("anthropic", True),
+    ("requests", True),
+    ("cryptography", True),
+    ("plotly", True),
+    ("kaleido", True),
+    ("markdown", True),
+    ("jinja2", True),
+    ("fastapi", True),
+    ("uvicorn", True),
+    ("weasyprint", False),  # PDF export — needs system pango/cairo libs
+    ("yara-python", False),  # YARA scanning — needs system yara library
 ]
 
 
@@ -229,10 +244,12 @@ def print_results_human(results: dict, use_color: bool) -> None:
 
     print("\nPython packages:")
     for pkg in results["python_packages"]:
-        status_text = "OK" if pkg["installed"] else "MISSING"
-        status_color = "green" if pkg["installed"] else "red"
+        required = pkg.get("required", True)
+        status_text = "OK" if pkg["installed"] else ("MISSING" if required else "optional")
+        status_color = "green" if pkg["installed"] else ("red" if required else "yellow")
         status = colorize(f"[{status_text:>8}]", status_color, use_color)
-        print(f"  {status}   {pkg['name']:<20} {pkg['version'] or '-'}")
+        req_mark = "*" if required else " "
+        print(f"  {status} {req_mark} {pkg['name']:<20} {pkg['version'] or '-'}")
 
     print()
     if results["missing_required"]:
@@ -290,10 +307,10 @@ def run_checks() -> dict:
             missing_required.append(bc.name)
 
     pkg_results = []
-    for pkg in REQUIRED_PYTHON_PACKAGES:
+    for pkg, required in PYTHON_PACKAGES:
         installed, version = check_python_package(pkg)
-        pkg_results.append({"name": pkg, "installed": installed, "version": version})
-        if not installed:
+        pkg_results.append({"name": pkg, "required": required, "installed": installed, "version": version})
+        if required and not installed:
             missing_required.append(f"python:{pkg}")
 
     return {

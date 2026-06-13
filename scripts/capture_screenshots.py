@@ -102,13 +102,28 @@ def save_screenshot(page: Page, filename: str) -> Path:
     return path
 
 
-def upload_sample_pcap(page: Page, pcap_path: Path) -> None:
-    """Fill the 'type a container path' text input to load the sample."""
+def upload_sample_pcap(page: Page, pcap_path: str) -> None:
+    """Fill the 'type a container path' text input to load the sample.
+
+    ``pcap_path`` must be valid for the SERVER process — when the app runs in
+    Docker that means a container-visible path like ``data/sample.pcap``, not
+    the host's absolute path.
+    """
     path_input = page.get_by_label("...or type a container path (e.g., /data/capture.pcap)")
-    path_input.fill(str(pcap_path))
-    # Commit the input — Streamlit needs blur or Enter to register
-    path_input.press("Tab")
+    path_input.fill(pcap_path)
+    # Commit the input — on Streamlit >=1.55 Enter is the reliable commit
+    # (Tab/blur alone no longer registers the value before the rerun).
+    path_input.press("Enter")
     wait_for_streamlit_idle(page)
+    try:
+        page.get_by_text("Active Source", exact=False).first.wait_for(timeout=15_000)
+    except Exception:
+        # One retry with blur in case the first commit raced the rerun.
+        path_input.fill(pcap_path)
+        path_input.press("Enter")
+        path_input.press("Tab")
+        wait_for_streamlit_idle(page)
+        page.get_by_text("Active Source", exact=False).first.wait_for(timeout=15_000)
 
 
 def run_extract_analyze(page: Page, wait_for_llm: bool = False, timeout_s: int = 300) -> None:
@@ -120,6 +135,12 @@ def run_extract_analyze(page: Page, wait_for_llm: bool = False, timeout_s: int =
     tab only depends on data stages, so this is fine for screenshots.
     """
     page.get_by_role("button", name=re.compile(r"extract\s*&\s*analyze", re.IGNORECASE)).click()
+    page.wait_for_timeout(2_000)
+    if "Please upload a PCAP or provide a valid path" in page.inner_text("body"):
+        raise RuntimeError(
+            "the server rejected the pcap path — pass a path the SERVER can see "
+            "(container-relative like data/sample.pcap when using Docker)"
+        )
     print(f"  waiting for pipeline (up to {timeout_s}s)...")
     deadline = time.time() + timeout_s
     last_status = ""
@@ -139,7 +160,9 @@ def run_extract_analyze(page: Page, wait_for_llm: bool = False, timeout_s: int =
                     // or we see the LLM phase's "Generating AI report" caption, or LLM done.
                     const dataStageDone =
                         bodyText.match(/Generating AI report/i) ||
+                        bodyText.match(/Generating LLM report/i) ||
                         bodyText.match(/OSINT enrichment complete/i) ||
+                        bodyText.match(/Completed: LLM report/i) ||
                         bodyText.match(/Beacon candidates/i) ||
                         result.llm_done;
 
@@ -455,6 +478,12 @@ def main() -> int:
         default=2400,
         help="viewport height — made tall so Streamlit's internal scroll container renders more content",
     )
+    parser.add_argument(
+        "--pcap",
+        default="data/sample.pcap",
+        help="pcap path AS THE SERVER SEES IT (container-relative when the app runs in Docker)",
+    )
+    parser.add_argument("--pipeline-timeout", type=int, default=600, help="seconds to wait for the data stages")
     args = parser.parse_args()
 
     OUT_DIR.mkdir(parents=True, exist_ok=True)
@@ -505,15 +534,41 @@ def main() -> int:
             return 0
 
         # 2. Upload sample and kick off analysis
-        print("→ entering sample.pcap path")
-        upload_sample_pcap(page, SAMPLE_PCAP)
+        print(f"→ entering pcap path: {args.pcap}")
+        upload_sample_pcap(page, args.pcap)
         page.wait_for_timeout(1_000)
 
         print("→ clicking Extract & Analyze")
-        run_extract_analyze(page)
+        run_extract_analyze(page, timeout_s=args.pipeline_timeout)
 
         # Give charts a moment to finish rendering post-pipeline
         page.wait_for_timeout(3_000)
+
+        # 2b. Wait for the LLM report so 04-llm-analysis shows real content.
+        # The report renders inside the (hidden) LLM Analysis tab panel, so we
+        # must activate the tab before its text is visible to innerText.
+        print("→ waiting for the LLM report (up to 7 min)…")
+        click_tab(page, "LLM Analysis")
+        llm_deadline = time.time() + 420
+        while time.time() < llm_deadline:
+            try:
+                panel_text = page.inner_text("body")
+            except Exception:
+                panel_text = ""
+            if re.search(r"Executive Summary|Risk Assessment|IOC Summary", panel_text):
+                print("  LLM report rendered")
+                break
+            page.wait_for_timeout(5_000)
+        else:
+            print("  WARNING: LLM report not detected — capturing current state")
+
+        # 2c. Expand the risk explainer so the Dashboard shot shows it.
+        click_tab(page, "Dashboard")
+        try:
+            page.get_by_text("Why this risk level?").first.click()
+            page.wait_for_timeout(1_200)
+        except Exception:
+            print("  (risk expander not found — continuing)")
 
         # 3. Capture each tab
         for label, filename in (
@@ -528,6 +583,21 @@ def main() -> int:
             print(f"→ tab: {label}")
             click_tab(page, label)
             capture_and_redact(page, filename, redact=redact)
+
+        # 4. LLM Integration close-up with the Anthropic provider selected.
+        # No IPs appear in this section, so no redaction pass is needed.
+        print("→ provider close-up: 09-llm-providers.png")
+        try:
+            page.get_by_text("Anthropic", exact=True).first.click()
+            page.wait_for_timeout(2_000)
+            heading = page.get_by_text("LLM Integration", exact=True).first
+            box = heading.bounding_box() or {"y": 0}
+            clip = {"x": 0, "y": max(box["y"] - 16, 0), "width": args.width, "height": 760}
+            target = OUT_DIR / "09-llm-providers.png"
+            page.screenshot(path=str(target), clip=clip)
+            print(f"  → saved {target.relative_to(REPO_ROOT)} ({target.stat().st_size:,} bytes)")
+        except Exception as exc:  # noqa: BLE001 — optional close-up
+            print(f"  WARNING: provider close-up failed: {exc}")
 
         browser.close()
 

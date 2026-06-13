@@ -1,245 +1,305 @@
 # PCAP Hunter User Manual
 
-**PCAP Hunter** is an advanced threat hunting workbench that bridges the gap between manual packet analysis and automated security monitoring. It combines industry-standard tools (**Zeek**, **Tshark**) with modern AI (**LLMs**) and threat intelligence (**OSINT**) to rapidly ingest, analyze, and extract actionable intelligence from network traffic.
+**PCAP Hunter** is an AI-enhanced threat hunting workbench that bridges the gap between manual packet analysis and automated security monitoring. It combines industry-standard tools (**Zeek**, **Tshark**, **PyShark**) with **LLMs** and **OSINT** threat intelligence to rapidly ingest, analyze, and extract actionable intelligence from network traffic.
+
+This manual walks through the application the way a new SOC analyst would: install, load a capture, watch the pipeline, then work the results tab by tab.
 
 ---
 
 ## 📚 Table of Contents
 1. [Getting Started](#getting-started)
-   - [Prerequisites](#prerequisites)
-   - [Installation & Launch](#installation--launch)
-2. [Core Workflows](#core-workflows)
-   - [Data Ingestion (Upload)](#1-data-ingestion)
-   - [Analysis Pipeline](#2-analysis-pipeline)
-3. [Analysis Dashboard](#analysis-dashboard)
-   - [Threat Summary Panel](#threat-summary-panel)
-   - [Global Map & Filters](#global-map--filters)
-   - [Sankey Flow Diagram](#sankey-flow-diagram)
-   - [Charts & Visualizations](#charts--visualizations)
-   - [Top Metrics](#top-metrics)
-   - [Detection Panels](#detection-panels)
-   - [Cross-Indicator Correlation](#cross-indicator-correlation)
-4. [Advanced Features](#advanced-features)
-   - [AI Threat Report](#ai-threat-report)
-   - [Multi-PCAP Batch Analysis](#multi-pcap-batch-analysis)
-   - [OSINT Enrichment](#osint-enrichment)
-   - [Bulk Reverse DNS](#bulk-reverse-dns)
-   - [Forensics (DNS, TLS, YARA, Carving)](#forensics)
-5. [Configuration](#configuration)
-   - [LLM Setup](#llm-setup)
-   - [OSINT Keys](#osint-keys)
-   - [Map Location](#map-location)
-   - [Data Management](#data-management)
-6. [Troubleshooting](#troubleshooting)
+   - [Option A — Docker (recommended)](#option-a--docker-recommended)
+   - [Option B — Standalone install](#option-b--standalone-install)
+   - [First Launch](#first-launch)
+2. [Loading PCAPs](#loading-pcaps)
+3. [The Analysis Pipeline & Progress Tab](#the-analysis-pipeline--progress-tab)
+4. [Dashboard](#dashboard)
+5. [OSINT Enrichment](#osint-enrichment)
+6. [LLM Analysis (AI Threat Report)](#llm-analysis-ai-threat-report)
+7. [Raw Data](#raw-data)
+8. [Cases](#cases)
+9. [Exports & PDF Reports](#exports--pdf-reports)
+10. [Configuration](#configuration)
+11. [Data Retention](#data-retention)
+12. [Troubleshooting](#troubleshooting)
 
 ---
 
 ## Getting Started
 
-### Prerequisites
-Ensure the following tools are installed on your system:
-- **Python 3.10+**: The core runtime.
-- **Zeek**: Network security monitor for generating logs (`brew install zeek`).
-- **Wireshark/Tshark**: Packet analyzer for parsing and statistics (`brew install wireshark`).
-- **Pango**: Library required for PDF report generation (`brew install pango`).
-- **LM Studio** (Optional): For running local AI models privacy-first.
+### Option A — Docker (recommended)
 
-### Installation & Launch
-1. **Clone the repository**:
-   ```bash
-   git clone https://github.com/ninedter/pcap-hunter.git
-   cd pcap-hunter
-   ```
-2. **Install dependencies**:
-   ```bash
-   make install
-   ```
-3. **Run the application**:
-   ```bash
-   make run
-   ```
-   The application will open in your default browser at `http://localhost:8501`.
+The Docker image bakes in tshark, Zeek, the WeasyPrint PDF libraries, and all Python dependencies — nothing to install on the host but Docker itself.
 
----
+```bash
+git clone https://github.com/ninedter/pcap-hunter.git
+cd pcap-hunter
+make docker-up        # build + start the UI → http://localhost:8501
+make docker-down      # stop when finished
+```
 
-## Core Workflows
+Good to know:
 
-### 1. Data Ingestion
-Navigate to the **Load PCAP** tab to start.
+- **`./data` is mounted into the container** — PCAPs, carved files, Zeek logs, and the case database live on the host and survive container restarts. Put YARA rules under `./data/yara_rules`.
+- **API keys you save in the UI persist** in the `pcap-hunter-home` Docker volume. The compose file pins the container `hostname:` so the machine-derived config encryption key stays stable across container recreation.
+- **LM Studio on the host is reachable from the container** — `LM_BASE_URL` defaults to `http://host.docker.internal:1234/v1`.
+- A second compose service (`pcap-hunter-api`) serves the Integrations API on port 8000 from the same image.
 
-#### File Upload
-- **Single File**: Drag & drop a `.pcap` or `.pcapng` file into the upload area.
-- **Multiple Files**: Upload multiple PCAPs at once to enter **Batch Mode** with cross-file correlation. Limits: 50 files max, 1 GB per file, 5 GB total.
-- **Manual Path**: For large files (>200MB) that browsers struggle to upload, type the absolute path to the file on your disk (e.g., `/Users/name/capture.pcap`) and press Enter.
+### Option B — Standalone install
 
-### 2. Analysis Pipeline
-By default, PCAP Hunter executes a complete analysis pipeline. You can customize which phases run (e.g., disable Zeek or Carving) in the **Config** tab under the **Extraction / Analysis** section.
+A single cross-platform installer detects your OS and package manager, installs system binaries (tshark, Zeek, YARA, the WeasyPrint libraries) and Python packages, then verifies everything:
 
-#### Parallel Execution
-The two heaviest stages — **PyShark packet parsing** and **Zeek log processing** — run concurrently via a thread pool, significantly reducing total analysis time. HTTP carving also runs in parallel with DNS/TLS/Beaconing analysis.
+```bash
+git clone https://github.com/ninedter/pcap-hunter.git
+cd pcap-hunter
+python3 scripts/install.py
+make run              # → http://localhost:8501
+```
 
-Click **Extract & Analyze** to begin. Monitor progress in the **Progress** tab.
+`make install` (macOS/Linux) and `.\scripts\install.ps1` (Windows PowerShell) are wrappers around the same script. Useful flags: `--check-only`, `--skip-system`, `--skip-python`, `--dry-run`, `--yes`.
+
+> **Windows note:** Zeek has no native Windows build. Native installs run the tshark pipeline but skip the Zeek stage — use Docker or WSL2 for the complete pipeline.
+
+### First Launch
+
+- A dismissable **Getting started** panel appears on the Upload tab until your first analysis: load a PCAP, click **Extract & Analyze**, watch **Progress**, then review the **Dashboard**. Click **"Got it — don't show again"** to hide it.
+- The app runs a dependency check at startup and shows a **red banner** on every page if a required binary (e.g. `tshark`) is missing — you will never get a silently empty dashboard. To check manually: `make doctor` or `python3 scripts/install.py --check-only`.
 
 ---
 
-## Analysis Dashboard
+## Loading PCAPs
 
-The **Dashboard** tab is your central mission control.
+Open the **Upload** tab.
 
-### Threat Summary Panel
-At the top of the dashboard, a panel displays five key metrics at a glance:
-- **Risk Level** — Overall threat assessment (Critical / High / Medium / Low) based on corroboration across multiple signal categories.
-- **Total Alerts** — Number of indicators flagged by the correlation engine.
-- **Beacon Candidates** — Flows exhibiting C2-like periodic communication patterns.
-- **YARA Hits** — Files matching YARA rule signatures.
-- **Cert Issues** — TLS certificates with problems (self-signed, expired, or untrusted chains).
+- **Drag & drop** one or more `.pcap` / `.pcapng` files. The browser uploader accepts files up to **200 MB each**.
+- **Larger files — use the path field.** Type a path in *"...or type a container path"* and press Enter. The path must point to a `.pcap`/`.pcapng` inside an allowed directory: `data/`, `pcaps/`, or `/data/`. In Docker, `./data` on the host is mounted into the container — drop a big capture into `./data/` and reference it as `/data/<name>.pcap`.
+- **Batch mode** activates automatically when you upload multiple files: each file runs the full pipeline independently, then cross-file correlation detects shared IPs, domains, and JA3 fingerprints across captures. Limits: 50 files, 1 GB per file, 5 GB total.
 
-The risk level requires **corroboration from 2+ signal categories** to escalate to Medium, and YARA or high-confidence OSINT signals for High/Critical — preventing false positives from single weak signals.
-
-### Global Map & Filters
-- **Interactive World Map**: Visualizes the geographic destination of your traffic.
-  - **Selection**: Use **Box Select** or **Lasso Select** tools to highlight a region. This **cross-filters** the entire dashboard (charts, tables, timeline) to show only traffic relevant to that area.
-  - **Home Location**: Configure your physical location in the **Config** tab to draw accurate connection lines.
-- **Global Filters**:
-  - **Exclude Private IPs**: Toggle this checkbox to hide RFC1918 (local LAN) traffic from the map and "Top 10" charts. This helps focus on external threats.
-  - **Clear All Filters**: Instantly resets the dashboard view, clearing IP, protocol, and time selections.
-
-### Sankey Flow Diagram
-Displayed alongside the Network Communication Graph, the **Sankey diagram** visualizes traffic flows in three columns:
-- **Left**: Client (source) IPs
-- **Middle**: Service ports with human-readable protocol labels (e.g., "443 (HTTPS)", "53 (DNS)")
-- **Right**: Server (destination) IPs
-
-The diagram automatically normalizes flow direction: the side using a well-known port (< 10000) is treated as the server. Ephemeral ports (>= 10000) are excluded to keep the visualization clean and focused on meaningful service connections.
-
-### Charts & Visualizations
-- **Protocol Distribution**: A pie chart showing protocol breakdown (TCP, UDP, TLS, HTTP, etc.). Click a slice to filter the dashboard by that protocol.
-- **Flow Timeline**: A time-series chart showing traffic volume over time.
-  - **Zoom**: Click and drag to create a time window. The dashboard will update to show only traffic from that specific period.
-- **Network Communication Graph**: Force-directed graph with threat-colored nodes and equal-aspect-ratio rendering.
-
-### Top Metrics
-- **Top 10 Tables**: Tables and bar charts displaying the most active:
-  - **Source IPs** (with reverse DNS hostnames)
-  - **Destination IPs** (with reverse DNS hostnames)
-  - **Destination Ports**
-  - **Protocols** or **Domains**
-
-### Detection Panels
-The dashboard surfaces key detection results directly:
-- **Beaconing Candidates** — Flows scoring above the C2 threshold (0.6+), with periodicity and jitter details.
-- **YARA Matches** — Files carved from HTTP traffic that matched YARA rules.
-- **TLS Certificate Risks** — Expired, self-signed, or untrusted certificates detected in SSL/TLS traffic.
-
-### Cross-Indicator Correlation
-A dedicated section displays the **correlation engine's composite threat scores** for each indicator:
-- Uses an **independence-complement formula** (`1 − Π(1 − wᵢsᵢ)`) to combine signals from OSINT, beaconing, DNS, TLS, YARA, and flow analysis.
-- Indicators are classified as **Critical**, **High**, **Medium**, or **Low** with supporting signal breakdowns.
-- Strong-signal floors ensure that a confirmed VirusTotal detection automatically sets a minimum score.
+Click **Extract & Analyze** to start.
 
 ---
 
-## Advanced Features
+## The Analysis Pipeline & Progress Tab
 
-### AI Threat Report
-Located in the **LLM Analysis** tab.
-- **Structured Analysis Workflow**: The AI follows a professional methodology: Characterize → Identify → Assess → Recommend.
-- **Severity Calibration**: The LLM is guided by examples for each severity level, with built-in false-positive awareness to avoid over-rating benign traffic.
-- **Pre-Computed Context**: The report receives pre-computed correlation verdicts, risk distributions, and top threats — ensuring the AI narrative aligns with the quantitative analysis.
-- **Sections**: Includes Executive Summary, Key Findings, Indicators of Compromise (IOCs), Risk Assessment, and Recommended Actions.
-- **PDF Export**: Click **Generate PDF Report** to download a formatted report. The PDF includes:
-  - Cover Page with classification (TLP:CLEAR).
-  - Full AI narrative.
-  - Tables for detected IOCs (IPs, Domains, Hashes).
-  - YARA Scan results.
-  - TLS Analysis (expired/self-signed certs).
+PCAP Hunter runs a 10-stage pipeline:
 
-### Multi-PCAP Batch Analysis
-Upload multiple PCAP files at once to enable batch mode:
-- **Per-File Analysis**: Each file runs through the full 10-stage pipeline independently.
-- **Cross-File Correlation**: After individual analysis, the engine detects shared indicators (IPs, domains, JA3 fingerprints) across files — revealing coordinated activity or persistent threats.
-- **Batch Summary**: Aggregated metrics and per-file detail cards are displayed in the dashboard.
-- **Resource Limits**: Configurable via `app/config.py` — default 50 files max, 1 GB per file, 5 GB total.
+| # | Stage | What it does |
+|---|-------|--------------|
+| 1 | Packet Counting | Fast preliminary count via tshark |
+| 2 | Packet Parsing | PyShark deep inspection (default cap 200,000 packets) |
+| 3 | Zeek Processing | Automated Zeek run + `conn`/`dns`/`http`/`ssl` log parsing |
+| 4 | DNS Analysis | DGA, tunneling, fast flux, NXDOMAIN, query velocity |
+| 5 | TLS Certificate Analysis | Chain validation, self-signed/expired detection |
+| 6 | Beaconing Ranking | Statistical C2 periodicity/jitter/volume scoring |
+| 7 | HTTP Carving | Payload extraction with SHA256 hashing |
+| 8 | YARA Scanning | Rule-based scan of carved files |
+| 9 | OSINT Enrichment | Multi-provider reputation lookups |
+| 10 | LLM Report Generation | AI threat synthesis |
 
-### OSINT Enrichment
-Located in the **OSINT** tab.
-- **IP Intelligence**: Displays reputation scores from VirusTotal, GreyNoise (noise vs. malicious), and PTR records.
-- **Domain Intelligence**: Categories and reputation for queried domains.
-- **WHOIS**: Click on an IP or Domain to view registration details in a popup.
+**Execution shape:** stages 2–3 (PyShark, Zeek) run **in parallel**; once both finish, stages 4–7 (DNS, TLS, beaconing, carving) fan out **concurrently**. The Progress tab shows this live:
 
-### Bulk Reverse DNS
-PCAP Hunter automatically performs **bulk reverse DNS (rDNS) resolution** for all public IPs observed in the traffic:
-- Parallel resolution via ThreadPoolExecutor for speed.
-- Results cached in a dedicated **SQLite database** with a 7-day TTL to avoid redundant lookups.
-- Resolved hostnames are displayed throughout the dashboard in Top 10 tables, correlation results, and OSINT views.
+- Each phase has its own progress bar and a **caption** describing what is currently happening.
+- Every phase has a **Skip** button — long Zeek run on a huge capture? Skip it and the pipeline continues. Panels that depended on the skipped stage will say so explicitly (see [Dashboard](#dashboard) empty states) instead of rendering blank.
+- The final phase, **LLM Report Analysis**, generates the AI report; its progress is tracked like any other stage.
 
-### Forensics
-- **DNS Analysis**:
-  - **DGA Detection**: Uses Shannon Entropy to identify randomly generated domains used by malware.
-  - **Tunneling**: Flags unusually large or frequent DNS queries indicative of data exfiltration.
-- **TLS Analysis**:
-  - **JA3 Fingerprinting**: Identifies client applications based on SSL hello packets.
-  - **Certificate Hygiene**: Alerts on self-signed, expired, or unusual certificates.
-- **YARA Scanning**: Automatically scans files extracted from HTTP traffic.
-  - **Carved Files**: Each run stores its files in a per-run folder under `./data/carved/<run_id>/`, auto-pruned after 7 days — export anything you need to keep.
-  - **Rules**: Uses custom or standard YARA rules to detect known malware families.
+You can switch to the Dashboard as soon as the pipeline finishes; partial results appear per-stage.
+
+---
+
+## Dashboard
+
+The **Dashboard** tab is mission control. Top to bottom:
+
+### Threat Summary
+
+Five metrics at a glance: **Risk Level**, **Total Alerts**, **Beacon Candidates**, **YARA Hits**, and **Cert Issues**, followed by a one-line **severity color legend** so you can calibrate every badge and chart color on the page.
+
+### "Why this risk level?" explainability
+
+Expand the **Why this risk level?** panel under the summary to see exactly which signals drove the verdict. The risk level is the **highest tier that actually triggered**, under these escalation rules:
+
+- **Tier 1 (Definitive)** — OSINT confirmations (e.g. VirusTotal detections, GreyNoise *malicious*). Any single Tier 1 hit sets a score floor.
+- **Tier 2 (Behavioral)** — C2 beaconing, flow asymmetry, DNS tunneling, DGA domains.
+- **Tier 3 (Contextual)** — AbuseIPDB reports, self-signed/expired certificates, YARA matches.
+- Tier 3 signals **alone never exceed Medium**; High/Critical requires corroboration across tiers.
+
+If nothing fired, the expander says so: "✅ No threat signals fired — nothing exceeded thresholds".
+
+### Honest empty states
+
+Every panel distinguishes two very different kinds of "nothing here":
+
+- **✅ Ran and found nothing** — the stage executed and came back clean. A genuine negative result.
+- **📭 Not run / not available** — the stage was skipped, failed, or its data was not persisted (e.g. "📭 DNS analysis was skipped for this run."). Not evidence of absence.
+
+Treat ✅ as an answer and 📭 as a gap to close before signing off an investigation.
+
+### Filters & charts
+
+- **World map** — box/lasso selection cross-filters the entire dashboard; configure your home location in Config for accurate connection arcs.
+- **Protocol pie** — click a slice to filter by protocol.
+- **Flow timeline** — drag to zoom into a time window. Chart time axes are labelled **UTC**.
+- **Exclude Private IPs** persists while you explore; **Clear All Filters** resets everything.
+- **Top 10 tables** for source/destination IPs (with reverse-DNS hostnames), ports, protocols/domains; Sankey and force-directed network graphs.
+
+### Flow table
+
+The flow table includes explicit **First Seen (UTC)** and **Last Seen (UTC)** columns — true flow start/end times are kept exact even when per-flow packet samples are capped (5,000 samples per flow).
+
+---
+
+## OSINT Enrichment
+
+The **OSINT** tab enriches the most active public IPs (default: top 50, configurable) and observed domains via VirusTotal, AbuseIPDB, GreyNoise, OTX, Shodan, and VT Domain.
+
+### Provider status pills — read these first
+
+Each queried provider reports its status honestly, aggregated across all indicators:
+
+| Pill | Meaning | What to do |
+|------|---------|------------|
+| ✅ *provider* | Queried successfully | Trust the columns |
+| 💾 *provider* | Served from local SQLite cache | Fine — saves quota; clear cache in Config for fresh data |
+| ⏳ *provider* rate limited | API quota exhausted | Wait for the quota window or upgrade the key |
+| 🔑 *provider* key rejected | Authentication failed | Fix the key in Config → OSINT API Keys |
+| ➖ *provider* no data | Provider answered but **knows nothing about these indicators** | **Not a failure** — the indicators are simply unknown to that source |
+| *(no pill)* | Provider not configured / not queried | Add a key in Config if you want its signal |
+
+The ➖ distinction matters: "no data" is a real, honest answer from a working provider — don't mistake it for a broken integration, and don't treat it as proof an indicator is benign.
+
+### Working the tab
+
+- **IP triage table** — per-IP verdicts with merged provider scores, rDNS hostnames, and progress-bar score columns.
+- **WHOIS lookup** — pick an IP in the **selectbox and click the lookup button**, or simply **select a row** in the table; either opens the WHOIS detail dialog.
+- **Domains** — reputation and categories for observed domains.
+- **Detail cards** — full per-indicator provider breakdowns.
+- Additional sub-tabs: Geo Map, Infrastructure (ASN clustering), Export, Devices, Notes.
+- **IOC search** — search across all indicators; a **show-all-results toggle** expands past the default result cap.
+
+---
+
+## LLM Analysis (AI Threat Report)
+
+The **LLM Analysis** tab generates a narrative threat report grounded in the pipeline's quantitative findings. Three interchangeable providers (configured in Config → LLM Integration):
+
+| Provider | Where it runs | How it generates |
+|----------|---------------|------------------|
+| **LM Studio** | Local / air-gapped | Section-by-section (chunked) to fit small context windows |
+| **OpenAI** | Cloud | Single full-context call — the entire evidence corpus in one prompt |
+| **Anthropic** | Cloud | Single full-context call with streaming, via the official SDK (`claude-opus-4-8`, `claude-sonnet-4-6`, `claude-haiku-4-5`) |
+
+Frontier cloud models add **MITRE ATT&CK technique IDs** inline and propose **carefully hedged hypotheses** ("consistent with…", "would confirm…") rather than overclaiming.
+
+### Report sections
+
+1. Executive Summary
+2. Threat Correlation
+3. Indicators & Evidence
+4. OSINT Corroboration
+5. DNS & TLS Analysis
+6. Beaconing & Network
+7. Risk Assessment — includes a **Risk Matrix rendered as a real Markdown table** (one row per category)
+8. Recommended Actions
+9. IOC Summary — a structured **IOC table** (indicator, type, verdict, evidence)
+
+Reports are available in **9 languages** — US English, **Traditional Chinese (zh-tw, Taiwan terminology)**, Simplified Chinese, Japanese, Korean, Italian, Spanish, French, German — selected in Config.
+
+### Re-run Report
+
+Changed provider, model, or language? Click **Re-run Report** to regenerate *only* the AI report — the PCAP is not re-processed.
+
+---
+
+## Raw Data
+
+The **Raw Data** tab exposes every underlying data source: the flow table, DNS analysis (DGA / tunneling / NXDOMAIN), TLS certificates and JA3/JA3S fingerprints, Zeek `conn.log` / `dns.log` / `http.log` / `ssl.log`, carved HTTP payloads with SHA256 hashes, and YARA scan results. Any view exports as CSV or JSON with CSV-injection protection.
+
+---
+
+## Cases
+
+The **Cases** tab turns a capture into a persistent investigation:
+
+- **Save** the current analysis into a case — IOCs, severity, tags, investigation notes, and status are stored in a local SQLite database, searchable across sessions.
+- **Load into Dashboard** restores a saved case's results into the live dashboard.
+
+**What's restored vs. reset:** stored findings (summary metrics, IOCs, correlations, report) come back; heavyweight artifacts that are *not* persisted in the case record (e.g. full packet-level data, pruned run directories) show **"📭 not available"** empty states until you re-run the original PCAP. The dashboard tells you which is which — see [Honest empty states](#honest-empty-states).
+
+---
+
+## Exports & PDF Reports
+
+### PDF report
+
+Click **Generate PDF Report** in the LLM Analysis tab. The PDF includes:
+
+- A cover page with configurable **TLP classification** and analyst metadata.
+- **Numbered sections with a matching table of contents** — both are generated from one section registry, so numbering and the TOC always agree.
+- The full AI narrative, with the **Risk Matrix and IOC Summary as real tables**, plus YARA results and TLS findings.
+- **Embedded dashboard charts** (protocol distribution, top talkers, flow timeline, network graph, world map) rendered to PNG.
+- **Timezone-aware timestamps** throughout.
+
+### Data exports
+
+- **CSV / JSON** — any table, with CSV-injection protection.
+- **STIX 2.0 / 2.1** — standard indicator bundles.
+- **ATT&CK Navigator** — technique-mapping layer files.
+- **CEF (ArcSight)** — SIEM-ingestible events from correlations, beacons, DNS, and IOCs.
+
+> Need programmatic access instead? The **Integrations API** serves PCAP submission, job polling, and IOC feeds (JSON / CSV / STIX 2.1) on port 8000 — see [docs/API.md](../API.md).
 
 ---
 
 ## Configuration
 
-Customize the application in the **Config** tab.
+Everything lives in the **Config** tab; settings persist to `~/.pcap_hunter_config.json` and API keys are PBKDF2-encrypted at rest.
 
-### LLM Setup
-- **Endpoint**: Default is `http://localhost:1234/v1` (LM Studio). consistent with OpenAI API standards.
-- **Model**: Type the model name (e.g., `llama-3.2-3b-instruct`) or click **Fetch Models** to auto-populate from the server.
-- **Language**: Select from **9 supported languages** (English, Chinese, Japanese, Korean, Italian, Spanish, French, German) for the report.
-  - **Re-run Report**: If you change the language or model, use this button to regenerate *only* the report without re-processing the PCAP.
+### LLM Integration
 
-### OSINT Keys
-Enter your API keys to enable enrichment. Keys are saved securely in your local configuration.
-- **VirusTotal**: For file has and IP/Domain reputation.
-- **AbuseIPDB**: For community-reported malicious IPs.
-- **GreyNoise**: To identify internet scanners (benign vs. malicious).
-- **Shodan**: For device fingerprinting.
-- **OTX**: AlienVault Open Threat Exchange.
+- A **provider selector** (LM Studio / OpenAI / Anthropic) with per-provider fields: base URL, API key, and a model picker with **Fetch Models**.
+- **Test Connection** probes the selected provider and reports the result inline.
+- **Report language** — the 9-language selector described above.
 
-### Extraction / Analysis
-Enable or disable specific pipeline steps to speed up analysis or skip unnecessary processing:
-- **PyShark Parsing**: Deep packet inspection (Required for flow charts).
-- **Packet Limit**: Max packets to parse (Default: 200,000) to prevent memory exhaustion.
-- **Zeek Processing**: Toggles Zeek log generation.
-- **Parallel Execution**: When both PyShark and Zeek are enabled, they run concurrently (enabled by default).
-- **Carve HTTP bodies**: Extracts files from HTTP traffic.
-- **YARA Scan**: Scans carved files (requires Carving to be enabled).
-- **Pre-count packets**: Counts total packets before parsing.
-- **OSINT Cache**: Toggles local caching of API results.
+### OSINT API Keys
 
-### Map Location
-Set your **Home Location** using the cascading selectors:
-- **Continent** -> **Country** -> **City**
-- This fixes the origin point for connection lines on the map.
+- Keys for VirusTotal, AbuseIPDB, GreyNoise, OTX, Shodan. Environment variables (`VT_KEY`, `SHODAN_KEY`, …) override saved config.
+- **Test Providers** live-checks every configured provider with a benign indicator and reports the same statuses as the OSINT pills (ok / rate limited / key rejected / …) — run it after entering new keys.
 
-### Data Management
-Granular controls to manage disk usage:
-- **Save/Load Config**: Persist your settings (keys, location, preferences) across sessions.
-- **Clear PCAP Data**: Deletes all uploaded PCAPs, Zeek logs, and carved files to free disk space.
-- **Clear OSINT Cache**: PCAP Hunter caches API responses to save quota. Use this to force fresh lookups.
-- **Clear Cases**: Wipes the internal database of all investigation cases and notes.
+### YARA Rules
+
+- Point **YARA Rules directory** at any folder of `.yar`/`.yara` rules (scanned recursively).
+- **Zero-config default:** leave it blank and `data/yara_rules/` is used when present. In Docker, put rules under `./data/yara_rules` — the data folder is mounted.
+- The field gives **live feedback** with the number of rule files found at the configured path, so you know your rules will load before you run.
+
+### Other sections
+
+- **Binary paths** — override auto-detected `zeek` / `tshark` locations; a System Health readout shows what was found.
+- **Home location** — Continent → Country → City; anchors the world-map connection arcs.
+- **Extraction / Analysis** — toggle pipeline stages (Zeek, carving, YARA, pre-count, OSINT cache) and the PyShark packet limit (default 200,000).
+- **Data management** — granular **Clear** buttons for PCAP data, OSINT cache, and the Cases database, each independent.
+
+### API Keys tab
+
+Programmatic keys for the Integrations API are managed in the separate **API Keys** tab: create/revoke keys, scope them (full or feed-only), set expiry and per-key rate limits, and watch a usage sparkline. Environment-variable keys appear as read-only bootstrap entries.
+
+---
+
+## Data Retention
+
+- Each run writes Zeek and carved-file outputs into **per-run directories**: `data/zeek/<case>_<uuid8>/` and `data/carved/<case>_<uuid8>/` — concurrent runs never clobber each other.
+- Stale run directories are **pruned automatically after 7 days** (on the next run). **Export any evidence you need to keep** — carved payloads, Zeek logs — before they age out.
+- OSINT responses and reverse-DNS results are cached in SQLite (rDNS TTL: 7 days) to preserve API quotas; clear them from Config when you need fresh lookups.
 
 ---
 
 ## Troubleshooting
 
-- **"Binaries not found"**:
-  - The app attempts to auto-detect `zeek` and `tshark`.
-  - If it fails, check the **System Health** section in the **Config** tab.
-  - You can manually enter the binary paths (e.g., `/opt/homebrew/bin/zeek`) in the Config tab.
-- **"LLM Generation Failed"**:
-  - Ensure LM Studio is running and the "Start Server" button is active.
-  - Verify the Base URL matches the one in LM Studio.
-- **"PDF Generation Error"**:
-  - Requires the `pango` library. Run: `brew install pango`.
-
----
-*PCAP Hunter v0.6.0-alpha*
+| Symptom | Likely cause | Fix |
+|---------|--------------|-----|
+| Red banner: required binary missing (e.g. `tshark`) | Dependencies not installed | Follow the banner's OS-specific hint, or run `python3 scripts/install.py`; verify with `make doctor`. In Docker this never happens — binaries are baked in |
+| YARA panel: "no rules configured" | No rules directory set and `data/yara_rules/` absent | Set Config → YARA Rules to your rules folder, or create `data/yara_rules/` (Docker: `./data/yara_rules`); check the live rule-count feedback |
+| OSINT pill ⏳ *GreyNoise rate limited* | Free/community quota exhausted | Wait for the quota window to reset or upgrade the key; cached results (💾) remain usable |
+| LM Studio "Test Connection" fails from Docker | Container can't see `localhost` on the host | Use `http://host.docker.internal:1234/v1` (the compose default); confirm LM Studio's server is started |
+| OSINT pill ➖ *no data* | Provider has no records for these indicators | Nothing to fix — that's an honest negative, not an error |
+| PDF generation error (standalone macOS/Linux) | WeasyPrint system libraries missing | macOS: `brew install pango glib cairo`; Linux: install the `libpango`/`libcairo` set (the installer does this). Docker images include them |
+| Dashboard panel shows 📭 after loading a case | That artifact isn't persisted in cases | Re-run the original PCAP to regenerate it |

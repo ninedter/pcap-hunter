@@ -1,245 +1,305 @@
 # PCAP Hunter 使用手冊
 
-**PCAP Hunter** 是一個進階的威脅獵捕工作台，旨在填補手動封包分析與自動化資安監控之間的鴻溝。它結合了業界標準工具 (**Zeek**, **Tshark**) 與現代 AI (**LLMs**) 及威脅情資 (**OSINT**)，以快速攝取、分析並從網路流量中提取可執行的情資。
+**PCAP Hunter** 是一個 AI 增強的威脅獵捕工作台，旨在填補手動封包分析與自動化資安監控之間的鴻溝。它結合業界標準工具（**Zeek**、**Tshark**、**PyShark**）與 **LLM** 及 **OSINT** 威脅情資，從網路流量中快速攝取、分析並提取可執行的情資。
+
+本手冊以一位新進 SOC 分析師的視角逐步走過整個應用程式：安裝、載入擷取檔、觀察管道執行，然後逐個分頁處理分析結果。
 
 ---
 
 ## 📚 目錄
 1. [快速入門](#快速入門)
-   - [先決條件](#先決條件)
-   - [安裝與啟動](#安裝與啟動)
-2. [核心工作流程](#核心工作流程)
-   - [資料攝取 (上傳)](#1-資料攝取)
-   - [分析管道](#2-分析管道)
-3. [分析儀表板](#分析儀表板)
-   - [威脅摘要面板](#威脅摘要面板)
-   - [全球地圖與篩選器](#全球地圖與篩選器)
-   - [Sankey 流量圖](#sankey-流量圖)
-   - [圖表與視覺化](#圖表與視覺化)
-   - [熱門指標](#熱門指標)
-   - [偵測面板](#偵測面板)
-   - [跨指標關聯分析](#跨指標關聯分析)
-4. [進階功能](#進階功能)
-   - [AI 威脅報告](#ai-威脅報告)
-   - [多 PCAP 批次分析](#多-pcap-批次分析)
-   - [OSINT 情資豐富化](#osint-情資豐富化)
-   - [批次反向 DNS 解析](#批次反向-dns-解析)
-   - [鑑識分析 (DNS, TLS, YARA, Carving)](#鑑識分析)
-5. [設定](#設定)
-   - [LLM 設定](#llm-設定)
-   - [OSINT 金鑰](#osint-金鑰)
-   - [地圖位置](#地圖位置)
-   - [資料管理](#資料管理)
-6. [疑難排解](#疑難排解)
+   - [Docker 安裝（建議）](#docker-安裝建議)
+   - [獨立安裝](#獨立安裝)
+   - [初次啟動](#初次啟動)
+2. [載入 PCAP](#載入-pcap)
+3. [分析管道與 Progress 分頁](#分析管道與-progress-分頁)
+4. [儀表板](#儀表板)
+5. [OSINT 情資豐富化](#osint-情資豐富化)
+6. [LLM 分析與 AI 威脅報告](#llm-分析與-ai-威脅報告)
+7. [Raw Data 分頁](#raw-data-分頁)
+8. [案件管理](#案件管理)
+9. [匯出與 PDF 報告](#匯出與-pdf-報告)
+10. [設定](#設定)
+11. [資料保留](#資料保留)
+12. [疑難排解](#疑難排解)
 
 ---
 
 ## 快速入門
 
-### 先決條件
-請確保您的系統已安裝以下工具：
-- **Python 3.10+**: 核心執行環境。
-- **Zeek**: 用於產生 log 的網路安全監控工具 (`brew install zeek`)。
-- **Wireshark/Tshark**: 用於解析和統計的封包分析工具 (`brew install wireshark`)。
-- **Pango**: 產生 PDF 報告所需的函式庫 (`brew install pango`)。
-- **LM Studio** (選用): 以隱私優先的方式在本地運行 AI 模型。
+### Docker 安裝（建議）
 
-### 安裝與啟動
-1. **Clone 儲存庫**:
-   ```bash
-   git clone https://github.com/ninedter/pcap-hunter.git
-   cd pcap-hunter
-   ```
-2. **安裝依賴套件**:
-   ```bash
-   make install
-   ```
-3. **執行應用程式**:
-   ```bash
-   make run
-   ```
-   應用程式將在預設瀏覽器中開啟，網址為 `http://localhost:8501`。
+Docker 映像檔已內建 tshark、Zeek、WeasyPrint PDF 函式庫與所有 Python 相依套件——主機上只需要安裝 Docker。
 
----
+```bash
+git clone https://github.com/ninedter/pcap-hunter.git
+cd pcap-hunter
+make docker-up        # 建置 + 啟動 UI → http://localhost:8501
+make docker-down      # 結束時停止服務
+```
 
-## 核心工作流程
+注意事項：
 
-### 1. 資料攝取
-前往 **Load PCAP** 分頁開始使用。
+- **`./data` 會掛載進容器** — PCAP、提取的檔案、Zeek log 與案件資料庫都存放在主機上，容器重啟後依然存在。YARA 規則請放在 `./data/yara_rules`。
+- **在 UI 中儲存的 API 金鑰會持久保存**在 `pcap-hunter-home` Docker volume 中。compose 檔固定了容器的 `hostname:`，確保機器衍生的設定加密金鑰在容器重建後維持穩定。
+- **主機上執行的 LM Studio 從容器內即可連線** — `LM_BASE_URL` 預設為 `http://host.docker.internal:1234/v1`。
+- 第二個 compose 服務（`pcap-hunter-api`）使用同一個映像檔，在 8000 連接埠提供整合 API。
 
-#### 檔案上傳
-- **單一檔案**: 將 `.pcap` 或 `.pcapng` 檔案拖入上傳區域。
-- **多檔案上傳**: 同時上傳多個 PCAP 檔案，進入 **批次模式** 並啟用跨檔案關聯分析。限制：最多 50 個檔案、每個檔案上限 1 GB、總計 5 GB。
-- **手動路徑**: 對於瀏覽器難以上傳的大型檔案 (>200MB)，請輸入磁碟上的絕對路徑 (例如 `/Users/name/capture.pcap`) 並按 Enter。
+### 獨立安裝
 
-### 2. 分析管道
-預設情況下，PCAP Hunter 會執行完整的分析管道。您可以在 **Config** 分頁的 **Extraction / Analysis** 區塊中自訂要執行的階段 (例如停用 Zeek 或 Carving)。
+單一跨平台安裝程式會偵測你的作業系統與套件管理器、安裝系統執行檔（tshark、Zeek、YARA、WeasyPrint 函式庫）與 Python 套件，最後驗證一切就緒：
 
-#### 平行執行
-兩個最耗時的階段 — **PyShark 封包解析** 和 **Zeek 日誌處理** — 透過執行緒池同時執行，大幅縮短總分析時間。HTTP carving 也與 DNS/TLS/Beaconing 分析平行運行。
+```bash
+git clone https://github.com/ninedter/pcap-hunter.git
+cd pcap-hunter
+python3 scripts/install.py
+make run              # → http://localhost:8501
+```
 
-點擊 **Extract & Analyze** 開始分析。請在 **Progress** 分頁監控進度。
+`make install`（macOS/Linux）與 `.\scripts\install.ps1`（Windows PowerShell）是同一個腳本的包裝指令。實用參數：`--check-only`、`--skip-system`、`--skip-python`、`--dry-run`、`--yes`。
+
+> **Windows 注意：** Zeek 沒有原生 Windows 版本。原生安裝可執行 tshark 管道，但會跳過 Zeek 階段——若要完整管道，請使用 Docker 或 WSL2。
+
+### 初次啟動
+
+- 在第一次完成分析之前，Upload 分頁會顯示可關閉的 **Getting started** 入門導覽面板：載入 PCAP、點擊 **Extract & Analyze**、觀察 **Progress**，然後審閱 **Dashboard**。點擊 **"Got it — don't show again"** 即可隱藏。
+- 應用程式啟動時會執行相依性檢查，若缺少必要的執行檔（例如 `tshark`），每個頁面都會顯示**紅色警示橫幅**——你永遠不會遇到無聲的空白儀表板。手動檢查：`make doctor` 或 `python3 scripts/install.py --check-only`。
 
 ---
 
-## 分析儀表板
+## 載入 PCAP
 
-**Dashboard** 分頁是您的中央控制台。
+開啟 **Upload** 分頁。
 
-### 威脅摘要面板
-儀表板頂部顯示五個關鍵指標：
-- **風險等級** — 整體威脅評估 (Critical / High / Medium / Low)，基於多個訊號類別的交叉佐證。
-- **總警報數** — 關聯引擎標記的指標數量。
-- **Beacon 候選** — 展現 C2 類型週期性通訊模式的流量。
-- **YARA 命中** — 符合 YARA 規則特徵的檔案。
-- **憑證問題** — 有問題的 TLS 憑證（自簽、過期或不受信任的憑證鏈）。
+- **拖放**一個或多個 `.pcap` / `.pcapng` 檔案。瀏覽器上傳器接受**每個檔案最大 200 MB**。
+- **更大的檔案——使用路徑欄位。** 在 *"...or type a container path"* 欄位輸入路徑後按 Enter。路徑必須指向允許目錄內的 `.pcap`/`.pcapng` 檔案：`data/`、`pcaps/` 或 `/data/`。在 Docker 中，主機的 `./data` 已掛載進容器——把大型擷取檔放進 `./data/`，再以 `/data/<檔名>.pcap` 參照即可。
+- **批次模式**會在上傳多個檔案時自動啟動：每個檔案獨立執行完整管道，接著跨檔案關聯分析會偵測跨擷取檔共用的 IP、網域與 JA3 指紋。限制：50 個檔案、每個檔案 1 GB、總計 5 GB。
 
-風險等級需要 **2 個以上訊號類別的交叉佐證** 才會升級為 Medium，YARA 或高可信度 OSINT 訊號才會升級至 High/Critical — 避免單一弱訊號造成誤報。
-
-### 全球地圖與篩選器
-- **互動式世界地圖**: 視覺化顯示您的流量地理目的地。
-  - **選擇**: 使用 **Box Select** 或 **Lasso Select** 工具選取區域。這將會 **交叉篩選 (cross-filter)** 整個儀表板 (圖表、表格、時間軸)，僅顯示與該區域相關的流量。
-  - **自家位置**: 在 **Config** 分頁設定您的實體位置，以繪製準確的連線。
-- **全域篩選器**:
-  - **排除私有 IP**: 切換此核取方塊以隱藏地圖和「Top 10」圖表中的 RFC1918 (區域網路) 流量。這有助於專注於外部威脅。
-  - **清除所有篩選**: 立即重置儀表板視圖，清除 IP、協定和時間的選取。
-
-### Sankey 流量圖
-與網路通訊圖並排顯示，**Sankey 圖** 以三欄方式視覺化流量：
-- **左欄**: 客戶端（來源）IP
-- **中欄**: 服務埠號，附帶可讀的協定標籤（例如 "443 (HTTPS)"、"53 (DNS)"）
-- **右欄**: 伺服器（目的地）IP
-
-圖表會自動正規化流量方向：使用已知埠號（< 10000）的一方視為伺服器端。臨時埠號（>= 10000）會被排除，保持視覺化的簡潔與聚焦。
-
-### 圖表與視覺化
-- **協定分佈**: 顯示協定比例的圓餅圖 (TCP, UDP, TLS, HTTP 等)。點擊切片可依該協定篩選儀表板。
-- **流量時間軸**: 顯示隨時間變化的流量大小的時間序列圖。
-  - **縮放**: 點擊並拖曳以建立時間視窗。儀表板將更新為僅顯示該特定時段的流量。
-- **網路通訊圖**: 力導向圖，以威脅等級著色節點，等比例渲染。
-
-### 熱門指標
-- **Top 10 表格**: 顯示最活躍項目的表格和長條圖：
-  - **來源 IP**（含反向 DNS 主機名稱）
-  - **目的地 IP**（含反向 DNS 主機名稱）
-  - **目的地 Port**
-  - **協定** 或 **網域**
-
-### 偵測面板
-儀表板直接呈現關鍵偵測結果：
-- **Beaconing 候選** — 超過 C2 門檻值（0.6+）的流量，附週期性和抖動詳細資訊。
-- **YARA 命中** — 從 HTTP 流量中提取且符合 YARA 規則的檔案。
-- **TLS 憑證風險** — 在 SSL/TLS 流量中偵測到的過期、自簽或不受信任憑證。
-
-### 跨指標關聯分析
-獨立的區塊顯示**關聯引擎的綜合威脅分數**：
-- 使用**獨立互補公式** (`1 − Π(1 − wᵢsᵢ)`) 結合來自 OSINT、beaconing、DNS、TLS、YARA 和流量分析的訊號。
-- 指標被分類為 **Critical**、**High**、**Medium** 或 **Low**，並附帶支持訊號的細項分解。
-- 強訊號底線確保已確認的 VirusTotal 偵測自動設定最低分數。
+點擊 **Extract & Analyze** 開始分析。
 
 ---
 
-## 進階功能
+## 分析管道與 Progress 分頁
 
-### AI 威脅報告
-位於 **LLM Analysis** 分頁。
-- **結構化分析流程**: AI 遵循專業方法論：特徵化 → 識別 → 評估 → 建議。
-- **嚴重度校準**: LLM 以各嚴重度等級的範例為引導，內建誤報意識，避免對正常流量過度評級。
-- **預先計算的上下文**: 報告接收預先計算的關聯判定、風險分佈和主要威脅 — 確保 AI 敘事與量化分析一致。
-- **章節**: 包含執行摘要、關鍵發現、入侵指標 (IOCs)、風險評估和建議行動。
-- **PDF 匯出**: 點擊 **Generate PDF Report** 下載格式化的報告。PDF 包含：
-  - 帶有分類 (TLP:CLEAR) 的封面。
-  - 完整的 AI 敘事報告。
-  - 偵測到的 IOC 表格 (IPs, Domains, Hashes)。
-  - YARA 掃描結果。
-  - TLS 分析 (過期/自簽憑證)。
+PCAP Hunter 執行 10 階段管道：
 
-### 多 PCAP 批次分析
-同時上傳多個 PCAP 檔案以啟用批次模式：
-- **逐檔案分析**: 每個檔案獨立執行完整的 10 階段管道。
-- **跨檔案關聯**: 完成個別分析後，引擎偵測跨檔案的共同指標（IP、網域、JA3 指紋）— 揭示協調性活動或持續性威脅。
-- **批次摘要**: 儀表板中顯示彙整指標和逐檔案詳細資訊卡。
-- **資源限制**: 可透過 `app/config.py` 設定 — 預設最多 50 個檔案、每檔案 1 GB、總計 5 GB。
+| # | 階段 | 功能 |
+|---|------|------|
+| 1 | 封包計數 | 透過 tshark 快速初步計數 |
+| 2 | 封包解析 | PyShark 深度檢測（預設上限 200,000 個封包） |
+| 3 | Zeek 處理 | 自動執行 Zeek 並解析 `conn`/`dns`/`http`/`ssl` log |
+| 4 | DNS 分析 | DGA、通道偵測、Fast Flux、NXDOMAIN、查詢頻率 |
+| 5 | TLS 憑證分析 | 憑證鏈驗證、自簽 / 過期偵測 |
+| 6 | 信標偵測排名 | 統計式 C2 週期性 / 抖動 / 傳輸量評分 |
+| 7 | HTTP 酬載提取 | 酬載提取並計算 SHA256 雜湊 |
+| 8 | YARA 掃描 | 對提取檔案進行規則式掃描 |
+| 9 | OSINT 豐富化 | 多供應商信譽查詢 |
+| 10 | LLM 報告產生 | AI 威脅綜整 |
 
-### OSINT 情資豐富化
-位於 **OSINT** 分頁。
-- **IP 情資**: 顯示來自 VirusTotal、GreyNoise (雜訊 vs. 惡意) 的信譽評分和 PTR 紀錄。
-- **網域情資**: 查詢網域的分類和信譽。
-- **WHOIS**: 點擊 IP 或網域可在彈出視窗中查看註冊詳細資訊。
+**執行形態：** 階段 2–3（PyShark、Zeek）**平行執行**；兩者完成後，階段 4–7（DNS、TLS、信標偵測、酬載提取）**同時**展開。Progress 分頁即時呈現這一切：
 
-### 批次反向 DNS 解析
-PCAP Hunter 會自動對流量中觀察到的所有公開 IP 執行 **批次反向 DNS (rDNS) 解析**：
-- 透過 ThreadPoolExecutor 平行解析以提升速度。
-- 結果快取在專用的 **SQLite 資料庫**，TTL 為 7 天，避免重複查詢。
-- 已解析的主機名稱會在儀表板的 Top 10 表格、關聯結果和 OSINT 檢視中顯示。
+- 每個階段都有自己的進度條與**說明文字（caption）**，描述目前正在進行的工作。
+- 每個階段都有 **Skip** 按鈕——大型擷取檔讓 Zeek 跑太久？跳過它，管道會繼續執行。依賴被跳過階段的面板會明確說明（見[儀表板](#儀表板)的空狀態），而不是呈現空白。
+- 最後一個階段 **LLM Report Analysis** 負責產生 AI 報告，其進度與其他階段相同方式追蹤。
 
-### 鑑識分析
-- **DNS 分析**:
-  - **DGA 偵測**: 使用夏農熵 (Shannon Entropy) 識別惡意軟體使用的隨機生成網域。
-  - **Tunneling**: 標記顯示資料外洩跡象的異常大或頻繁的 DNS 查詢。
-- **TLS 分析**:
-  - **JA3 指紋識別**: 基於 SSL hello 封包識別客戶端應用程式。
-  - **憑證衛生**: 針對自簽、過期或異常憑證發出警報。
-- **YARA 掃描**: 自動掃描從 HTTP 流量中提取的檔案。
-  - **Carved Files**: 每次分析的檔案儲存於專屬的執行資料夾 `./data/carved/<run_id>/`，並在 7 天後自動清除，請匯出需要保留的檔案。
-  - **規則**: 使用自訂或標準 YARA 規則偵測已知的惡意軟體家族。
+管道完成後即可切換到儀表板；各階段的結果會分別呈現。
+
+---
+
+## 儀表板
+
+**Dashboard** 分頁是你的指揮中心。由上而下：
+
+### 威脅摘要
+
+五個一目了然的指標：**Risk Level**（風險等級）、**Total Alerts**（總警報數）、**Beacon Candidates**（信標候選）、**YARA Hits**（YARA 命中）與 **Cert Issues**（憑證問題），下方緊接一行式的**嚴重程度色彩圖例**，讓你校準頁面上每個徽章與圖表的顏色。
+
+### 「Why this risk level?」可解釋性面板
+
+展開摘要下方的 **Why this risk level?** 面板，即可精確看到哪些訊號促成了這個判定。風險等級就是**實際觸發的最高層級**，升級規則如下：
+
+- **第一層（決定性）** — OSINT 確認（例如 VirusTotal 偵測、GreyNoise 判定*惡意*）。任何單一第一層命中即設定分數下限。
+- **第二層（行為性）** — C2 信標、流量不對稱、DNS 通道、DGA 網域。
+- **第三層（情境性）** — AbuseIPDB 回報、自簽 / 過期憑證、YARA 比對。
+- 僅有第三層訊號時**絕不會超過 Medium**；High/Critical 需要跨層級的交叉佐證。
+
+如果沒有任何訊號觸發，面板會直接說明："✅ No threat signals fired — nothing exceeded thresholds"。
+
+### 誠實的空狀態
+
+每個面板都會區分兩種截然不同的「這裡沒東西」：
+
+- **✅ 已執行且結果乾淨** — 該階段確實執行完畢，沒有發現任何問題。這是貨真價實的陰性結果。
+- **📭 未執行 / 無資料** — 該階段被跳過、執行失敗，或其資料未被保存（例如 "📭 DNS analysis was skipped for this run."）。這不能當作「沒有威脅」的證據。
+
+把 ✅ 視為一個答案，把 📭 視為結案前必須補齊的缺口。
+
+### 篩選器與圖表
+
+- **世界地圖** — 框選 / 套索選取會交叉篩選整個儀表板；在 Config 設定自家位置可讓連線弧線準確呈現。
+- **協定圓餅圖** — 點擊切片即可依協定篩選。
+- **流量時間軸** — 拖曳即可縮放至特定時間視窗。圖表時間軸皆標示 **UTC**。
+- **Exclude Private IPs**（排除私有 IP）在探索期間保持有效；**Clear All Filters** 一鍵重置所有篩選。
+- **Top 10 表格**：來源 / 目的 IP（附反向 DNS 主機名稱）、Port、協定 / 網域；另有 Sankey 圖與力導向網路圖。
+
+### 流量表
+
+流量表包含明確的 **First Seen (UTC)** 與 **Last Seen (UTC)** 欄位——即使每條流量的封包取樣有上限（每條 5,000 筆），真實的流量起訖時間仍維持精確。
+
+---
+
+## OSINT 情資豐富化
+
+**OSINT** 分頁透過 VirusTotal、AbuseIPDB、GreyNoise、OTX、Shodan 與 VT Domain，對最活躍的公開 IP（預設：前 50 名，可設定）及觀察到的網域進行情資豐富化。
+
+### 供應商狀態標籤——先看這裡
+
+每個被查詢的供應商都會誠實回報狀態，並彙整所有指標的查詢結果：
+
+| 標籤 | 意義 | 處理方式 |
+|------|------|----------|
+| ✅ *供應商* | 查詢成功 | 各欄位資料可信 |
+| 💾 *供應商* | 來自本地 SQLite 快取 | 沒問題——可節省配額；需要最新資料時可在 Config 清除快取 |
+| ⏳ *供應商* rate limited | API 配額用罄 | 等待配額視窗重置，或升級金鑰 |
+| 🔑 *供應商* key rejected | 認證失敗 | 到 Config → OSINT API Keys 修正金鑰 |
+| ➖ *供應商* no data | 供應商有回應，但**對這些指標沒有任何資料** | **不是故障**——這些指標單純不在該來源的資料庫裡 |
+| *（無標籤）* | 供應商未設定 / 未查詢 | 想要它的訊號就到 Config 加入金鑰 |
+
+➖ 的區別非常重要：「no data」是運作正常的供應商給出的真實、誠實答案——別誤以為整合壞掉了，也別把它當成指標無害的證明。
+
+### 操作方式
+
+- **IP 分級表** — 逐 IP 的判定結果，合併各供應商分數、rDNS 主機名稱與進度條分數欄位。
+- **WHOIS 查詢** — 在**下拉選單中選取 IP 並點擊查詢按鈕**，或直接**點選表格中的資料列**；兩者都會開啟 WHOIS 詳細資訊對話框。
+- **網域** — 觀察到的網域之信譽與分類。
+- **詳細資訊卡** — 每個指標完整的供應商細項。
+- 其他子分頁：地理地圖、基礎設施（ASN 分群）、匯出、裝置、筆記。
+- **IOC 搜尋** — 跨所有指標搜尋；**顯示全部結果的切換開關**可突破預設的結果數上限。
+
+---
+
+## LLM 分析與 AI 威脅報告
+
+**LLM Analysis** 分頁產生以管道量化結果為依據的敘事威脅報告。三種可互換的供應商（在 Config → LLM Integration 設定）：
+
+| 供應商 | 執行位置 | 產生方式 |
+|--------|----------|----------|
+| **LM Studio** | 本地 / 實體隔離 | 逐節分段（chunked）產生，配合較小的上下文視窗 |
+| **OpenAI** | 雲端 | 單次完整上下文呼叫——全部證據語料一次送入 |
+| **Anthropic** | 雲端 | 透過官方 SDK 的單次完整上下文呼叫並支援串流（`claude-opus-4-8`、`claude-sonnet-4-6`、`claude-haiku-4-5`） |
+
+雲端的前沿模型會在內文加入 **MITRE ATT&CK 技術編號**，並提出**謹慎保留的假設**（「與……一致」、「若……即可確認」），而非過度斷言。
+
+### 報告章節
+
+1. Executive Summary（執行摘要）
+2. Threat Correlation（威脅關聯）
+3. Indicators & Evidence（指標與證據）
+4. OSINT Corroboration（OSINT 佐證）
+5. DNS & TLS Analysis（DNS 與 TLS 分析）
+6. Beaconing & Network（信標與網路）
+7. Risk Assessment（風險評估）— 內含**以真正 Markdown 表格呈現的風險矩陣**（每個類別一列）
+8. Recommended Actions（建議行動）
+9. IOC Summary（IOC 摘要）— 結構化的 **IOC 表格**（指標、類型、判定、證據）
+
+報告支援 **9 種語言**——美式英文、**繁體中文（zh-tw，台灣用語）**、簡體中文、日文、韓文、義大利文、西班牙文、法文、德文——在 Config 中選擇。
+
+### 重新產生報告
+
+更換了供應商、模型或語言？點擊 **Re-run Report** *僅*重新產生 AI 報告——不會重新處理 PCAP。
+
+---
+
+## Raw Data 分頁
+
+**Raw Data** 分頁公開所有底層資料來源：流量表、DNS 分析（DGA / 通道偵測 / NXDOMAIN）、TLS 憑證與 JA3/JA3S 指紋、Zeek `conn.log` / `dns.log` / `http.log` / `ssl.log`、附 SHA256 雜湊的 HTTP 提取酬載，以及 YARA 掃描結果。任何檢視都能匯出為 CSV 或 JSON，內建 CSV 注入防護。
+
+---
+
+## 案件管理
+
+**Cases** 分頁把一次擷取分析變成可持續追蹤的調查：
+
+- **儲存**目前的分析到案件——IOC、嚴重程度、標籤、調查筆記與狀態都存放在本地 SQLite 資料庫，可跨工作階段搜尋。
+- **Load into Dashboard** 會把已儲存案件的結果還原到即時儀表板。
+
+**還原與重置的範圍：** 已儲存的發現（摘要指標、IOC、關聯結果、報告）會還原；*未*保存在案件記錄中的重型產物（例如完整的封包層級資料、已清除的執行目錄）會顯示 **「📭 not available」** 空狀態，直到你重新分析原始 PCAP 為止。儀表板會明確告訴你哪些是哪些——見[誠實的空狀態](#誠實的空狀態)。
+
+---
+
+## 匯出與 PDF 報告
+
+### PDF 報告
+
+在 LLM Analysis 分頁點擊 **Generate PDF Report**。PDF 包含：
+
+- 封面頁，附可設定的 **TLP 分級**與分析師中繼資料。
+- **帶編號的章節與相符的目錄**——兩者由同一份章節登錄產生，編號與目錄永遠一致。
+- 完整的 AI 敘事報告，**風險矩陣與 IOC 摘要以真正的表格呈現**，外加 YARA 結果與 TLS 發現。
+- **內嵌儀表板圖表**（協定分佈、流量大戶、流量時間軸、網路圖、世界地圖），轉為 PNG 呈現。
+- 全文使用**具時區資訊的時間戳記**。
+
+### 資料匯出
+
+- **CSV / JSON** — 任何表格，內建 CSV 注入防護。
+- **STIX 2.0 / 2.1** — 標準指標套件。
+- **ATT&CK Navigator** — 技術對應圖層檔案。
+- **CEF (ArcSight)** — 從關聯、信標、DNS 與 IOC 產生可供 SIEM 攝取的事件。
+
+> 需要程式化存取？**整合 API** 在 8000 連接埠提供 PCAP 提交、工作輪詢與 IOC 摘要（JSON / CSV / STIX 2.1）——詳見 [docs/API.md](../API.md)。
 
 ---
 
 ## 設定
 
-在 **Config** 分頁自訂應用程式。
+所有設定都在 **Config** 分頁；設定會持久化至 `~/.pcap_hunter_config.json`，API 金鑰以 PBKDF2 加密儲存。
 
-### LLM 設定
-- **Endpoint**: 預設為 `http://localhost:1234/v1` (LM Studio)。符合 OpenAI API 標準。
-- **Model**: 輸入模型名稱 (例如 `llama-3.2-3b-instruct`) 或點擊 **Fetch Models** 從伺服器自動填入。
-- **Language**: 選擇報告語言，支援 **9 種語言** (英文, 中文, 日文, 韓文, 義大利文, 西班牙文, 法文, 德文)。
-  - **重新執行報告**: 如果您更改語言或模型，使用此按鈕僅重新生成報告，而無需重新處理 PCAP。
+### LLM Integration
 
-### OSINT 金鑰
-輸入您的 API 金鑰以啟用情資豐富化。金鑰將安全地儲存在您的本地設定中。
-- **VirusTotal**: 用於檔案雜湊和 IP/網域信譽查詢。
-- **AbuseIPDB**: 用於社群回報的惡意 IP。
-- **GreyNoise**: 識別網際網路掃描器 (良性 vs. 惡意)。
-- **Shodan**: 用於裝置指紋識別。
-- **OTX**: AlienVault 開放威脅交換。
+- **供應商選擇器**（LM Studio / OpenAI / Anthropic），每個供應商有獨立欄位：base URL、API 金鑰，以及附 **Fetch Models** 按鈕的模型選單。
+- **Test Connection** 會實際探測所選供應商並就地回報結果。
+- **報告語言** — 即前述的 9 種語言選單。
 
-### Extraction / Analysis
-啟用或停用特定管道步驟以加速分析或跳過不必要的處理：
-- **PyShark Parsing**: 深度封包檢測 (流量圖表所需)。
-- **Packet Limit**: 最大解析封包數 (預設: 200,000) 以防止記憶體耗盡。
-- **Zeek Processing**: 切換 Zeek log 生成。
-- **平行執行**: 當 PyShark 和 Zeek 同時啟用時，兩者會同步執行（預設啟用）。
-- **Carve HTTP bodies**: 從 HTTP 流量中提取檔案。
-- **YARA Scan**: 掃描提取的檔案 (需啟用 Carving)。
-- **Pre-count packets**: 解析前計算總封包數。
-- **OSINT Cache**: 切換 API 結果的本地快取。
+### OSINT API Keys
 
-### 地圖位置
-使用級聯選擇器設定您的 **自家位置 (Home Location)**：
-- **洲 (Continent)** -> **國家 (Country)** -> **城市 (City)**
-- 這將固定地圖上連線的起點。
+- VirusTotal、AbuseIPDB、GreyNoise、OTX、Shodan 的金鑰。環境變數（`VT_KEY`、`SHODAN_KEY` 等）會覆寫已儲存的設定。
+- **Test Providers** 會用無害的指標即時檢測每個已設定的供應商，回報與 OSINT 狀態標籤相同的狀態（ok / rate limited / key rejected / …）——輸入新金鑰後請執行一次。
 
-### 資料管理
-管理磁碟使用量的細緻控制：
-- **Save/Load Config**: 跨工作階段保存您的設定 (金鑰、位置、偏好)。
-- **Clear PCAP Data**: 刪除所有上傳的 PCAP、Zeek log 和提取的檔案以釋放磁碟空間。
-- **Clear OSINT Cache**: PCAP Hunter 會快取 API 回應以節省配額。使用此選項強制重新查詢。
-- **Clear Cases**: 清除內部資料庫中的所有調查案件和筆記。
+### YARA Rules
+
+- 將 **YARA Rules directory** 指向任何含 `.yar`/`.yara` 規則的資料夾（遞迴掃描）。
+- **零設定預設值：** 留空時，若 `data/yara_rules/` 存在則自動使用。在 Docker 中，把規則放在 `./data/yara_rules`——data 資料夾已掛載。
+- 欄位下方提供**即時回饋**，顯示在設定路徑找到的規則檔數量，讓你在執行前就確定規則會被載入。
+
+### 其他區塊
+
+- **執行檔路徑** — 覆寫自動偵測到的 `zeek` / `tshark` 位置；System Health 區塊顯示偵測結果。
+- **自家位置** — 洲 → 國家 → 城市；作為世界地圖連線弧線的起點。
+- **Extraction / Analysis** — 切換管道階段（Zeek、酬載提取、YARA、預先計數、OSINT 快取）與 PyShark 封包上限（預設 200,000）。
+- **資料管理** — 各自獨立的 **Clear** 按鈕，分別清除 PCAP 資料、OSINT 快取與案件資料庫。
+
+### API Keys 分頁
+
+整合 API 的程式化金鑰在獨立的 **API Keys** 分頁管理：建立 / 撤銷金鑰、指定權限範圍（完整或僅限摘要）、設定到期時間與逐金鑰速率限制，並查看使用量趨勢圖。環境變數金鑰會顯示為唯讀的初始（bootstrap）項目。
+
+---
+
+## 資料保留
+
+- 每次執行都會把 Zeek 與提取檔案的輸出寫入**每次執行專屬的目錄**：`data/zeek/<case>_<uuid8>/` 與 `data/carved/<case>_<uuid8>/`——同時執行的分析絕不互相覆寫。
+- 過期的執行目錄會在 **7 天後自動清除**（於下次執行時觸發）。**請及早匯出需要保留的證據**——提取的酬載、Zeek log——避免到期被清掉。
+- OSINT 回應與反向 DNS 結果快取於 SQLite（rDNS TTL：7 天）以節省 API 配額；需要全新查詢時可在 Config 清除。
 
 ---
 
 ## 疑難排解
 
-- **"Binaries not found"**:
-  - 應用程式會嘗試自動偵測 `zeek` 和 `tshark`。
-  - 如果失敗，請檢查 **Config** 分頁中的 **System Health** 區塊。
-  - 您可以在 Config 分頁手動輸入執行檔路徑 (例如 `/opt/homebrew/bin/zeek`)。
-- **"LLM Generation Failed"**:
-  - 確保 LM Studio 正在運行且 "Start Server" 按鈕已啟動。
-  - 確認 Base URL 與 LM Studio 中的一致。
-- **"PDF Generation Error"**:
-  - 需要 `pango` 函式庫。執行：`brew install pango`。
-
----
-*PCAP Hunter v0.6.0-alpha*
+| 症狀 | 可能原因 | 解法 |
+|------|----------|------|
+| 紅色橫幅：缺少必要執行檔（例如 `tshark`） | 相依套件未安裝 | 依照橫幅上的作業系統專屬提示操作，或執行 `python3 scripts/install.py`；以 `make doctor` 驗證。Docker 中不會發生——執行檔已內建 |
+| YARA 面板顯示「no rules configured」 | 未設定規則目錄，且 `data/yara_rules/` 不存在 | 將 Config → YARA Rules 指向你的規則資料夾，或建立 `data/yara_rules/`（Docker：`./data/yara_rules`）；留意即時規則數量回饋 |
+| OSINT 標籤 ⏳ *GreyNoise rate limited* | 免費 / 社群配額用罄 | 等待配額視窗重置或升級金鑰；快取結果（💾）仍可使用 |
+| Docker 環境中 LM Studio「Test Connection」失敗 | 容器看不到主機的 `localhost` | 使用 `http://host.docker.internal:1234/v1`（compose 預設值）；確認 LM Studio 的伺服器已啟動 |
+| OSINT 標籤 ➖ *no data* | 供應商沒有這些指標的紀錄 | 不需處理——這是誠實的陰性結果，不是錯誤 |
+| PDF 產生錯誤（獨立安裝的 macOS/Linux） | 缺少 WeasyPrint 系統函式庫 | macOS：`brew install pango glib cairo`；Linux：安裝 `libpango`/`libcairo` 系列（安裝程式會處理）。Docker 映像檔已內含 |
+| 載入案件後儀表板面板顯示 📭 | 該產物未保存在案件中 | 重新分析原始 PCAP 即可重新產生 |

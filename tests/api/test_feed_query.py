@@ -157,6 +157,51 @@ def test_query_iocs_multi_technique_multi_tag_no_duplication(tmp_path):
     assert sorted(row["tags"]) == ["tag-a", "tag-b"]
 
 
+def test_query_iocs_value_filter_exact_match(tmp_path):
+    """An exact value filter returns only the matching IOC row."""
+    repo = _seed(tmp_path)
+    rows = query_iocs(repo, IOCFilter(value="1.2.3.4"))
+    assert len(rows) == 1
+    assert rows[0]["value"] == "1.2.3.4"
+    assert rows[0]["score"] == 75
+    assert rows[0]["severity"] == "high"
+
+
+def test_query_iocs_value_filter_unknown_returns_empty(tmp_path):
+    repo = _seed(tmp_path)
+    rows = query_iocs(repo, IOCFilter(value="9.9.9.9"))
+    assert rows == []
+
+
+def test_query_iocs_value_filter_is_exact_not_substring(tmp_path):
+    """value='1.2.3.4' must not also match '1.2.3.40' (substring false-positive)."""
+    repo = CaseRepository(db_path=str(tmp_path / "t.db"))
+    repo.create_case(Case(id="case9004", title="t"))
+    analysis = Analysis(
+        case_id="case9004",
+        pcap_path="/tmp/z.pcap",
+        iocs=[
+            IOC(ioc_type=IOCType.IP, value="1.2.3.4", severity=Severity.HIGH),
+            IOC(ioc_type=IOCType.IP, value="1.2.3.40", severity=Severity.LOW),
+        ],
+    )
+    repo.save_analysis(analysis)
+
+    rows = query_iocs(repo, IOCFilter(value="1.2.3.4"))
+    assert len(rows) == 1
+    assert rows[0]["value"] == "1.2.3.4"
+
+
+def test_query_iocs_value_filter_composes_with_type_filter(tmp_path):
+    """value filter must AND with the existing type filter, not override it."""
+    repo = _seed(tmp_path)
+    rows = query_iocs(repo, IOCFilter(value="1.2.3.4", types=["domain"]))
+    assert rows == []
+    rows = query_iocs(repo, IOCFilter(value="1.2.3.4", types=["ip"]))
+    assert len(rows) == 1
+    assert rows[0]["value"] == "1.2.3.4"
+
+
 def test_query_iocs_techniques_dont_affect_pagination(tmp_path):
     """LIMIT/OFFSET must still page over distinct (ioc_type, value) groups, not
     over the post-join fan-out rows, when techniques are present."""

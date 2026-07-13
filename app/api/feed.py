@@ -28,6 +28,7 @@ class IOCFilter:
     types: list[str] = field(default_factory=list)
     tag: str | None = None
     case_id: str | None = None
+    value: str | None = None  # exact match on i.value, for single-IOC lookup
     limit: int = 1000
     offset: int = 0
 
@@ -74,6 +75,12 @@ def query_iocs(repo: CaseRepository, filt: IOCFilter) -> list[dict[str, Any]]:
             "a.case_id IN (SELECT ct2.case_id FROM case_tags ct2 JOIN tags t2 ON t2.id = ct2.tag_id WHERE t2.name = ?)"
         )
         params.append(filt.tag)
+    if filt.value:
+        # Exact match — uses idx_iocs_type_value. Composes with the other
+        # WHERE predicates (e.g. types) via AND; aggregation/pagination below
+        # are unaffected since this only narrows the row set pre-GROUP BY.
+        where.append("i.value = ?")
+        params.append(filt.value)
 
     if where:
         sql += " WHERE " + " AND ".join(where)

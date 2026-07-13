@@ -235,6 +235,67 @@ def test_iocs_stix_ja3_not_dropped(client):
     assert "x509-certificate" in matching[0]
 
 
+# ── Single-IOC lookup ───────────────────────────────────────────────────────
+
+
+def test_iocs_lookup_exact_match(client):
+    r = client.get("/api/v1/iocs/lookup?value=1.2.3.4", headers={"Authorization": "Bearer FEED"})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["count"] == 1
+    assert body["next_cursor"] is None
+    assert len(body["iocs"]) == 1
+    entry = body["iocs"][0]
+    assert entry["value"] == "1.2.3.4"
+    assert entry["type"] == "ip"
+    assert entry["score"] == 75
+    assert entry["severity"] == "high"
+
+
+def test_iocs_lookup_unknown_value_returns_empty(client):
+    r = client.get("/api/v1/iocs/lookup?value=nonexistent.example", headers={"Authorization": "Bearer FEED"})
+    assert r.status_code == 200
+    assert r.json() == {"iocs": [], "count": 0, "next_cursor": None}
+
+
+def test_iocs_lookup_requires_feed_scope(client):
+    r = client.get("/api/v1/iocs/lookup?value=1.2.3.4")
+    assert r.status_code == 401
+
+
+def test_iocs_lookup_missing_value_param_422(client):
+    r = client.get("/api/v1/iocs/lookup", headers={"Authorization": "Bearer FEED"})
+    assert r.status_code == 422
+
+
+def test_iocs_lookup_empty_value_422_not_whole_feed(client):
+    # An empty value must be rejected, never silently dump the entire feed.
+    r = client.get("/api/v1/iocs/lookup?value=", headers={"Authorization": "Bearer FEED"})
+    assert r.status_code == 422
+
+
+def test_iocs_lookup_exact_not_substring(client):
+    """value=1.2.3.4 must not also return 1.2.3.40."""
+    from app.api.deps import get_repo
+
+    repo = get_repo()
+    case = Case(id="case0009", title="substring")
+    repo.create_case(case)
+    repo.save_analysis(
+        Analysis(
+            case_id=case.id,
+            pcap_path="/tmp/sub.pcap",
+            iocs=[IOC(ioc_type=IOCType.IP, value="1.2.3.40", severity=Severity.LOW)],
+        )
+    )
+
+    r = client.get("/api/v1/iocs/lookup?value=1.2.3.4", headers={"Authorization": "Bearer FEED"})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["count"] == 1
+    assert body["iocs"][0]["value"] == "1.2.3.4"
+
+
 # ── Pagination ──────────────────────────────────────────────────────────────
 
 

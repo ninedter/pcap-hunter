@@ -15,6 +15,7 @@ from fastapi.responses import Response
 
 from app.api.deps import get_repo, require_feed_scope
 from app.api.feed import IOCFilter, query_iocs
+from app.api.models import IOCFeedResponse
 
 router = APIRouter(prefix="/api/v1", tags=["egress"])
 
@@ -103,6 +104,30 @@ def iocs_json(
     payload = {"iocs": rows, "count": len(rows), "next_cursor": next_cursor}
     body = json.dumps(payload).encode("utf-8")
     return _conditional_response(request, body, "application/json", _last_modified(rows))
+
+
+# ── Single-IOC lookup ───────────────────────────────────────────────────────
+
+
+@router.get("/iocs/lookup", response_model=IOCFeedResponse)
+def iocs_lookup(
+    value: str = Query(..., min_length=1),
+    min_score: int = Query(default=0, ge=0, le=100),
+    type: str | None = Query(default=None),
+    limit: int = Query(default=1000, ge=1, le=10000),
+    _scope=Depends(require_feed_scope),
+    repo=Depends(get_repo),
+):
+    """Exact-match single-IOC lookup — the #1 SOAR enrichment pattern.
+
+    A single value normally aggregates to 0 or 1 row, so cursor pagination
+    is unnecessary here; next_cursor is always null. An empty ``value`` is
+    rejected (422) rather than silently returning the whole feed.
+    """
+    filt = _build_filter(since=None, min_score=min_score, types=type, tag=None, case_id=None, limit=limit, cursor=None)
+    filt.value = value
+    rows = query_iocs(repo, filt)
+    return {"iocs": rows, "count": len(rows), "next_cursor": None}
 
 
 # ── CSV feed ────────────────────────────────────────────────────────────────

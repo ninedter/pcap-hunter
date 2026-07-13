@@ -1487,6 +1487,7 @@ with tab_llm:
                             correlations=st.session_state.get("correlations"),
                             geoip_data=_geoip_data or None,
                             attack_timeline=st.session_state.get("attack_timeline"),
+                            attack_mapping=st.session_state.get("attack_mapping"),
                         )
 
                     if pdf_report:

@@ -124,6 +124,7 @@ class PDFReportGenerator:
         ("summary", "Executive Summary"),
         ("charts", "Visual Overview"),
         ("correlations", "Threat Correlation Summary"),
+        ("attack", "MITRE ATT&CK Mapping"),
         ("iocs", "Indicators of Compromise"),
         ("osint", "OSINT Analysis"),
         ("dns", "DNS Analysis"),
@@ -182,6 +183,7 @@ class PDFReportGenerator:
         correlations: list | None = None,
         geoip_data: list | None = None,
         attack_timeline: list | None = None,
+        attack_mapping: dict | None = None,
     ) -> PDFReport | None:
         """
         Generate a complete PDF report.
@@ -196,6 +198,8 @@ class PDFReportGenerator:
             case_info: Optional case information.
             beacon_df: Optional beacon scoring DataFrame.
             correlations: Optional list of correlation results.
+            attack_mapping: Optional ``AttackMapping.to_dict()`` shape (or an
+                ``AttackMapping`` instance) from ``st.session_state["attack_mapping"]``.
 
         Returns:
             PDFReport object or None if generation fails.
@@ -218,6 +222,7 @@ class PDFReportGenerator:
                 correlations=correlations,
                 geoip_data=geoip_data,
                 attack_timeline=attack_timeline,
+                attack_mapping=attack_mapping,
             )
 
             # Generate PDF with accurate page count
@@ -261,6 +266,7 @@ class PDFReportGenerator:
         correlations: list | None = None,
         geoip_data: list | None = None,
         attack_timeline: list | None = None,
+        attack_mapping: dict | None = None,
     ) -> str:
         """Build the complete HTML document."""
         # --- Section assembly: render first, number after (see _h2). ---
@@ -286,6 +292,10 @@ class PDFReportGenerator:
         # Threat Correlation Summary
         if correlations:
             candidates.append(("correlations", self._render_correlation_section(correlations)))
+
+        # MITRE ATT&CK Mapping
+        if attack_mapping:
+            candidates.append(("attack", self._render_attack_section(attack_mapping)))
 
         # Key Findings / IOC Summary
         candidates.append(("iocs", self._render_ioc_table(features, osint)))
@@ -945,6 +955,68 @@ class PDFReportGenerator:
 <div class="page-break"></div>
 """
 
+    def _render_attack_section(self, attack_mapping) -> str:
+        """Render the MITRE ATT&CK technique mapping section.
+
+        Accepts either an ``AttackMapping`` dataclass instance or its
+        ``to_dict()`` form — the shape persisted in
+        ``st.session_state["attack_mapping"]`` — and normalizes dicts via
+        ``AttackMapping.from_dict()`` so the rest of this method always works
+        with dataclass attributes. Returns "" (dropping the section) when
+        there are no detected techniques.
+        """
+        from app.threat_intel.attack_mapping import AttackMapping
+
+        if not attack_mapping:
+            return ""
+
+        mapping = AttackMapping.from_dict(attack_mapping) if isinstance(attack_mapping, dict) else attack_mapping
+
+        if not mapping.techniques:
+            return ""
+
+        tactics_summary = mapping.tactics_summary or {}
+        tactics_text = (
+            ", ".join(
+                f"{self._escape(tactic)} ({count})"
+                for tactic, count in sorted(tactics_summary.items(), key=lambda kv: -kv[1])
+            )
+            if tactics_summary
+            else "N/A"
+        )
+
+        technique_rows = []
+        for tech in mapping.techniques:
+            evidence = "; ".join(tech.evidence[:3]) if tech.evidence else ""
+            technique_rows.append(
+                f"<tr><td>{self._escape(tech.technique_id)}</td>"
+                f"<td>{self._escape(tech.technique_name)}</td>"
+                f"<td>{self._escape(tech.tactic)}</td>"
+                f"<td>{tech.confidence:.0%}</td>"
+                f"<td>{self._escape(evidence)}</td></tr>"
+            )
+        technique_table = "\n".join(technique_rows)
+
+        return f"""
+<section id="attack">
+    {self._h2("attack")}
+    <table class="data-table">
+        <thead><tr><th>Metric</th><th>Value</th></tr></thead>
+        <tbody>
+            <tr><td>Kill Chain Phase</td><td>{self._escape(mapping.kill_chain_phase)}</td></tr>
+            <tr><td>Overall Severity</td><td>{self._escape(str(mapping.overall_severity).upper())}</td></tr>
+            <tr><td>Tactics Detected</td><td>{tactics_text}</td></tr>
+        </tbody>
+    </table>
+    <h3>Detected Techniques</h3>
+    <table class="data-table">
+        <thead><tr><th>ID</th><th>Name</th><th>Tactic</th><th>Confidence</th><th>Evidence</th></tr></thead>
+        <tbody>{technique_table}</tbody>
+    </table>
+</section>
+<div class="page-break"></div>
+"""
+
     def _render_beacon_section(self, beacon_df: "pd.DataFrame") -> str:
         """Render C2 beacon analysis section.
 
@@ -1396,6 +1468,7 @@ def generate_pdf_report(
     correlations: list | None = None,
     geoip_data: list | None = None,
     attack_timeline: list | None = None,
+    attack_mapping: dict | None = None,
 ) -> PDFReport | None:
     """
     Convenience function to generate a PDF report.
@@ -1410,6 +1483,8 @@ def generate_pdf_report(
         config: Optional report configuration.
         beacon_df: Optional beacon scoring DataFrame.
         correlations: Optional list of correlation results.
+        attack_mapping: Optional ``AttackMapping.to_dict()`` shape (or an
+            ``AttackMapping`` instance) from ``st.session_state["attack_mapping"]``.
 
     Returns:
         PDFReport object or None.
@@ -1426,4 +1501,5 @@ def generate_pdf_report(
         correlations=correlations,
         geoip_data=geoip_data,
         attack_timeline=attack_timeline,
+        attack_mapping=attack_mapping,
     )

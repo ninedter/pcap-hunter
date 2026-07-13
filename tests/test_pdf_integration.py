@@ -21,6 +21,7 @@ import pytest
 
 from app.analysis.correlation import CorrelationResult, CorrelationSignal
 from app.reports.pdf_generator import WEASYPRINT_AVAILABLE, PDFReportGenerator, ReportConfig
+from app.threat_intel.attack_mapping import AttackMapping, TechniqueMatch
 
 # ---------------------------------------------------------------------------
 # Realistic fixtures — shaped exactly like live-pipeline output
@@ -216,6 +217,35 @@ def realistic_geoip_data() -> list[dict]:
 
 
 @pytest.fixture
+def realistic_attack_mapping() -> dict:
+    """attack_mapping dict shape matching AttackMapping.to_dict() — the form
+    persisted in st.session_state["attack_mapping"] and passed to the PDF
+    generator, not a simplified dict with similar-looking keys."""
+    mapping = AttackMapping(
+        techniques=[
+            TechniqueMatch(
+                technique_id="T1071.001",
+                technique_name="Application Layer Protocol: Web Protocols",
+                tactic="command-and-control",
+                confidence=0.85,
+                evidence=["Beacon to 34.12.37.224 over HTTPS at regular intervals"],
+            ),
+            TechniqueMatch(
+                technique_id="T1568.002",
+                technique_name="Dynamic Resolution: Domain Generation Algorithms",
+                tactic="command-and-control",
+                confidence=0.92,
+                evidence=["DGA domain malicious.dga.xyz detected"],
+            ),
+        ],
+        tactics_summary={"command-and-control": 2},
+        kill_chain_phase="command-and-control",
+        overall_severity="high",
+    )
+    return mapping.to_dict()
+
+
+@pytest.fixture
 def full_report_html(
     realistic_features,
     realistic_correlations,
@@ -225,6 +255,7 @@ def full_report_html(
     realistic_tls_analysis,
     realistic_yara_results,
     realistic_geoip_data,
+    realistic_attack_mapping,
 ) -> str:
     """Complete report HTML built from the production-shape fixtures above.
 
@@ -245,6 +276,7 @@ def full_report_html(
         beacon_df=realistic_beacon_df,
         correlations=realistic_correlations,
         geoip_data=realistic_geoip_data,
+        attack_mapping=realistic_attack_mapping,
     )
 
 
@@ -267,6 +299,7 @@ class TestFullPDFGeneration:
         realistic_tls_analysis,
         realistic_yara_results,
         realistic_geoip_data,
+        realistic_attack_mapping,
     ):
         """Full report with every section populated and every data type realistic.
 
@@ -297,6 +330,7 @@ class TestFullPDFGeneration:
             beacon_df=realistic_beacon_df,
             correlations=realistic_correlations,
             geoip_data=realistic_geoip_data,
+            attack_mapping=realistic_attack_mapping,
         )
 
         assert pdf is not None, "PDF generation returned None — see error logs"
@@ -316,6 +350,7 @@ class TestFullPDFGeneration:
         realistic_tls_analysis,
         realistic_yara_results,
         realistic_geoip_data,
+        realistic_attack_mapping,
     ):
         """Verify section IDs and key tokens appear in the generated HTML."""
         gen = PDFReportGenerator(ReportConfig(title="Section Coverage Test"))
@@ -330,12 +365,14 @@ class TestFullPDFGeneration:
             beacon_df=realistic_beacon_df,
             correlations=realistic_correlations,
             geoip_data=realistic_geoip_data,
+            attack_mapping=realistic_attack_mapping,
         )
 
         # Section anchors
         assert 'id="summary"' in html
         assert 'id="charts"' in html
         assert 'id="correlations"' in html
+        assert 'id="attack"' in html
         assert 'id="iocs"' in html
         assert 'id="osint"' in html
         assert 'id="dns"' in html
@@ -358,6 +395,10 @@ class TestFullPDFGeneration:
 
         # YARA match rendering
         assert "CobaltStrike_Beacon" in html
+
+        # ATT&CK technique table rendering
+        assert "T1071.001" in html
+        assert "command-and-control" in html
 
     def test_pdf_with_charts_embeds_png_data_uris(
         self,

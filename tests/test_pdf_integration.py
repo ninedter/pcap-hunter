@@ -528,7 +528,12 @@ class TestSectionRegistry:
         assert toc_ids == ["summary", "iocs", "flows", "appendix"]
 
     def test_report_timestamp_is_timezone_aware(self, full_report_html):
-        assert re.search(r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}(:\d{2})? [A-Z]{2,5}", full_report_html)
+        # %Z renders as an alpha abbreviation (e.g. "UTC") on some hosts/CI and
+        # as a numeric offset (e.g. "+07") on others (e.g. macOS) — either
+        # satisfies "carries a timezone indicator".
+        assert re.search(
+            r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}(:\d{2})? (?:[A-Z]{2,5}|[+-]\d{2}(?::?\d{2})?)", full_report_html
+        )
 
 
 class TestLLMMarkdownTableRendering:

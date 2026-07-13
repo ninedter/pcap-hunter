@@ -247,13 +247,20 @@ class TestPDFReportGenerator:
         """The cover 'Generated:' stamp must carry a timezone abbreviation."""
         gen = PDFReportGenerator()
         html = gen._render_cover_page(case_info=None)
-        assert re.search(r"Generated:</strong> \d{4}-\d{2}-\d{2} \d{2}:\d{2} [A-Z]{2,5}", html)
+        # %Z renders as an alpha abbreviation (e.g. "UTC") on some hosts/CI and
+        # as a numeric offset (e.g. "+07") on others (e.g. macOS) — either
+        # satisfies "carries a timezone indicator".
+        assert re.search(
+            r"Generated:</strong> \d{4}-\d{2}-\d{2} \d{2}:\d{2} (?:[A-Z]{2,5}|[+-]\d{2}(?::?\d{2})?)", html
+        )
 
     def test_appendix_timestamp_is_timezone_aware(self):
         """The appendix 'Generated:' stamp must carry a timezone abbreviation."""
         gen = PDFReportGenerator()
         html = gen._render_appendix({"flows": [], "artifacts": {}})
-        assert re.search(r"Generated: \d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} [A-Z]{2,5}", html)
+        # See test_cover_page_timestamp_is_timezone_aware: accept both an alpha
+        # tz abbreviation and a numeric UTC offset.
+        assert re.search(r"Generated: \d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} (?:[A-Z]{2,5}|[+-]\d{2}(?::?\d{2})?)", html)
 
     def test_generate_without_weasyprint(self):
         """Test generation when weasyprint is not available."""

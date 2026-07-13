@@ -212,7 +212,7 @@ def test_worker_fires_webhook_on_success(tmp_path, monkeypatch):
     monkeypatch.setattr(
         runner_mod,
         "run_pipeline",
-        lambda pcap_path, case_id, options, progress, heartbeat=None: (_fake_pipeline_result(case_id)),
+        lambda pcap_path, case_id, options, progress, heartbeat=None: _fake_pipeline_result(case_id),
     )
 
     fake_pcap = tmp_path / "fake.pcap"
@@ -285,7 +285,7 @@ def test_worker_does_not_fire_webhook_when_not_configured(tmp_path, monkeypatch)
     monkeypatch.setattr(
         runner_mod,
         "run_pipeline",
-        lambda pcap_path, case_id, options, progress, heartbeat=None: (_fake_pipeline_result(case_id)),
+        lambda pcap_path, case_id, options, progress, heartbeat=None: _fake_pipeline_result(case_id),
     )
 
     fake_pcap = tmp_path / "fake.pcap"

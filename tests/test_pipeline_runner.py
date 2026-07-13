@@ -48,6 +48,12 @@ def test_pipeline_result_to_dict_is_json_serializable():
         dns_analysis={"dga_count": 3, "tunneling": []},
         tls_analysis={"certs": [{"subject": "evil.example"}]},
         beacon_df_records=[{"src": "10.0.0.1", "dst": "1.2.3.4", "score": 0.91}],
+        attack_mapping={
+            "techniques": [{"technique_id": "T1071.001", "technique_name": "Web Protocols"}],
+            "tactics_summary": {"command-and-control": 1},
+            "kill_chain_phase": "command-and-control",
+            "overall_severity": "high",
+        },
     )
     serialized = json.dumps(result.to_dict())
     restored = json.loads(serialized)
@@ -57,6 +63,8 @@ def test_pipeline_result_to_dict_is_json_serializable():
     assert restored["dns_analysis"]["dga_count"] == 3
     assert restored["tls_analysis"]["certs"][0]["subject"] == "evil.example"
     assert restored["beacon_df_records"][0]["src"] == "10.0.0.1"
+    assert restored["attack_mapping"]["techniques"][0]["technique_id"] == "T1071.001"
+    assert restored["attack_mapping"]["overall_severity"] == "high"
 
 
 def test_run_pipeline_executes_all_stages_against_fixture():
@@ -108,6 +116,12 @@ def test_run_pipeline_executes_all_stages_against_fixture():
     # Some progress events should have fired
     assert any(e.kind == "phase_start" for e in events)
     assert any(e.kind == "phase_done" for e in events)
+    # ATT&CK mapping runs post-fan-out and must always populate a shape, even
+    # when tiny.pcap yields no technique matches.
+    assert isinstance(result.attack_mapping, dict)
+    assert "techniques" in result.attack_mapping
+    assert isinstance(result.mitre_techniques, list)
+    assert all(isinstance(t, str) for t in result.mitre_techniques)
 
 
 def test_run_pipeline_skips_disabled_stages():

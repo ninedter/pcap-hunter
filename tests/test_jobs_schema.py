@@ -26,6 +26,16 @@ def test_cases_has_source_column(tmp_path):
     assert "source" in cols, "cases.source column should exist for ui/api distinction"
 
 
+def test_analyses_has_attack_json_column(tmp_path):
+    repo = CaseRepository(db_path=str(tmp_path / "test.db"))
+    conn = repo._get_conn()
+    try:
+        cols = [r[1] for r in conn.execute("PRAGMA table_info(analyses)").fetchall()]
+    finally:
+        conn.close()
+    assert "attack_json" in cols, "analyses.attack_json column should exist for persisted ATT&CK mappings"
+
+
 def test_jobs_table_columns(tmp_path):
     """Verify the jobs table has all expected columns."""
     repo = CaseRepository(db_path=str(tmp_path / "test.db"))

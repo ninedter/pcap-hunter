@@ -120,6 +120,7 @@ class PipelineResult:
     warnings: list[str] = field(default_factory=list)
     summary_narrative: str | None = None
     mitre_techniques: list[str] = field(default_factory=list)
+    attack_mapping: dict = field(default_factory=dict)
     dns_analysis: dict = field(default_factory=dict)
     tls_analysis: dict = field(default_factory=dict)
     beacon_df_records: list[dict] = field(default_factory=list)
@@ -144,6 +145,7 @@ class PipelineResult:
             "warnings": list(self.warnings),
             "summary_narrative": self.summary_narrative,
             "mitre_techniques": list(self.mitre_techniques),
+            "attack_mapping": dict(self.attack_mapping),
             "dns_analysis": dict(self.dns_analysis),
             "tls_analysis": dict(self.tls_analysis),
             "beacon_df_records": list(self.beacon_df_records),
@@ -402,6 +404,27 @@ def run_pipeline(
                 features["artifacts"]["hashes"].append(sha)
         features["artifacts"]["hashes"] = uniq_sorted(features["artifacts"]["hashes"])
 
+    # --- ATT&CK mapping (post-fan-out, not a canonical pipeline stage) ---
+    # Runs against whatever features/dns/tls/beacon data are final at this point.
+    # The runner has no yara/osint results (those run in the callers' main.py/queue.py
+    # after this function returns), so map_analysis is called without them — expected.
+    # A mapper bug must never break the pipeline, hence the broad except.
+    attack_mapping_dict: dict = {}
+    mitre_techniques: list[str] = []
+    try:
+        from app.threat_intel import ATTACKMapper
+
+        _mapping = ATTACKMapper().map_analysis(
+            features=features,
+            dns_analysis=dns_result,
+            tls_analysis=tls_result,
+            beacon_results=beacon_records,
+        )
+        attack_mapping_dict = _mapping.to_dict()
+        mitre_techniques = [t.technique_id for t in _mapping.techniques]
+    except Exception as exc:
+        logger.error("ATT&CK mapping failed: %s", exc)
+
     return PipelineResult(
         case_id=case_id,
         analysis_id=None,  # caller writes the Analysis row and fills this in
@@ -409,6 +432,8 @@ def run_pipeline(
         duration_seconds=time.time() - start,
         stages_run=stages_run,
         warnings=warnings,
+        mitre_techniques=mitre_techniques,
+        attack_mapping=attack_mapping_dict,
         dns_analysis=dns_result,
         tls_analysis=tls_result,
         beacon_df_records=beacon_records,

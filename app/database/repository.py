@@ -78,6 +78,8 @@ class CaseRepository:
                     dns_json TEXT,
                     tls_json TEXT
                 );
+                -- attack_json (ATT&CK mapping) is added below via idempotent ALTER
+                -- since this table may already exist from an earlier schema version.
 
                 -- IOCs extracted from analyses
                 CREATE TABLE IF NOT EXISTS iocs (
@@ -145,6 +147,12 @@ class CaseRepository:
             # Idempotent column additions (ALTER TABLE ADD COLUMN errors if column exists)
             try:
                 conn.execute("ALTER TABLE cases ADD COLUMN source TEXT DEFAULT 'ui'")
+                conn.commit()
+            except sqlite3.OperationalError:
+                pass  # column already exists
+
+            try:
+                conn.execute("ALTER TABLE analyses ADD COLUMN attack_json TEXT")
                 conn.commit()
             except sqlite3.OperationalError:
                 pass  # column already exists
@@ -411,13 +419,14 @@ class CaseRepository:
             yara_json = self._compress_json(analysis.yara_results) if analysis.yara_results else None
             dns_json = self._compress_json(analysis.dns_analysis) if analysis.dns_analysis else None
             tls_json = self._compress_json(analysis.tls_analysis) if analysis.tls_analysis else None
+            attack_json = self._compress_json(analysis.attack_mapping) if analysis.attack_mapping else None
 
             conn.execute(
                 """
                 INSERT OR REPLACE INTO analyses
                 (id, case_id, pcap_path, pcap_hash, packet_count, analyzed_at,
-                 features_json, osint_json, report_md, yara_json, dns_json, tls_json)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 features_json, osint_json, report_md, yara_json, dns_json, tls_json, attack_json)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     analysis.id,
@@ -432,6 +441,7 @@ class CaseRepository:
                     yara_json,
                     dns_json,
                     tls_json,
+                    attack_json,
                 ),
             )
 
@@ -707,6 +717,9 @@ class CaseRepository:
         yara_results = self._decompress_json(row.get("yara_json"))
         dns_analysis = self._decompress_json(row.get("dns_json"))
         tls_analysis = self._decompress_json(row.get("tls_json"))
+        # attack_json may be absent (NULL, or column missing on rows saved before
+        # this column existed) — always default to {} rather than None.
+        attack_mapping = self._decompress_json(row.get("attack_json")) or {}
 
         # Load IOCs
         ioc_rows = conn.execute("SELECT * FROM iocs WHERE analysis_id = ?", (row["id"],)).fetchall()
@@ -734,6 +747,7 @@ class CaseRepository:
             yara_results=yara_results,
             dns_analysis=dns_analysis,
             tls_analysis=tls_analysis,
+            attack_mapping=attack_mapping,
             iocs=iocs,
         )
 

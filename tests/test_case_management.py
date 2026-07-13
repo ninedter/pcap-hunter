@@ -404,6 +404,48 @@ class TestCaseRepository:
         assert retrieved is not None
         assert retrieved.packet_count == 500
 
+    def test_save_analysis_round_trips_attack_mapping(self, repo):
+        """attack_mapping (ATT&CK technique matches) must survive save -> get."""
+        case_id = repo.create_case(Case(title="With ATT&CK Mapping"))
+        attack_mapping = {
+            "techniques": [
+                {
+                    "technique_id": "T1071.001",
+                    "technique_name": "Application Layer Protocol: Web Protocols",
+                    "tactic": "command-and-control",
+                    "confidence": 0.8,
+                    "evidence": ["beacon score 0.91"],
+                }
+            ],
+            "tactics_summary": {"command-and-control": 1},
+            "kill_chain_phase": "command-and-control",
+            "overall_severity": "high",
+        }
+        analysis = Analysis(
+            case_id=case_id,
+            pcap_path="/test.pcap",
+            attack_mapping=attack_mapping,
+        )
+        analysis_id = repo.save_analysis(analysis)
+
+        retrieved = repo.get_analysis(analysis_id)
+        assert retrieved is not None
+        assert retrieved.attack_mapping == attack_mapping
+
+        # Also verify it round-trips via the case-level fetch path.
+        restored_case = repo.get_case(case_id)
+        assert restored_case.analyses[0].attack_mapping == attack_mapping
+
+    def test_get_analysis_defaults_attack_mapping_to_empty_dict(self, repo):
+        """Old rows / analyses saved without a mapping must not crash on read."""
+        case_id = repo.create_case(Case(title="No ATT&CK Mapping"))
+        analysis = Analysis(case_id=case_id, pcap_path="/test.pcap")
+        analysis_id = repo.save_analysis(analysis)
+
+        retrieved = repo.get_analysis(analysis_id)
+        assert retrieved is not None
+        assert retrieved.attack_mapping == {}
+
     def test_save_analysis_with_iocs(self, repo):
         """Test saving analysis with IOCs."""
         case_id = repo.create_case(Case(title="With IOCs"))

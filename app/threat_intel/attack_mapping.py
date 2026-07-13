@@ -411,40 +411,49 @@ class ATTACKMapper:
         return techniques
 
     def _check_tls(self, tls_analysis: dict) -> list[TechniqueMatch]:
-        """Check TLS certificate analysis for anomalies."""
+        """Check TLS certificate analysis for anomalies.
+
+        ``analyze_certificates()`` (app/pipeline/tls_certs.py) reports per-cert
+        flags in a ``certificates`` list (``is_self_signed``/``is_expired`` booleans)
+        and aggregate counts in ``alerts`` (``self_signed_count``/``expired_count``/
+        ``high_risk_count``) — there is no list of ``{"type": ..., "cert": ...}``
+        alert objects. Read the actual shape rather than a hypothetical one.
+        """
         techniques = []
-        alerts = tls_analysis.get("alerts", [])
+        certificates = tls_analysis.get("certificates", [])
 
-        for alert in alerts:
-            alert_type = alert.get("type", "")
+        def _cert_label(cert: dict) -> str:
+            return cert.get("subject_cn") or cert.get("fingerprint_sha256") or "unknown"
 
-            if alert_type == "self_signed":
-                rule = self.detection_rules["self_signed_cert"]
-                cert = alert.get("cert", "unknown")
-                for tech in rule["techniques"]:
-                    techniques.append(
-                        TechniqueMatch(
-                            technique_id=tech["id"],
-                            technique_name=tech["name"],
-                            tactic=tech["tactic"],
-                            confidence=0.7,
-                            evidence=[f"Self-signed certificate: {cert}"],
-                        )
+        self_signed = [c for c in certificates if c.get("is_self_signed")]
+        if self_signed:
+            rule = self.detection_rules["self_signed_cert"]
+            cert_label = _cert_label(self_signed[0])
+            for tech in rule["techniques"]:
+                techniques.append(
+                    TechniqueMatch(
+                        technique_id=tech["id"],
+                        technique_name=tech["name"],
+                        tactic=tech["tactic"],
+                        confidence=0.7,
+                        evidence=[f"Self-signed certificate: {cert_label}"],
                     )
+                )
 
-            elif alert_type == "expired":
-                rule = self.detection_rules["expired_cert"]
-                cert = alert.get("cert", "unknown")
-                for tech in rule["techniques"]:
-                    techniques.append(
-                        TechniqueMatch(
-                            technique_id=tech["id"],
-                            technique_name=tech["name"],
-                            tactic=tech["tactic"],
-                            confidence=0.5,
-                            evidence=[f"Expired certificate: {cert}"],
-                        )
+        expired = [c for c in certificates if c.get("is_expired")]
+        if expired:
+            rule = self.detection_rules["expired_cert"]
+            cert_label = _cert_label(expired[0])
+            for tech in rule["techniques"]:
+                techniques.append(
+                    TechniqueMatch(
+                        technique_id=tech["id"],
+                        technique_name=tech["name"],
+                        tactic=tech["tactic"],
+                        confidence=0.5,
+                        evidence=[f"Expired certificate: {cert_label}"],
                     )
+                )
 
         return techniques
 

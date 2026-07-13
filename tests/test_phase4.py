@@ -146,7 +146,12 @@ class TestATTACKMapper:
 
     def test_self_signed_cert_detection(self):
         mapper = ATTACKMapper()
-        tls_analysis = {"alerts": [{"type": "self_signed", "cert": "test.com"}]}
+        # Production shape from app.pipeline.tls_certs.analyze_certificates(): per-cert
+        # boolean flags in "certificates", not a list of {"type": ..., "cert": ...} objects.
+        tls_analysis = {
+            "certificates": [{"subject_cn": "test.com", "is_self_signed": True, "is_expired": False}],
+            "alerts": {"self_signed_count": 1, "expired_count": 0, "high_risk_count": 0},
+        }
         mapping = mapper.map_analysis(tls_analysis=tls_analysis)
         technique_ids = [t.technique_id for t in mapping.techniques]
         assert "T1573.002" in technique_ids

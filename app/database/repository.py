@@ -38,12 +38,17 @@ class CaseRepository:
         """Get database connection."""
         conn = sqlite3.connect(str(self._db_path))
         conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA busy_timeout=30000")
         return conn
 
     def _init_schema(self):
         """Initialize database schema."""
         conn = self._get_conn()
         try:
+            # Persisted once per database file; lets concurrent readers/writers
+            # (pool workers, API thread, Streamlit UI) coexist instead of
+            # failing immediately with "database is locked".
+            conn.execute("PRAGMA journal_mode=WAL")
             conn.executescript(
                 """
                 -- Cases table

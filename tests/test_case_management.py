@@ -478,6 +478,18 @@ class TestCaseRepository:
         assert stats["by_status"].get("open", 0) == 1
         assert stats["by_status"].get("closed", 0) == 1
 
+    def test_repo_uses_wal_and_busy_timeout(self, tmp_path):
+        """Concurrent writers (pool workers, API thread, Streamlit UI) must not
+        hit 'database is locked' immediately -- WAL + a busy_timeout give SQLite
+        room to retry instead of failing fast."""
+        repo = CaseRepository(db_path=str(tmp_path / "t.db"))
+        conn = repo._get_conn()
+        try:
+            assert conn.execute("PRAGMA journal_mode").fetchone()[0].lower() == "wal"
+            assert conn.execute("PRAGMA busy_timeout").fetchone()[0] == 30000
+        finally:
+            conn.close()
+
 
 class TestCascadeDeletion:
     """Deleting a case must remove every related row — the FK pragma is off, so

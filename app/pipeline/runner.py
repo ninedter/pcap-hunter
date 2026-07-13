@@ -58,6 +58,7 @@ WARNING_DNS_ANALYSIS_FAILED = "dns_analysis_failed"
 WARNING_TLS_CERTS_FAILED = "tls_certs_failed"
 WARNING_BEACON_FAILED = "beacon_failed"
 WARNING_CARVE_FAILED = "carve_failed"
+WARNING_ZEEK_TRUNCATED = "zeek_tables_truncated"
 
 
 def _derive_run_id(case_id: str) -> str:
@@ -260,7 +261,11 @@ def run_pipeline(
                     df = load_zeek_any(log_path)
                 except Exception:
                     df = pd.DataFrame()
-                zeek_tables[name] = df.head(2000)
+                if len(df) > C.ZEEK_TABLE_MAX_ROWS:
+                    df = df.head(C.ZEEK_TABLE_MAX_ROWS)
+                    if WARNING_ZEEK_TRUNCATED not in warnings:
+                        warnings.append(WARNING_ZEEK_TRUNCATED)
+                zeek_tables[name] = df
             stages_run.append("zeek")
             h.done("Zeek logs loaded.")
         else:

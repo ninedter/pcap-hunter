@@ -62,6 +62,14 @@ LLM_PROBE_TIMEOUT_SECONDS = 15.0  # test_connection / fetch_models quick probes
 # below this; keep-first preserves true inter-arrival deltas (sampling would not).
 MAX_FLOW_SAMPLES = 5000
 
+# Per-log row cap on Zeek tables held in memory/session state. DNS analysis
+# and the UI preview read these capped frames, so DNS/TLS fidelity is bounded
+# by this value; JA3 extraction reads the full uncapped log via zeek_log_paths.
+# Raised from the old hardcoded 2000 (which silently truncated busy captures);
+# still bounded to protect session-state size. A WARNING_ZEEK_TRUNCATED is
+# emitted when any log exceeds it.
+ZEEK_TABLE_MAX_ROWS = 50000
+
 # Reverse DNS
 RDNS_CACHE_TTL_HOURS = 168  # 7 days
 RDNS_MAX_WORKERS = 10  # Concurrent rDNS lookups

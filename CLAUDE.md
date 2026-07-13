@@ -198,6 +198,7 @@ GitHub Actions (`.github/workflows/ci.yml`):
 - Default PyShark limit: 200,000 packets
 - OSINT top IPs default: 50
 - `MAX_FLOW_SAMPLES`: 5,000 per-flow packet timestamps/lengths (true totals kept in `count`/`first_ts`/`last_ts`)
+- `ZEEK_TABLE_MAX_ROWS`: 50,000 per-log row cap on in-memory Zeek tables (DNS analysis + UI preview read these capped frames; JA3 reads the full uncapped log via `zeek_log_paths`); truncation appends `WARNING_ZEEK_TRUNCATED` to `PipelineResult.warnings`
 - `RUN_DIR_RETENTION_SECONDS`: 7 days — per-run `data/zeek|carved/<run_id>/` dirs pruned on the next run
 - Subprocess timeouts: `ZEEK_TIMEOUT_SECONDS` 600, `PCAP_COUNT_TIMEOUT_SECONDS` 120, `CARVE_TIMEOUT_SECONDS` 300, `TLS_EXTRACT_TIMEOUT_SECONDS` 300, `LLM_PROBE_TIMEOUT_SECONDS` 15
 

@@ -449,6 +449,36 @@ def test_run_pipeline_records_zeek_log_paths(monkeypatch, tmp_path):
     assert PipelineResult().zeek_log_paths == {}
 
 
+def test_zeek_tables_capped_and_warned(monkeypatch, tmp_path):
+    """A busy capture's Zeek table is capped at C.ZEEK_TABLE_MAX_ROWS and the
+    truncation is surfaced via WARNING_ZEEK_TRUNCATED so callers aren't silently
+    handed a partial table."""
+    import pandas as pd
+
+    import app.pipeline.runner as R
+    from app.pipeline.progress import CallbackProgress
+    from app.pipeline.runner import run_pipeline
+
+    big = pd.DataFrame({"query": [f"d{i}.com" for i in range(R.C.ZEEK_TABLE_MAX_ROWS + 10)]})
+    log_path = str(tmp_path / "dns.log")
+    captured = _stub_stage_dirs(monkeypatch, tmp_path, zeek_logs={"dns.log": log_path})
+    assert captured is not None
+    monkeypatch.setattr(R, "load_zeek_any", lambda p: big)
+
+    pcap = tmp_path / "fake.pcap"
+    pcap.write_bytes(b"")
+
+    result = run_pipeline(
+        pcap_path=str(pcap),
+        case_id="cap_test",
+        options=_zeek_carve_only_options(),
+        progress=CallbackProgress(callback=lambda _e: None, total_phases=0),
+    )
+
+    assert len(result.zeek_tables["dns.log"]) == R.C.ZEEK_TABLE_MAX_ROWS
+    assert R.WARNING_ZEEK_TRUNCATED in result.warnings
+
+
 def test_prune_stale_run_dirs_removes_only_old_dirs(tmp_path):
     """Run dirs older than the retention window are removed; fresh dirs and loose files stay."""
     import os

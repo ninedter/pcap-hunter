@@ -367,29 +367,10 @@ class IOCExporter:
         return json.dumps(bundle, indent=2).encode("utf-8")
 
     def _ioc_to_stix_pattern(self, ioc: IOCRecord) -> str | None:
-        """Convert IOC to STIX pattern."""
-        from app.utils.stix_export import _escape_stix_value
+        """Convert IOC to STIX pattern via the shared serializer."""
+        from app.utils.stix_export import ioc_to_stix_pattern
 
-        escaped = _escape_stix_value(ioc.value)
-        if ioc.ioc_type == "ip":
-            return f"[ipv4-addr:value = '{escaped}']"
-        elif ioc.ioc_type == "domain":
-            return f"[domain-name:value = '{escaped}']"
-        elif ioc.ioc_type == "hash":
-            # Determine hash type by length
-            if len(ioc.value) == 32:
-                return f"[file:hashes.MD5 = '{escaped}']"
-            elif len(ioc.value) == 40:
-                return f"[file:hashes.'SHA-1' = '{escaped}']"
-            elif len(ioc.value) == 64:
-                return f"[file:hashes.'SHA-256' = '{escaped}']"
-        elif ioc.ioc_type == "url":
-            return f"[url:value = '{escaped}']"
-        elif ioc.ioc_type == "ja3":
-            # JA3 doesn't have a standard STIX pattern
-            return None
-
-        return None
+        return ioc_to_stix_pattern(ioc.ioc_type, ioc.value)
 
 
 def generate_ioc_filename(format_type: str) -> str:

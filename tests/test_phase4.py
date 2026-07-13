@@ -453,6 +453,34 @@ class TestIOCExporter:
         assert "1.2.3.4" in lines
         assert "5.6.7.8" in lines
 
+    def test_ioc_to_stix_pattern_sha512_hash(self):
+        exporter = IOCExporter()
+        record = IOCRecord(ioc_type="hash", value="e" * 128)
+        pattern = exporter._ioc_to_stix_pattern(record)
+        assert pattern == "[file:hashes.'SHA-512' = '" + "e" * 128 + "']"
+
+    def test_ioc_to_stix_pattern_ipv6(self):
+        exporter = IOCExporter()
+        record = IOCRecord(ioc_type="ip", value="2001:db8::1")
+        pattern = exporter._ioc_to_stix_pattern(record)
+        assert pattern.startswith("[ipv6-addr")
+
+    def test_ioc_to_stix_pattern_ja3_is_emitted(self):
+        exporter = IOCExporter()
+        record = IOCRecord(ioc_type="ja3", value="769,47-53-5-10,0-23-35,23-24,0")
+        pattern = exporter._ioc_to_stix_pattern(record)
+        assert pattern is not None
+        assert "x509-certificate:hashes.'JA3'" in pattern
+
+    def test_export_stix_basic_includes_ja3_indicator(self):
+        features = {"artifacts": {"ja3": ["abc123"]}}
+        exporter = IOCExporter(features)
+        stix_bytes = exporter._export_stix_basic()
+        data = json.loads(stix_bytes.decode("utf-8"))
+        indicators = [o for o in data["objects"] if o["type"] == "indicator"]
+        assert len(indicators) == 1
+        assert "JA3" in indicators[0]["pattern"]
+
 
 def test_generate_ioc_filename():
     filename = generate_ioc_filename("csv")

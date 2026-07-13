@@ -5,6 +5,7 @@ from __future__ import annotations
 from app.utils.cef_export import (
     CEFEvent,
     export_cef_text,
+    feed_rows_to_cef,
     format_syslog,
     generate_cef_events,
 )
@@ -148,3 +149,59 @@ class TestExportCEFText:
     def test_empty_export(self):
         text = export_cef_text()
         assert text == ""
+
+
+class TestFeedRowsToCEF:
+    """feed_rows_to_cef renders feed-query rows (score 25-100, no priority_score)
+    directly — it must NOT apply the 0.4 priority-score gate used by
+    _events_from_iocs, or a LOW-severity row (score 25) would be silently
+    dropped from a feed pull."""
+
+    def test_low_row_not_dropped(self):
+        rows = [{"type": "ip", "value": "1.2.3.4", "score": 25, "severity": "low", "tags": []}]
+        text = feed_rows_to_cef(rows)
+        assert "CEF:0" in text
+        assert "1.2.3.4" in text
+
+    def test_one_event_per_row(self):
+        rows = [
+            {"type": "ip", "value": "1.1.1.1", "score": 25, "severity": "low", "tags": []},
+            {"type": "ip", "value": "2.2.2.2", "score": 100, "severity": "critical", "tags": []},
+        ]
+        text = feed_rows_to_cef(rows)
+        lines = [ln for ln in text.strip().splitlines() if ln]
+        assert len(lines) == 2
+
+    def test_severity_mapping_reuses_severity_map(self):
+        rows = [{"type": "ip", "value": "9.9.9.9", "score": 100, "severity": "critical", "tags": []}]
+        text = feed_rows_to_cef(rows)
+        # _SEVERITY_MAP["critical"] == 10
+        assert "|10|" in text
+
+    def test_unknown_severity_defaults_sanely(self):
+        rows = [{"type": "ip", "value": "8.8.8.8", "score": 50, "severity": "bogus", "tags": []}]
+        text = feed_rows_to_cef(rows)
+        assert "CEF:0" in text  # doesn't raise; renders with a fallback severity
+
+    def test_escaping_of_special_chars_in_value_and_tags(self):
+        rows = [
+            {
+                "type": "url",
+                "value": "http://evil.example/a=b",
+                "score": 50,
+                "severity": "medium",
+                "tags": ["tag=1", "back\\slash"],
+            }
+        ]
+        text = feed_rows_to_cef(rows)
+        assert "a\\=b" in text
+        assert "tag\\=1" in text
+        assert "back\\\\slash" in text
+
+    def test_empty_rows(self):
+        assert feed_rows_to_cef([]) == ""
+
+    def test_hostname_in_syslog_header(self):
+        rows = [{"type": "ip", "value": "1.2.3.4", "score": 75, "severity": "high", "tags": []}]
+        text = feed_rows_to_cef(rows, hostname="feedhost")
+        assert "feedhost" in text

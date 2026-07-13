@@ -235,6 +235,98 @@ def test_iocs_stix_ja3_not_dropped(client):
     assert "x509-certificate" in matching[0]
 
 
+# ── CEF feed ────────────────────────────────────────────────────────────────
+
+
+def test_iocs_cef_low_ioc_not_dropped(client):
+    """A LOW-severity IOC (score 25) must appear in CEF output.
+
+    The generic priority-score gate in cef_export._events_from_iocs drops
+    anything below 0.4 — a naive `score/100` mapping would silently drop a
+    LOW (25 -> 0.25) IOC from a feed pull. The dedicated feed adapter must
+    not apply that gate at all.
+    """
+    from app.api.deps import get_repo
+
+    repo = get_repo()
+    case = Case(id="case0010", title="cef-low")
+    repo.create_case(case)
+    repo.save_analysis(
+        Analysis(
+            case_id=case.id,
+            pcap_path="/tmp/low.pcap",
+            iocs=[IOC(ioc_type=IOCType.IP, value="66.66.66.66", severity=Severity.LOW)],
+        )
+    )
+
+    r = client.get("/api/v1/iocs.cef", headers={"Authorization": "Bearer FEED"})
+    assert r.status_code == 200
+    assert r.headers["content-type"].startswith("text/plain")
+    assert "CEF:0" in r.text
+    # The seeded HIGH IOC (fixture) and the new LOW IOC must BOTH appear.
+    assert "1.2.3.4" in r.text
+    assert "66.66.66.66" in r.text
+
+
+def test_iocs_cef_respects_min_score(client):
+    from app.api.deps import get_repo
+
+    repo = get_repo()
+    case = Case(id="case0011", title="cef-minscore")
+    repo.create_case(case)
+    repo.save_analysis(
+        Analysis(
+            case_id=case.id,
+            pcap_path="/tmp/lo2.pcap",
+            iocs=[IOC(ioc_type=IOCType.IP, value="77.77.77.77", severity=Severity.LOW)],
+        )
+    )
+
+    r = client.get("/api/v1/iocs.cef?min_score=50", headers={"Authorization": "Bearer FEED"})
+    assert r.status_code == 200
+    assert "77.77.77.77" not in r.text  # LOW (25) filtered out by min_score=50
+    assert "1.2.3.4" in r.text  # HIGH (75) survives the >=50 filter
+
+
+def test_iocs_cef_requires_feed_scope(client):
+    r = client.get("/api/v1/iocs.cef")
+    assert r.status_code == 401
+
+
+def test_iocs_cef_escaping_safe(client):
+    """CEF reserved characters (=, \\) in a value must be escaped, not raw."""
+    from app.api.deps import get_repo
+
+    repo = get_repo()
+    case = Case(id="case0013", title="cef-escape")
+    repo.create_case(case)
+    repo.save_analysis(
+        Analysis(
+            case_id=case.id,
+            pcap_path="/tmp/esc.pcap",
+            iocs=[IOC(ioc_type=IOCType.URL, value="http://evil.example/a=b")],
+        )
+    )
+
+    r = client.get("/api/v1/iocs.cef", headers={"Authorization": "Bearer FEED"})
+    assert r.status_code == 200
+    assert "a\\=b" in r.text
+    assert "a=b" not in r.text.replace("a\\=b", "")
+
+
+def test_iocs_cef_etag_round_trip(client):
+    r1 = client.get("/api/v1/iocs.cef", headers={"Authorization": "Bearer FEED"})
+    assert r1.status_code == 200
+    etag = r1.headers["ETag"]
+
+    r2 = client.get(
+        "/api/v1/iocs.cef",
+        headers={"Authorization": "Bearer FEED", "If-None-Match": etag},
+    )
+    assert r2.status_code == 304
+    assert r2.content == b""
+
+
 # ── Single-IOC lookup ───────────────────────────────────────────────────────
 
 

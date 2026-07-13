@@ -16,6 +16,7 @@ from fastapi.responses import Response
 from app.api.deps import get_repo, require_feed_scope
 from app.api.feed import IOCFilter, query_iocs
 from app.api.models import IOCFeedResponse
+from app.utils.cef_export import feed_rows_to_cef
 
 router = APIRouter(prefix="/api/v1", tags=["egress"])
 
@@ -187,6 +188,37 @@ def iocs_csv(
         )
     body = out.getvalue().encode("utf-8")
     return _conditional_response(request, body, "text/csv", _last_modified(rows))
+
+
+# ── CEF feed ────────────────────────────────────────────────────────────────
+
+
+@router.get("/iocs.cef")
+def iocs_cef(
+    request: Request,
+    since: str | None = Query(default=None),
+    min_score: int = Query(default=0, ge=0, le=100),
+    type: str | None = Query(default=None),
+    tag: str | None = Query(default=None),
+    case_id: str | None = Query(default=None),
+    limit: int = Query(default=1000, ge=1, le=10000),
+    cursor: str | None = Query(default=None),
+    _scope=Depends(require_feed_scope),
+    repo=Depends(get_repo),
+):
+    """CEF/syslog egress feed for ArcSight/QRadar/Sentinel-style SIEM ingestion.
+
+    Uses the dedicated ``feed_rows_to_cef`` adapter (not the priority-score-gated
+    ``_events_from_iocs``), so the CEF output faithfully mirrors exactly the rows
+    the same filters (min_score/type/etc.) would return via iocs.json/csv —
+    including LOW-severity IOCs that a naive score/100 -> priority_score mapping
+    would otherwise silently drop.
+    """
+    filt = _build_filter(since, min_score, type, tag, case_id, limit, cursor)
+    rows = query_iocs(repo, filt)
+
+    body = feed_rows_to_cef(rows, hostname="pcap-hunter").encode("utf-8")
+    return _conditional_response(request, body, "text/plain", _last_modified(rows))
 
 
 # ── STIX 2.1 feed ──────────────────────────────────────────────────────────

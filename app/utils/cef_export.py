@@ -277,6 +277,50 @@ def generate_cef_events(
     return events
 
 
+def feed_rows_to_cef(rows: list[dict], hostname: str = "pcap-hunter") -> str:
+    """Render feed-query IOC rows (type/value/score/severity/tags/...) as CEF syslog lines.
+
+    One CEF event per row — no priority-score gating; the caller's feed filters
+    (min_score/type) already decide inclusion. This is distinct from
+    :func:`_events_from_iocs`, which expects ``ScoredIOC``-shaped objects with a
+    0.0-1.0 ``priority_score`` and silently drops anything below 0.4 — feed rows
+    instead carry an integer ``score`` (25/50/75/100, derived from severity), and
+    a CEF feed pull must faithfully return exactly the rows the feed query
+    returned, including LOW-severity ones.
+
+    Args:
+        rows: Feed rows as returned by :func:`app.api.feed.query_iocs` — each a
+            dict with at least ``type``, ``value``, ``score``, ``severity``, and
+            ``tags`` keys.
+        hostname: Hostname for the syslog header.
+
+    Returns:
+        Newline-separated CEF/syslog lines, one per row. Empty string if
+        ``rows`` is empty.
+    """
+    events: list[CEFEvent] = []
+    for row in rows:
+        severity_label = str(row.get("severity") or "medium").lower()
+        severity = _SEVERITY_MAP.get(severity_label, 5)
+        tags = row.get("tags") or []
+        tag_str = ";".join(str(t) for t in tags)
+
+        events.append(
+            CEFEvent(
+                signature_id="IOC-FEED-001",
+                name=f"IOC Feed Entry ({severity_label})",
+                severity=severity,
+                extensions={
+                    "value": str(row.get("value", "")),
+                    "type": str(row.get("type", "")),
+                    "score": str(row.get("score", "")),
+                    "tags": tag_str,
+                },
+            )
+        )
+    return "\n".join(format_syslog(e, hostname=hostname) for e in events)
+
+
 def export_cef_text(
     correlations: list | None = None,
     beacon_df: Any = None,

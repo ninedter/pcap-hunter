@@ -117,6 +117,53 @@ def _validate_domain(domain: str) -> bool:
     return True
 
 
+_PRIVATE_TLDS = frozenset(
+    {
+        "local",
+        "internal",
+        "lan",
+        "corp",
+        "home",
+        "intranet",
+        "test",
+        "example",
+        "invalid",
+        "localhost",
+    }
+)
+
+
+def is_enrichable_domain(domain: str) -> bool:
+    """True only for public, routable domains worth sending to OSINT providers.
+
+    Prevents leaking internal infrastructure names (dc01.internal.corp, *.local)
+    to third-party SaaS (VirusTotal submissions are visible to paid subscribers).
+
+    Rejects: invalid domains per ``_validate_domain`` (dot required, no
+    underscore), single-label names, reverse-DNS artifacts
+    (``*.in-addr.arpa``/``*.ip6.arpa``), IP-shaped strings, and private/internal
+    TLDs (local/internal/lan/corp/home/intranet/test/example/invalid/localhost).
+    """
+    if not domain or not _validate_domain(domain):  # dot required, no underscore
+        return False
+    lower = domain.lower().rstrip(".")
+
+    # _validate_domain's regex allows all-numeric labels, so IP literals like
+    # "1.2.3.4" pass it — reject them explicitly since they aren't domains.
+    try:
+        ipaddress.ip_address(lower)
+        return False
+    except ValueError:
+        pass
+
+    if lower.endswith((".in-addr.arpa", ".ip6.arpa")):
+        return False
+    tld = lower.rsplit(".", 1)[-1]
+    if tld in _PRIVATE_TLDS:
+        return False
+    return True
+
+
 def get_whois_info(target: str) -> dict | str:
     """
     Retrieve WHOIS information for a domain or IP.

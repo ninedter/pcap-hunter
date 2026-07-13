@@ -13,6 +13,7 @@ from app.pipeline.osint_cache import get_osint_cache
 from app.pipeline.state import PhaseHandle
 from app.security.opsec import hardened_session
 from app.utils.common import is_public_ipv4, resolve_ip
+from app.utils.network_utils import is_enrichable_domain
 
 logger = logging.getLogger(__name__)
 
@@ -432,7 +433,7 @@ def enrich(
     prev_doms = prev.get("domains") or {}
 
     all_ips = [ip for ip in artifacts.get("ips", []) if is_public_ipv4(ip)]
-    all_doms = artifacts.get("domains", [])
+    all_doms = [d for d in artifacts.get("domains", []) if is_enrichable_domain(d)]
 
     # Deduplicate: skip indicators already enriched in a previous batch run
     new_ips = [ip for ip in all_ips if ip not in prev_ips]

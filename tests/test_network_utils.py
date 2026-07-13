@@ -4,9 +4,12 @@ from __future__ import annotations
 
 from unittest.mock import patch
 
+import pytest
+
 from app.utils.network_utils import (
     _validate_domain,
     bulk_resolve_ips,
+    is_enrichable_domain,
     is_public_ipv4,
     pick_top_public_ips,
     resolve_ip,
@@ -72,6 +75,46 @@ class TestValidateDomain:
 
     def test_hyphen_ok(self):
         assert _validate_domain("my-host.example.com") is True
+
+
+class TestIsEnrichableDomain:
+    """is_enrichable_domain must keep internal/private hostnames out of third-party
+    OSINT submissions (VirusTotal, OTX) while still allowing public domains through."""
+
+    @pytest.mark.parametrize("d", ["evil.com", "sub.example.org", "cdn.cloudflare.net"])
+    def test_accepts_public_domains(self, d):
+        assert is_enrichable_domain(d) is True
+
+    @pytest.mark.parametrize(
+        "d",
+        [
+            "dc01.internal.corp",  # private TLD
+            "printer.local",  # private TLD
+            "host.lan",  # private TLD
+            "server.home",  # private TLD
+            "box.intranet",  # private TLD
+            "vm.test",  # private TLD
+            "site.invalid",  # private TLD
+            "1.2.3.4",  # IP-shaped, not a domain
+            "10.0.0.1.in-addr.arpa",  # reverse-lookup junk
+            "1.0.0.0.ip6.arpa",  # reverse-lookup junk (IPv6)
+            "localhost",  # no dot, private TLD
+            "workstation",  # single-label name, no dot
+            "_dmarc",  # underscore + no dot
+        ],
+    )
+    def test_rejects_internal_and_malformed(self, d):
+        assert is_enrichable_domain(d) is False
+
+    def test_rejects_underscore_domain(self):
+        # Underscored labels (e.g. DKIM/DMARC records) are not enrichable hostnames.
+        assert is_enrichable_domain("under_score.example.com") is False
+
+    def test_rejects_empty(self):
+        assert is_enrichable_domain("") is False
+
+    def test_rejects_none(self):
+        assert is_enrichable_domain(None) is False
 
 
 class TestResolveIP:

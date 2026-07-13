@@ -20,6 +20,7 @@ from app.pipeline.osint import (
     PROBE_RESULT_UNREACHABLE,
     _cached_query,
     _j,
+    enrich,
     probe_providers,
     provider_status,
 )
@@ -303,3 +304,35 @@ class TestProbeProviders:
         with _patched_session(get):
             probe_providers(ALL_KEYS, timeout=5.0)
         assert all(call.kwargs.get("timeout") == 5.0 for call in get.call_args_list)
+
+
+class TestEnrichDomainFiltering:
+    """enrich() must not leak internal/private domain names to third-party OSINT
+    providers (VirusTotal, OTX) — only public, routable domains get queried."""
+
+    def _run(self, artifacts: dict) -> tuple[dict, list[str]]:
+        queried: list[str] = []
+
+        def fake_query_providers(indicator, providers, keys):
+            queried.append(indicator)
+            # cache_hits=1 so enrich() doesn't sleep(throttle) between calls.
+            return {"_raw": "ok"}, 1
+
+        cache = MagicMock()
+        with (
+            patch("app.pipeline.osint._get_cache", return_value=cache),
+            patch("app.pipeline.osint._query_providers", side_effect=fake_query_providers),
+        ):
+            result = enrich(artifacts, keys={})
+        return result, queried
+
+    def test_internal_domain_is_never_queried(self):
+        result, queried = self._run({"ips": [], "domains": ["evil.com", "dc01.internal.corp"]})
+        assert queried == ["evil.com"]
+        assert "evil.com" in result["domains"]
+        assert "dc01.internal.corp" not in result["domains"]
+
+    def test_all_internal_domains_means_no_queries(self):
+        result, queried = self._run({"ips": [], "domains": ["printer.local", "host.lan"]})
+        assert queried == []
+        assert result["domains"] == {}

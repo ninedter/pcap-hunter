@@ -55,6 +55,7 @@ from app.ui.layout import (
     render_dns_analysis,
     render_flow_asymmetry,
     render_flows,
+    render_http_analysis,
     render_hunting_checklist,
     render_ioc_search,
     render_ja3,
@@ -227,6 +228,7 @@ def _run_single_pcap_pipeline(
         beacon_df=beacon_df if isinstance(beacon_df, pd.DataFrame) else None,
         dns_analysis=result.dns_analysis or {},
         tls_analysis=result.tls_analysis or {},
+        http_analysis=result.http_analysis or {},
         attack_mapping=result.attack_mapping or {},
         packet_count=result.packet_count,
     )
@@ -629,6 +631,9 @@ with tab_progress:
             # it) — mirror the first successful file's mapping, same fallback used
             # for merged_features above.
             st.session_state["attack_mapping"] = (first_ok.attack_mapping if first_ok else None) or {}
+            # No cross-file HTTP aggregation helper either (see attack_mapping
+            # above) — mirror the first successful file's HTTP findings.
+            st.session_state["http_analysis"] = (first_ok.http_analysis if first_ok else None) or {}
             # Carved payloads concatenated across all successful files
             st.session_state["carved"] = [
                 item for r in batch_result.pcap_results if not r.error for item in r.carved_items
@@ -735,6 +740,7 @@ with tab_progress:
             st.session_state["carved"] = result.carved_items
             st.session_state["dns_analysis"] = result.dns_analysis or None
             st.session_state["tls_analysis"] = result.tls_analysis or None
+            st.session_state["http_analysis"] = result.http_analysis or None
             st.session_state["attack_mapping"] = result.attack_mapping or {}
 
             _precompute_dash_aggregates(features.get("flows"))
@@ -1534,6 +1540,7 @@ with tab_results:
         feats = st.session_state.get("features") or {}
         render_flows(results_panel, feats.get("flows"))
         render_dns_analysis(results_panel, st.session_state.get("dns_analysis"))
+        render_http_analysis(results_panel, st.session_state.get("http_analysis"))
         render_tls_certificates(results_panel, st.session_state.get("tls_analysis"))
         render_ja3(
             results_panel,

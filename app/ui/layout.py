@@ -1766,6 +1766,110 @@ def render_dns_analysis(result_col, dns_analysis: dict | None):
                     st.dataframe(df_top, width="stretch", hide_index=True)
 
 
+def render_http_analysis(result_col, http_analysis: dict | None):
+    """Render HTTP request analysis: suspicious User-Agents, cleartext credentials, suspicious URIs."""
+    with result_col:
+        expanded = bool(
+            http_analysis is not None
+            and (
+                http_analysis.get("alerts", {}).get("cleartext_cred_count", 0)
+                or http_analysis.get("alerts", {}).get("suspicious_uri_count", 0)
+                or http_analysis.get("alerts", {}).get("suspicious_ua_count", 0)
+            )
+        )
+        with st.expander("HTTP Analysis", expanded=expanded):
+            # analyze_http always returns a truthy dict when it executes, so
+            # None means the stage was skipped or failed — never "ran clean".
+            if http_analysis is None:
+                st.info(
+                    "📭 HTTP analysis didn't run in this session (stage skipped or failed) — re-run with Zeek enabled."
+                )
+                return
+            if http_analysis.get("skipped"):
+                st.info("📭 HTTP analysis was skipped for this run.")
+                return
+            if http_analysis.get("error"):
+                st.info(f"📭 HTTP analysis: {http_analysis['error']}")
+                return
+
+            alerts = http_analysis.get("alerts", {})
+            ua_count = alerts.get("suspicious_ua_count", 0)
+            cred_count = alerts.get("cleartext_cred_count", 0)
+            uri_count = alerts.get("suspicious_uri_count", 0)
+
+            # Summary metrics
+            col1, col2, col3, col4, col5 = st.columns(5)
+            with col1:
+                st.metric("HTTP Requests", http_analysis.get("total_requests", 0))
+            with col2:
+                st.metric("Unique Hosts", http_analysis.get("unique_hosts", 0))
+            with col3:
+                if ua_count:
+                    st.metric("Suspicious UAs", ua_count, delta="Warning", delta_color="inverse")
+                else:
+                    st.metric("Suspicious UAs", 0)
+            with col4:
+                if cred_count:
+                    st.metric("Cleartext Creds", cred_count, delta="Warning", delta_color="inverse")
+                else:
+                    st.metric("Cleartext Creds", 0)
+            with col5:
+                if uri_count:
+                    st.metric("Suspicious URIs", uri_count, delta="Warning", delta_color="inverse")
+                else:
+                    st.metric("Suspicious URIs", 0)
+
+            # Alert banners
+            if cred_count:
+                st.error(f"**Cleartext Credentials:** {cred_count} Basic-auth username(s) seen in plaintext HTTP!")
+            if uri_count:
+                st.error(f"**Suspicious URIs:** {uri_count} risky/oversized/raw-IP-hosted URIs detected!")
+            if ua_count:
+                st.warning(f"**Suspicious User-Agents:** {ua_count} missing/known-tool user-agents detected!")
+
+            # Tabs for detailed data
+            tab_creds, tab_ua, tab_uri = st.tabs(["Cleartext Credentials", "Suspicious User-Agents", "Suspicious URIs"])
+
+            with tab_creds:
+                creds_list = http_analysis.get("cleartext_credentials", [])
+                if creds_list:
+                    df_creds = pd.DataFrame(creds_list)
+                    display_cols = ["host", "uri", "username"]
+                    display_cols = [c for c in display_cols if c in df_creds.columns]
+                    render_export_buttons(
+                        df_creds[display_cols], "http_cleartext_creds", key_suffix="http_creds", is_dataframe=True
+                    )
+                    st.dataframe(df_creds[display_cols], width="stretch", hide_index=True)
+                else:
+                    st.caption("No cleartext credentials detected.")
+
+            with tab_ua:
+                ua_list = http_analysis.get("suspicious_user_agents", [])
+                if ua_list:
+                    df_ua = pd.DataFrame(ua_list)
+                    display_cols = ["host", "user_agent", "uri", "reason"]
+                    display_cols = [c for c in display_cols if c in df_ua.columns]
+                    render_export_buttons(
+                        df_ua[display_cols], "http_suspicious_ua", key_suffix="http_ua", is_dataframe=True
+                    )
+                    st.dataframe(df_ua[display_cols], width="stretch", hide_index=True)
+                else:
+                    st.caption("No suspicious user-agents detected.")
+
+            with tab_uri:
+                uri_list = http_analysis.get("suspicious_uris", [])
+                if uri_list:
+                    df_uri = pd.DataFrame(uri_list)
+                    display_cols = ["host", "uri", "reason"]
+                    display_cols = [c for c in display_cols if c in df_uri.columns]
+                    render_export_buttons(
+                        df_uri[display_cols], "http_suspicious_uri", key_suffix="http_uri", is_dataframe=True
+                    )
+                    st.dataframe(df_uri[display_cols], width="stretch", hide_index=True)
+                else:
+                    st.caption("No suspicious URIs detected.")
+
+
 def render_tls_certificates(result_col, tls_analysis: dict | None):
     """Render TLS certificate analysis results."""
     with result_col:

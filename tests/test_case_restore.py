@@ -152,6 +152,21 @@ class TestRestoreAnalysisToSession:
         assert st.session_state["dns_analysis"] is None
         assert st.session_state["tls_analysis"] is None
 
+    def test_http_analysis_restored_from_features_stash(self):
+        """http_analysis has no dedicated Analysis column — it's stashed inside
+        features (mirroring how beacon_records is stashed, see app/api/queue.py)
+        and must be pulled back out on restore."""
+        analysis = _make_analysis(features={"flows": [], "http_analysis": {"total_requests": 3}})
+        _restore_analysis_to_session(analysis)
+        assert st.session_state["http_analysis"] == {"total_requests": 3}
+
+    def test_http_analysis_none_when_absent_from_features(self):
+        """A case saved before http_analysis existed (or via the UI quick-save
+        path, which doesn't stash it) must not surface stale/wrong data."""
+        analysis = _make_analysis()  # default features has no http_analysis key
+        _restore_analysis_to_session(analysis)
+        assert st.session_state["http_analysis"] is None
+
 
 class TestDetailViewAutoRestoreGuard:
     """The case-detail auto-restore must be a one-shot keyed on restored_analysis_id.

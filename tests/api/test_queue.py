@@ -349,6 +349,51 @@ def test_worker_persists_attack_mapping(tmp_path, monkeypatch):
     assert persisted.attack_mapping == mapping, "attack_mapping must be persisted on the Analysis row"
 
 
+def test_worker_http_analysis_round_trip(tmp_path, monkeypatch):
+    """http_analysis has no dedicated Analysis column — it must be stashed in
+    features['http_analysis'] (mirroring the beacon_records precedent) and
+    survive persistence."""
+    import app.pipeline.runner as runner_mod
+    from app.pipeline.runner import PipelineResult
+
+    http_analysis = {
+        "total_requests": 5,
+        "unique_hosts": 3,
+        "alerts": {"cleartext_cred_count": 1, "suspicious_ua_count": 0, "suspicious_uri_count": 0},
+        "cleartext_credentials": [{"host": "10.0.0.5", "uri": "/admin", "username": "admin"}],
+    }
+
+    def fake_run_pipeline(pcap_path, case_id, options, progress, heartbeat=None):
+        return PipelineResult(
+            case_id=case_id,
+            packet_count=1,
+            features={
+                "flows": [{"src": "10.0.0.1", "dst": "8.8.8.8", "proto": "TCP", "count": 9}],
+                "artifacts": {"ips": ["10.0.0.1", "8.8.8.8"], "domains": [], "urls": [], "hashes": [], "ja3": []},
+            },
+            http_analysis=dict(http_analysis),
+        )
+
+    # _worker_run imports run_pipeline from app.pipeline.runner at call time,
+    # so the patch must target the source module, not queue_mod.
+    monkeypatch.setattr(runner_mod, "run_pipeline", fake_run_pipeline)
+
+    fake_pcap = tmp_path / "fake.pcap"
+    fake_pcap.write_bytes(b"\xd4\xc3\xb2\xa1" + b"\x00" * 20)
+
+    db = str(tmp_path / "t.db")
+    repo = CaseRepository(db_path=db)
+    repo.create_case(Case(id="cafe0031", title="t", status=CaseStatus.IN_PROGRESS, severity=Severity.LOW))
+    job_id = repo.create_job(Job(case_id="cafe0031", pcap_path=str(fake_pcap), options_json="{}"))
+
+    _worker_run(job_id, db, str(fake_pcap), {"osint_enabled": False, "llm_enabled": False})
+
+    result = json.loads(repo.get_job(job_id).result_json)
+    assert result["analysis_id"], "persistence must succeed with the faked pipeline result"
+    persisted = repo.get_analysis(result["analysis_id"])
+    assert persisted.features["http_analysis"] == http_analysis
+
+
 # ---------------------------------------------------------------------------
 # Task 3: progress reconciliation on completion
 # ---------------------------------------------------------------------------

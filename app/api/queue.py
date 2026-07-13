@@ -186,6 +186,11 @@ def _persist_analysis(
         analysis.mitre_techniques = result.mitre_techniques
         if result.beacon_df_records:
             analysis.features["beacon_records"] = result.beacon_df_records
+        if result.http_analysis:
+            # Analysis has no dedicated http_analysis column — stash it in
+            # features (mirroring beacon_records above); features_json is
+            # compressed+persisted, and the UI restore path reads it back out.
+            analysis.features["http_analysis"] = result.http_analysis
         analysis.iocs = repo.extract_iocs(analysis)
         result.analysis_id = repo.save_analysis(analysis)
     except Exception:

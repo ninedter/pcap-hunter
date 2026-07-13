@@ -174,6 +174,19 @@ class TestPCAPResultShape:
         result = PCAPResult(path="/data/test.pcap", filename="test.pcap", attack_mapping=mapping)
         assert result.attack_mapping == mapping
 
+    def test_http_analysis_defaults_empty(self):
+        result = PCAPResult(path="/data/test.pcap", filename="test.pcap")
+        assert result.http_analysis == {}
+
+    def test_http_analysis_accepts_dict(self):
+        http_analysis = {
+            "total_requests": 5,
+            "unique_hosts": 3,
+            "alerts": {"cleartext_cred_count": 1, "suspicious_ua_count": 0, "suspicious_uri_count": 0},
+        }
+        result = PCAPResult(path="/data/test.pcap", filename="test.pcap", http_analysis=http_analysis)
+        assert result.http_analysis == http_analysis
+
 
 class TestMergeZeekTables:
     """Test merging Zeek tables from multiple PCAPs."""

@@ -86,6 +86,11 @@ def _restore_analysis_to_session(analysis: Analysis) -> None:
     st.session_state["osint"] = analysis.osint or {}
     st.session_state["dns_analysis"] = analysis.dns_analysis
     st.session_state["tls_analysis"] = analysis.tls_analysis
+    # http_analysis has no dedicated Analysis column — the API path stashes it
+    # inside features (mirroring beacon_records; see app/api/queue.py). Falls
+    # back to None (not {}) when absent, matching dns/tls_analysis's "didn't
+    # run" semantics rather than a false "ran clean".
+    st.session_state["http_analysis"] = features.get("http_analysis")
     st.session_state["yara_results"] = analysis.yara_results
     st.session_state["attack_mapping"] = analysis.attack_mapping or {}
     # Model default for report is "" but the app's no-report sentinel is None.

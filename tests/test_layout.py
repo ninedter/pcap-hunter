@@ -62,6 +62,109 @@ class TestRenderAttackMappingFromDict:
         assert not at.exception
 
 
+# Production-shape dict, as stored in st.session_state["http_analysis"]
+# (analyze_http() output from app/pipeline/http_analysis.py).
+PROD_HTTP_ANALYSIS_DICT = {
+    "total_requests": 7,
+    "unique_hosts": 5,
+    "methods": {"GET": 6, "POST": 1},
+    "status_codes": {"200": 6, "401": 1},
+    "suspicious_user_agents": [
+        {"host": "10.0.0.5", "user_agent": "", "uri": "/", "reason": "missing user-agent"},
+        {
+            "host": "10.0.0.6",
+            "user_agent": "python-requests/2.31",
+            "uri": "/api",
+            "reason": "known tool user-agent (python-requests)",
+        },
+    ],
+    "cleartext_credentials": [
+        {"host": "10.0.0.5", "uri": "/admin", "username": "admin"},
+    ],
+    "suspicious_uris": [
+        {"host": "10.0.0.7", "uri": "/payload.exe", "reason": "risky file extension (.exe)"},
+        {
+            "host": "203.0.113.9",
+            "uri": "/files/tool.dll",
+            "reason": "risky file extension (.dll); raw-IP host serving file download",
+        },
+        {"host": "10.0.0.8", "uri": "/" + "a" * 600, "reason": "long URI (605 chars)"},
+    ],
+    "alerts": {
+        "suspicious_ua_count": 2,
+        "cleartext_cred_count": 1,
+        "suspicious_uri_count": 3,
+    },
+}
+
+
+def _render_http_analysis_app():
+    import streamlit as st
+
+    from app.ui.layout import render_http_analysis
+
+    render_http_analysis(st.container(), st.session_state.get("http_analysis"))
+
+
+class TestRenderHttpAnalysis:
+    def test_production_shape_dict_renders_without_exception(self):
+        at = AppTest.from_function(_render_http_analysis_app, default_timeout=30)
+        at.session_state["http_analysis"] = PROD_HTTP_ANALYSIS_DICT
+        at.run()
+
+        assert not at.exception
+        expanders = [e for e in at.expander if "HTTP Analysis" in (e.label or "")]
+        assert expanders, "Raw Data tab should render an HTTP Analysis expander"
+        assert expanders[0].proto.expanded, "alerts present -> expander should default to expanded"
+
+    def test_none_shows_info_and_returns(self):
+        at = AppTest.from_function(_render_http_analysis_app, default_timeout=30)
+        at.session_state["http_analysis"] = None
+        at.run()
+
+        assert not at.exception
+        assert at.info, "None http_analysis should render an info message, not crash"
+
+    def test_skipped_shows_info(self):
+        at = AppTest.from_function(_render_http_analysis_app, default_timeout=30)
+        at.session_state["http_analysis"] = {"skipped": True}
+        at.run()
+
+        assert not at.exception
+        assert at.info
+
+    def test_error_shows_info(self):
+        at = AppTest.from_function(_render_http_analysis_app, default_timeout=30)
+        at.session_state["http_analysis"] = {"error": "No HTTP log data", "records": 0}
+        at.run()
+
+        assert not at.exception
+        assert at.info
+
+    def test_clean_run_no_alerts_not_expanded_and_shows_captions(self):
+        at = AppTest.from_function(_render_http_analysis_app, default_timeout=30)
+        at.session_state["http_analysis"] = {
+            "total_requests": 3,
+            "unique_hosts": 2,
+            "methods": {"GET": 3},
+            "status_codes": {"200": 3},
+            "suspicious_user_agents": [],
+            "cleartext_credentials": [],
+            "suspicious_uris": [],
+            "alerts": {"suspicious_ua_count": 0, "cleartext_cred_count": 0, "suspicious_uri_count": 0},
+        }
+        at.run()
+
+        assert not at.exception
+        expanders = [e for e in at.expander if "HTTP Analysis" in (e.label or "")]
+        assert expanders
+        assert not expanders[0].proto.expanded, "no alerts -> expander should default to collapsed"
+        captions = [c.value for c in at.caption]
+        assert any("No cleartext credentials" in c for c in captions)
+        assert any("No suspicious user-agents" in c for c in captions)
+        assert any("No suspicious URIs" in c for c in captions)
+
+
 def _make_assets(tmp_path, *names):
     for name in names:
         (tmp_path / name).write_bytes(b"\x89PNG")

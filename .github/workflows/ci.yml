@@ -82,3 +82,36 @@ jobs:
 
       - name: Audit dependencies
         run: pip-audit -r requirements.txt
+
+  docker:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    # Advisory only: the Dockerfile is the canonical deploy artifact (two
+    # Zeek OBS-repo installs, WeasyPrint/kaleido system libs, multi-stage
+    # builder->runtime->test) but the `test` job above never builds it, so a
+    # broken apt pin or requirements resolution failure would only surface
+    # when someone runs `make docker-build`. This job builds the `test`
+    # target and runs its suite, which also has real zeek installed (the
+    # `test` job above skips zeek-dependent e2e tests). It is deliberately
+    # NOT the required check — that stays `test`.
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build test-stage image (mirrors make docker-verify)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          target: test
+          tags: pcap-hunter:test
+          load: true
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Run in-image test suite (ruff format + lint + pytest, with real zeek)
+        run: docker run --rm pcap-hunter:test

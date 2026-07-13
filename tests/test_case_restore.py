@@ -161,8 +161,8 @@ class TestRestoreAnalysisToSession:
         assert st.session_state["http_analysis"] == {"total_requests": 3}
 
     def test_http_analysis_none_when_absent_from_features(self):
-        """A case saved before http_analysis existed (or via the UI quick-save
-        path, which doesn't stash it) must not surface stale/wrong data."""
+        """A case saved before http_analysis existed (its features dict has no
+        such key) must not surface stale/wrong data."""
         analysis = _make_analysis()  # default features has no http_analysis key
         _restore_analysis_to_session(analysis)
         assert st.session_state["http_analysis"] is None

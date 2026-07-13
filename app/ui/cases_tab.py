@@ -65,6 +65,36 @@ def _session_mitre_techniques() -> list[str]:
     ]
 
 
+def _session_analysis_features() -> dict:
+    """Build the ``features`` dict for a UI-saved ``Analysis``, stashing http_analysis/beacon_records.
+
+    Mirrors how ``app/api/queue.py:_persist_analysis`` stashes
+    ``result.http_analysis`` and ``result.beacon_df_records`` into
+    ``result.features`` before saving -- ``Analysis`` has no dedicated column
+    for either, and the case-restore path (``_restore_analysis_to_session``)
+    reads them back out of ``features``. Without this, a case saved through
+    the UI's manual-save paths (``_quick_save_analysis`` /
+    ``_add_current_analysis_to_case``) would lose its HTTP findings
+    (cleartext creds / suspicious UA / suspicious URIs) and beacon records on
+    restore, even though the API-saved path keeps them.
+
+    Returns a shallow copy of ``st.session_state["features"]`` -- the live
+    session dict is never mutated in place, since it may still be read by
+    other code in the same rerun.
+
+    Returns:
+        A features dict with ``http_analysis`` and ``beacon_records`` set
+        from session state (``None``/``[]`` respectively when absent).
+    """
+    features = dict(st.session_state.get("features") or {})
+    features["http_analysis"] = st.session_state.get("http_analysis")
+    beacon_df = st.session_state.get("beacon_df")
+    features["beacon_records"] = (
+        beacon_df.to_dict("records") if isinstance(beacon_df, pd.DataFrame) and not beacon_df.empty else []
+    )
+    return features
+
+
 def _restore_analysis_to_session(analysis: Analysis) -> None:
     """Load a saved analysis back into session state for the Dashboard/Results tabs.
 
@@ -623,7 +653,7 @@ def _quick_save_analysis():
         case_id=case_id,
         pcap_path=st.session_state.get("__pcap_path", ""),
         packet_count=st.session_state.get("__total_pkts", 0),
-        features=features,
+        features=_session_analysis_features(),
         osint=st.session_state.get("osint") or {},
         report=st.session_state.get("report") or "",
         yara_results=st.session_state.get("yara_results"),
@@ -658,7 +688,7 @@ def _add_current_analysis_to_case(case: Case):
         case_id=case.id,
         pcap_path=st.session_state.get("__pcap_path", ""),
         packet_count=st.session_state.get("__total_pkts", 0),
-        features=features,
+        features=_session_analysis_features(),
         osint=st.session_state.get("osint") or {},
         report=st.session_state.get("report") or "",
         yara_results=st.session_state.get("yara_results"),

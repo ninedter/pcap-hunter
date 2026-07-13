@@ -181,11 +181,11 @@ def test_streamlit_to_options_mapping():
 
 
 def test_stages_4_to_7_run_concurrently(monkeypatch, tmp_path):
-    """Stages 4 (DNS), 5 (TLS), 6 (beacon), 7 (carve) must overlap in time.
+    """Stages 4 (DNS), 5 (TLS), HTTP, 6 (beacon), 7 (carve) must overlap in time.
 
     All upstream stages are stubbed so only the post-parse fan-out is exercised.
-    Each of the four stage functions increments a lock-protected counter, sleeps,
-    then decrements — if they run sequentially the observed max concurrency is 1.
+    Each stage function increments a lock-protected counter, sleeps, then
+    decrements — if they run sequentially the observed max concurrency is 1.
     """
     import threading
     import time
@@ -238,6 +238,7 @@ def test_stages_4_to_7_run_concurrently(monkeypatch, tmp_path):
 
     monkeypatch.setattr(R, "analyze_dns", _tracked({}))
     monkeypatch.setattr(R, "analyze_certificates", _tracked({}))
+    monkeypatch.setattr(R, "analyze_http", _tracked({}))
     monkeypatch.setattr(R, "rank_beaconing", _tracked(pd.DataFrame()))
     monkeypatch.setattr(R, "carve_http_payloads", _tracked([]))
 
@@ -248,17 +249,19 @@ def test_stages_4_to_7_run_concurrently(monkeypatch, tmp_path):
         progress=CallbackProgress(callback=lambda _e: None, total_phases=0),
     )
 
-    for stage in ("dns_analysis", "tls_certs", "beacon", "carve"):
+    for stage in ("dns_analysis", "tls_certs", "http_analysis", "beacon", "carve"):
         assert stage in result.stages_run, f"{stage} did not run"
     assert state["max"] >= 2, f"stages 4-7 ran sequentially (max concurrency observed: {state['max']})"
 
 
 def test_stage_order_deterministic_and_carve_hashes_backfilled(monkeypatch, tmp_path):
-    """stages_run keeps the canonical dns→tls→beacon→carve order and carve hashes land in features.
+    """stages_run keeps the canonical dns→tls→http→beacon→carve order and carve hashes land in features.
 
     Regression guard for the fan-out: workers record outcomes per stage, the main
     thread assembles stages_run in canonical order and backfills carved sha256
-    hashes into features["artifacts"]["hashes"] after the join.
+    hashes into features["artifacts"]["hashes"] after the join. HTTP analysis runs
+    on the same gate as DNS/TLS (Zeek ran + non-empty zeek_tables), so it appears
+    in the canonical order even though this fixture's zeek_tables carries no http.log.
     """
     import pandas as pd
 
@@ -293,6 +296,7 @@ def test_stage_order_deterministic_and_carve_hashes_backfilled(monkeypatch, tmp_
     monkeypatch.setattr(R, "merge_zeek_dns", lambda zt, f: f)
     monkeypatch.setattr(R, "analyze_dns", lambda *a, **kw: {})
     monkeypatch.setattr(R, "analyze_certificates", lambda *a, **kw: {})
+    monkeypatch.setattr(R, "analyze_http", lambda *a, **kw: {})
     monkeypatch.setattr(R, "rank_beaconing", lambda *a, **kw: pd.DataFrame())
     monkeypatch.setattr(R, "carve_http_payloads", lambda *a, **kw: [{"sha256": carved_sha, "path": "x"}])
 
@@ -303,10 +307,189 @@ def test_stage_order_deterministic_and_carve_hashes_backfilled(monkeypatch, tmp_
         progress=CallbackProgress(callback=lambda _e: None, total_phases=0),
     )
 
-    canonical = ["dns_analysis", "tls_certs", "beacon", "carve"]
+    canonical = ["dns_analysis", "tls_certs", "http_analysis", "beacon", "carve"]
     observed = [s for s in result.stages_run if s in set(canonical)]
     assert observed == canonical, f"stage order not deterministic: {result.stages_run}"
     assert carved_sha in result.features["artifacts"]["hashes"], "carve sha256 backfill missing post-join"
+
+
+def test_http_analysis_stage_wired_into_runner(monkeypatch, tmp_path):
+    """The HTTP analysis stage runs when Zeek ran and its result lands on
+    PipelineResult.http_analysis, stages_run, and to_dict(). It reads the uncapped
+    on-disk http.log path (zeek_log_paths["http.log"]), not the capped table."""
+    import pandas as pd
+
+    import app.pipeline.runner as R
+    from app.pipeline.progress import CallbackProgress
+    from app.pipeline.runner import PipelineOptions, run_pipeline
+
+    pcap = tmp_path / "fake.pcap"
+    pcap.write_bytes(b"")
+
+    http_log_path = str(tmp_path / "http.log")
+    seen_paths: list[str | None] = []
+
+    def _fake_analyze_http(zeek_tables, http_log_path=None, phase=None):
+        seen_paths.append(http_log_path)
+        return {"total_requests": 3}
+
+    monkeypatch.setattr(R, "run_zeek", lambda p, d, phase=None: {"http.log": http_log_path})
+    monkeypatch.setattr(R, "load_zeek_any", lambda p: pd.DataFrame({"host": ["evil.example"]}))
+    monkeypatch.setattr(R, "merge_zeek_dns", lambda zt, f: f)
+    monkeypatch.setattr(R, "analyze_http", _fake_analyze_http)
+
+    result = run_pipeline(
+        pcap_path=str(pcap),
+        case_id="http_test",
+        options=PipelineOptions(
+            osint_enabled=False,
+            llm_enabled=False,
+            do_pyshark=False,
+            do_zeek=True,
+            do_carve=False,
+            do_yara=False,
+            pre_count=False,
+        ),
+        progress=CallbackProgress(callback=lambda _e: None, total_phases=0),
+    )
+
+    assert "http_analysis" in result.stages_run
+    assert result.http_analysis == {"total_requests": 3}
+    assert seen_paths == [http_log_path], "analyze_http must receive the uncapped on-disk http.log path"
+
+    serialized = result.to_dict()
+    assert serialized["http_analysis"] == {"total_requests": 3}
+
+
+def test_http_analysis_stage_runs_and_skips_when_no_http_log(monkeypatch, tmp_path):
+    """On an all-HTTPS / DNS-only capture (Zeek ran, no http.log), the HTTP stage
+    still runs — mirroring DNS/TLS — so the UI phase always starts and completes.
+
+    The gate is `do_zeek and zeek_tables` (identical to DNS/TLS), NOT
+    `"http.log" in zeek_tables`; a tighter gate would leave the registered
+    "HTTP Analysis" phase uncreated and the Overall progress bar stuck below 100%.
+    analyze_http runs here with http_log_path=None (no http.log key) and returns
+    {"skipped": True}, so http_analysis appears in stages_run with a skipped result.
+    """
+    import pandas as pd
+
+    import app.pipeline.runner as R
+    from app.pipeline.progress import CallbackProgress
+    from app.pipeline.runner import PipelineOptions, run_pipeline
+
+    pcap = tmp_path / "fake.pcap"
+    pcap.write_bytes(b"")
+
+    seen_paths: list[str | None] = []
+
+    def _fake_analyze_http(zeek_tables, http_log_path=None, phase=None):
+        seen_paths.append(http_log_path)
+        return {"skipped": True}
+
+    monkeypatch.setattr(R, "run_zeek", lambda p, d, phase=None: {"dns.log": str(tmp_path / "d.log")})
+    monkeypatch.setattr(R, "load_zeek_any", lambda p: pd.DataFrame({"query": ["a.com"]}))
+    monkeypatch.setattr(R, "merge_zeek_dns", lambda zt, f: f)
+    monkeypatch.setattr(R, "analyze_dns", lambda *a, **kw: {})
+    monkeypatch.setattr(R, "analyze_http", _fake_analyze_http)
+
+    result = run_pipeline(
+        pcap_path=str(pcap),
+        case_id="http_skip_test",
+        options=PipelineOptions(
+            osint_enabled=False,
+            llm_enabled=False,
+            do_pyshark=False,
+            do_zeek=True,
+            do_carve=False,
+            do_yara=False,
+            pre_count=False,
+        ),
+        progress=CallbackProgress(callback=lambda _e: None, total_phases=0),
+    )
+
+    assert "http_analysis" in result.stages_run, "HTTP phase must run whenever Zeek ran (DNS/TLS parity)"
+    assert result.http_analysis == {"skipped": True}
+    assert seen_paths == [None], "analyze_http should receive http_log_path=None when no http.log was produced"
+
+
+def test_http_analysis_stage_not_scheduled_without_zeek_tables(monkeypatch, tmp_path):
+    """The HTTP stage must NOT run when the gate is false — i.e. Zeek produced no
+    logs at all (empty zeek_tables). It shares DNS/TLS's gate, so it is dormant in
+    exactly the same conditions they are."""
+    import app.pipeline.runner as R
+    from app.pipeline.progress import CallbackProgress
+    from app.pipeline.runner import PipelineOptions, run_pipeline
+
+    pcap = tmp_path / "fake.pcap"
+    pcap.write_bytes(b"")
+
+    def _boom(*args, **kwargs):
+        raise AssertionError("analyze_http must not run when zeek_tables is empty")
+
+    # Zeek runs but yields no logs → empty zeek_tables → dns/tls/http all dormant.
+    monkeypatch.setattr(R, "run_zeek", lambda p, d, phase=None: {})
+    monkeypatch.setattr(R, "merge_zeek_dns", lambda zt, f: f)
+    monkeypatch.setattr(R, "analyze_http", _boom)
+
+    result = run_pipeline(
+        pcap_path=str(pcap),
+        case_id="http_gate_test",
+        options=PipelineOptions(
+            osint_enabled=False,
+            llm_enabled=False,
+            do_pyshark=False,
+            do_zeek=True,
+            do_carve=False,
+            do_yara=False,
+            pre_count=False,
+        ),
+        progress=CallbackProgress(callback=lambda _e: None, total_phases=0),
+    )
+
+    assert "http_analysis" not in result.stages_run
+    assert "dns_analysis" not in result.stages_run  # same gate — both dormant
+    assert result.http_analysis == {}
+    assert result.to_dict()["http_analysis"] == {}
+
+
+def test_http_analysis_failure_recorded_as_warning(monkeypatch, tmp_path):
+    """An exception inside the HTTP stage must be recorded as a warning, not raised."""
+    import pandas as pd
+
+    import app.pipeline.runner as R
+    from app.pipeline.progress import CallbackProgress
+    from app.pipeline.runner import PipelineOptions, run_pipeline
+
+    pcap = tmp_path / "fake.pcap"
+    pcap.write_bytes(b"")
+
+    monkeypatch.setattr(R, "run_zeek", lambda p, d, phase=None: {"http.log": str(tmp_path / "http.log")})
+    monkeypatch.setattr(R, "load_zeek_any", lambda p: pd.DataFrame({"host": ["evil.example"]}))
+    monkeypatch.setattr(R, "merge_zeek_dns", lambda zt, f: f)
+
+    def _raise(*args, **kwargs):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(R, "analyze_http", _raise)
+
+    result = run_pipeline(
+        pcap_path=str(pcap),
+        case_id="http_fail_test",
+        options=PipelineOptions(
+            osint_enabled=False,
+            llm_enabled=False,
+            do_pyshark=False,
+            do_zeek=True,
+            do_carve=False,
+            do_yara=False,
+            pre_count=False,
+        ),
+        progress=CallbackProgress(callback=lambda _e: None, total_phases=0),
+    )
+
+    assert "http_analysis" not in result.stages_run
+    assert R.WARNING_HTTP_ANALYSIS_FAILED in result.warnings
+    assert result.http_analysis == {}
 
 
 def _stub_stage_dirs(monkeypatch, tmp_path, zeek_logs=None):
@@ -341,6 +524,7 @@ def _stub_stage_dirs(monkeypatch, tmp_path, zeek_logs=None):
     monkeypatch.setattr(R, "merge_zeek_dns", lambda zt, f: f)
     monkeypatch.setattr(R, "analyze_dns", lambda *a, **kw: {})
     monkeypatch.setattr(R, "analyze_certificates", lambda *a, **kw: {})
+    monkeypatch.setattr(R, "analyze_http", lambda *a, **kw: {})
     monkeypatch.setattr(R, "carve_http_payloads", _fake_carve)
     return captured
 

@@ -38,6 +38,7 @@ from app import config as C
 from app.pipeline.beacon import rank_beaconing
 from app.pipeline.carve import CarveError, carve_http_payloads
 from app.pipeline.dns_analysis import analyze_dns
+from app.pipeline.http_analysis import analyze_http
 from app.pipeline.pcap_count import count_packets_fast
 from app.pipeline.progress import Progress
 from app.pipeline.pyshark_pass import parse_pcap_pyshark
@@ -56,6 +57,7 @@ WARNING_ZEEK_FAILED = "zeek_failed"
 WARNING_ZEEK_NO_LOGS = "zeek_no_logs"
 WARNING_DNS_ANALYSIS_FAILED = "dns_analysis_failed"
 WARNING_TLS_CERTS_FAILED = "tls_certs_failed"
+WARNING_HTTP_ANALYSIS_FAILED = "http_analysis_failed"
 WARNING_BEACON_FAILED = "beacon_failed"
 WARNING_CARVE_FAILED = "carve_failed"
 WARNING_ZEEK_TRUNCATED = "zeek_tables_truncated"
@@ -123,6 +125,7 @@ class PipelineResult:
     attack_mapping: dict = field(default_factory=dict)
     dns_analysis: dict = field(default_factory=dict)
     tls_analysis: dict = field(default_factory=dict)
+    http_analysis: dict = field(default_factory=dict)
     beacon_df_records: list[dict] = field(default_factory=list)
 
     # Intermediate state — available to callers (e.g. Streamlit) that need to run
@@ -148,6 +151,7 @@ class PipelineResult:
             "attack_mapping": dict(self.attack_mapping),
             "dns_analysis": dict(self.dns_analysis),
             "tls_analysis": dict(self.tls_analysis),
+            "http_analysis": dict(self.http_analysis),
             "beacon_df_records": list(self.beacon_df_records),
         }
 
@@ -165,10 +169,11 @@ def run_pipeline(
     Stages 2 (PyShark) and 3 (Zeek) run concurrently via ThreadPoolExecutor when both
     are enabled — they're I/O-bound subprocesses against the same pcap and independent
     until the merge step.  After that join, stages 4–7 (DNS, TLS, beaconing, carving)
-    fan out into a second ThreadPoolExecutor — they are mutually independent, and the
-    main thread assembles ``stages_run``/``warnings`` in canonical order after the join
-    so the output stays deterministic.  Each stage is gated by its corresponding
-    ``PipelineOptions`` flag. Failures in individual stages are recorded in
+    plus HTTP analysis (gated on http.log being present) fan out into a second
+    ThreadPoolExecutor — they are mutually independent, and the main thread assembles
+    ``stages_run``/``warnings`` in canonical order after the join so the output stays
+    deterministic.  Each stage is gated by its corresponding ``PipelineOptions`` flag.
+    Failures in individual stages are recorded in
     ``result.warnings`` rather than aborting the run.
     """
     start = time.time()
@@ -197,6 +202,7 @@ def run_pipeline(
     total_pkts: int | None = None
     dns_result: dict = {}
     tls_result: dict = {}
+    http_result: dict = {}
     beacon_records: list[dict] = []
     carved: list[dict] = []
 
@@ -301,13 +307,14 @@ def run_pipeline(
         except Exception as exc:
             logger.warning("merge_zeek_dns failed: %s", exc)
 
-    # --- Stages 4-7: post-parse analysis fan-out ---
-    # DNS + TLS read zeek_tables; beacon reads features["flows"]; carve reads only the
-    # pcap. They are mutually independent, so run them concurrently. Phase handles are
-    # created on the main thread (Streamlit ScriptRunContext requirement) — workers only
-    # call set()/done(). Workers never mutate shared state: each writes its own key in
+    # --- Stages 4-7 (+ HTTP analysis): post-parse analysis fan-out ---
+    # DNS + TLS + HTTP read zeek_tables (HTTP only runs when http.log is present);
+    # beacon reads features["flows"]; carve reads only the pcap. They are mutually
+    # independent, so run them concurrently. Phase handles are created on the main
+    # thread (Streamlit ScriptRunContext requirement) — workers only call
+    # set()/done(). Workers never mutate shared state: each writes its own key in
     # `outcomes`, and the carve hash-backfill happens after the join.
-    canonical = ("dns_analysis", "tls_certs", "beacon", "carve")
+    canonical = ("dns_analysis", "tls_certs", "http_analysis", "beacon", "carve")
     outcomes: dict[str, dict] = {}
 
     def _run_dns(h) -> None:
@@ -329,6 +336,17 @@ def run_pipeline(
             logger.error("TLS analysis failed: %s", exc)
             outcomes.setdefault("tls_certs", {"warning": WARNING_TLS_CERTS_FAILED})
             h.done("TLS analysis failed.")
+
+    def _run_http(h) -> None:
+        try:
+            outcomes["http_analysis"] = {
+                "result": analyze_http(zeek_tables, http_log_path=zeek_log_paths.get("http.log"), phase=h) or {}
+            }
+            h.done("HTTP analysis complete.")
+        except Exception as exc:
+            logger.error("HTTP analysis failed: %s", exc)
+            outcomes.setdefault("http_analysis", {"warning": WARNING_HTTP_ANALYSIS_FAILED})
+            h.done("HTTP analysis failed.")
 
     def _run_beacon(h) -> None:
         try:
@@ -366,6 +384,12 @@ def run_pipeline(
     if options.do_zeek and zeek_tables:
         jobs.append((_run_dns, progress.start_phase("DNS Analysis")))
         jobs.append((_run_tls, progress.start_phase("TLS Certificate Analysis")))
+        # Same gate as DNS/TLS (not "http.log" in zeek_tables): the phase must always
+        # run when Zeek ran so the UI's total_phases denominator matches the phases
+        # actually started. analyze_http reads the uncapped http.log when present and
+        # returns {"skipped": True} on all-HTTPS / DNS-only captures — mirroring how
+        # DNS/TLS run and return empty/skipped when their log is absent.
+        jobs.append((_run_http, progress.start_phase("HTTP Analysis")))
     if features.get("flows"):
         jobs.append((_run_beacon, progress.start_phase("Beaconing ranking")))
     if options.do_carve:
@@ -391,6 +415,8 @@ def run_pipeline(
             dns_result = out["result"]
         elif name == "tls_certs":
             tls_result = out["result"]
+        elif name == "http_analysis":
+            http_result = out["result"]
         elif name == "beacon":
             beacon_records = out["result"]
         elif name == "carve":
@@ -436,6 +462,7 @@ def run_pipeline(
         attack_mapping=attack_mapping_dict,
         dns_analysis=dns_result,
         tls_analysis=tls_result,
+        http_analysis=http_result,
         beacon_df_records=beacon_records,
         features=features,
         zeek_tables=zeek_tables,

@@ -326,6 +326,7 @@ for k, v in [
     ("runtime_logs", []),
     ("map_reset_counter", 0),
     ("dns_analysis", None),
+    ("http_analysis", None),
     ("tls_analysis", None),
     ("yara_results", None),
     ("correlations", None),
@@ -440,6 +441,7 @@ with tab_upload:
         ("Zeek processing", do_zeek),
         ("DNS Analysis", do_zeek),  # Requires Zeek dns.log
         ("TLS Certificate Analysis", do_zeek),  # Requires Zeek ssl.log
+        ("HTTP Analysis", do_zeek),  # Requires Zeek http.log
         ("Beaconing ranking", True),
         ("HTTP carving (tshark)", do_carve),
         ("YARA Scanning", do_carve and do_yara),  # Requires carved files
@@ -465,6 +467,7 @@ with tab_upload:
                 "__pcap_path": pcap_path,
                 "__pcap_paths": pcap_paths or [pcap_path],
                 "dns_analysis": None,
+                "http_analysis": None,
                 "tls_analysis": None,
                 "yara_results": None,
                 "correlations": None,
@@ -534,6 +537,7 @@ with tab_progress:
             ("Zeek processing", do_zeek),
             ("DNS Analysis", do_zeek),
             ("TLS Certificate Analysis", do_zeek),
+            ("HTTP Analysis", do_zeek),
             ("Beaconing ranking", True),
             ("HTTP carving (tshark)", do_carve),
             ("YARA Scanning", do_carve and do_yara),

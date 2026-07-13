@@ -82,6 +82,7 @@ def _restore_analysis_to_session(analysis: Analysis) -> None:
     st.session_state["correlations"] = None
     st.session_state["flow_asymmetry"] = None
     st.session_state["port_anomalies"] = None
+    st.session_state["attack_timeline"] = []
     st.session_state["rdns_map"] = {}
     st.session_state["filter_ips"] = set()
     st.session_state["filter_protos"] = set()

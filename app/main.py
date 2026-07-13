@@ -467,6 +467,7 @@ with tab_upload:
                 "correlations": None,
                 "flow_asymmetry": None,
                 "port_anomalies": None,
+                "attack_timeline": [],
                 "__batch_result": None,
             }
         )
@@ -667,6 +668,23 @@ with tab_progress:
             except Exception as e:
                 logger.warning("Post-analysis failed: %s", e)
 
+            try:
+                from app.analysis.narrator import AttackNarrator
+
+                _timeline = AttackNarrator().create_timeline(
+                    features=st.session_state.get("features"),
+                    dns_analysis=st.session_state.get("dns_analysis"),
+                    yara_results=st.session_state.get("yara_results"),
+                    beacon_results=(
+                        get_df_state("beacon_df").to_dict("records") if not get_df_state("beacon_df").empty else []
+                    ),
+                    tls_analysis=st.session_state.get("tls_analysis"),
+                )
+                st.session_state["attack_timeline"] = [e.to_dict() for e in _timeline]
+            except Exception as e:
+                logger.debug("timeline precompute failed: %s", e)
+                st.session_state["attack_timeline"] = []
+
             batch_tracker.finish_all(
                 f"Batch complete: {batch_result.summary['successful']}/{batch_result.summary['total_files']} files."
             )
@@ -740,6 +758,23 @@ with tab_progress:
                     st.session_state["port_anomalies"] = detect_port_anomalies(features["flows"])
             except Exception as e:
                 logger.warning("Post-analysis failed: %s", e)
+
+            try:
+                from app.analysis.narrator import AttackNarrator
+
+                _timeline = AttackNarrator().create_timeline(
+                    features=st.session_state.get("features"),
+                    dns_analysis=st.session_state.get("dns_analysis"),
+                    yara_results=st.session_state.get("yara_results"),
+                    beacon_results=(
+                        get_df_state("beacon_df").to_dict("records") if not get_df_state("beacon_df").empty else []
+                    ),
+                    tls_analysis=st.session_state.get("tls_analysis"),
+                )
+                st.session_state["attack_timeline"] = [e.to_dict() for e in _timeline]
+            except Exception as e:
+                logger.debug("timeline precompute failed: %s", e)
+                st.session_state["attack_timeline"] = []
 
         # ---- LLM REPORT (shared for single & batch) ----
         features = st.session_state.get("features") or {}
@@ -1249,29 +1284,16 @@ with tab_dashboard:
                 st.plotly_chart(fig, use_container_width=True)
                 render_chart_hint("Node size = connections. Color: blue=low, red=high threat.")
 
-    # Attack timeline (full-width, if available)
-    try:
-        from app.analysis.narrator import AttackNarrator
-
-        narrator = AttackNarrator()
-        timeline = narrator.create_timeline(
-            features=feats,
-            dns_analysis=st.session_state.get("dns_analysis"),
-            yara_results=st.session_state.get("yara_results"),
-            beacon_results=(
-                get_df_state("beacon_df").to_dict("records") if not get_df_state("beacon_df").empty else []
-            ),
-            tls_analysis=st.session_state.get("tls_analysis"),
+    # Attack timeline (full-width, if available) — stored at pipeline-completion
+    # time (see post-analysis blocks above) so it survives without needing to
+    # recompute here, and so the PDF report can reuse the same data.
+    timeline_dicts = st.session_state.get("attack_timeline") or []
+    if timeline_dicts:
+        st.plotly_chart(
+            plot_attack_timeline(timeline_dicts),
+            use_container_width=True,
         )
-        if timeline:
-            timeline_dicts = [e.to_dict() for e in timeline]
-            st.plotly_chart(
-                plot_attack_timeline(timeline_dicts),
-                use_container_width=True,
-            )
-            render_chart_hint("Diamond markers show events by severity and time.")
-    except Exception as e:
-        logger.debug("chart rendering failed: %s", e)
+        render_chart_hint("Diamond markers show events by severity and time.")
 
     # --- Traffic profiling charts ---
     if filtered_flows:

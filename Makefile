@@ -29,7 +29,7 @@ check-deps doctor:
 # -------------------------------------------------------------------------
 
 test:
-	PYTHONPATH=. pytest tests/ -v --cov=app
+	PYTHONPATH=. pytest tests/ -v --cov=app --cov-report=term-missing --cov-fail-under=58
 
 # Focused smoke test: PDF generation with charts + correlations + beacon DF.
 # Run this after any change to pdf_generator.py, chart_images.py, main.py

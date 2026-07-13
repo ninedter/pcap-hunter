@@ -137,6 +137,55 @@ def test_iocs_stix_bundle(client):
     assert any(o.get("type") == "indicator" for o in objs)
 
 
+def test_iocs_stix_md5_hash_type(client):
+    """An MD5-length hash IOC must emit file:hashes.MD5, not the hardcoded SHA-256."""
+    from app.api.deps import get_repo
+
+    md5_value = "c0" * 16  # 32 hex chars -> MD5
+    repo = get_repo()
+    case = Case(id="case0005", title="md5")
+    repo.create_case(case)
+    repo.save_analysis(
+        Analysis(
+            case_id=case.id,
+            pcap_path="/tmp/md5.pcap",
+            iocs=[IOC(ioc_type=IOCType.HASH, value=md5_value)],
+        )
+    )
+
+    r = client.get("/api/v1/iocs.stix", headers={"Authorization": "Bearer FEED"})
+    assert r.status_code == 200
+    body = r.json()
+    matching = [o["pattern"] for o in body["objects"] if o.get("type") == "indicator" and md5_value in o["pattern"]]
+    assert matching, "expected an indicator pattern for the MD5 IOC"
+    assert "file:hashes.MD5" in matching[0]
+    assert "SHA-256" not in matching[0]
+
+
+def test_iocs_stix_ja3_not_dropped(client):
+    """JA3 rows must be emitted, not silently dropped."""
+    from app.api.deps import get_repo
+
+    ja3_value = "e" * 32
+    repo = get_repo()
+    case = Case(id="case0006", title="ja3")
+    repo.create_case(case)
+    repo.save_analysis(
+        Analysis(
+            case_id=case.id,
+            pcap_path="/tmp/ja3.pcap",
+            iocs=[IOC(ioc_type=IOCType.JA3, value=ja3_value)],
+        )
+    )
+
+    r = client.get("/api/v1/iocs.stix", headers={"Authorization": "Bearer FEED"})
+    assert r.status_code == 200
+    body = r.json()
+    matching = [o["pattern"] for o in body["objects"] if o.get("type") == "indicator" and ja3_value in o["pattern"]]
+    assert matching, "expected a JA3 indicator pattern, but it was dropped"
+    assert "x509-certificate" in matching[0]
+
+
 # ── Pagination ──────────────────────────────────────────────────────────────
 
 

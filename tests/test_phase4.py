@@ -587,6 +587,57 @@ def test_generate_stix_filename():
 
 
 # =============================================================================
+# Module-level ioc_to_stix_pattern / stix_hash_property (shared helper)
+# =============================================================================
+
+
+def test_ioc_to_stix_pattern_hash_types():
+    from app.utils.stix_export import ioc_to_stix_pattern
+
+    assert ioc_to_stix_pattern("hash", "a" * 32) == "[file:hashes.MD5 = '" + "a" * 32 + "']"
+    assert ioc_to_stix_pattern("hash", "b" * 40).startswith("[file:hashes.'SHA-1'")
+    assert ioc_to_stix_pattern("hash", "c" * 64).startswith("[file:hashes.'SHA-256'")
+    assert ioc_to_stix_pattern("hash", "d" * 128).startswith("[file:hashes.'SHA-512'")
+
+
+def test_ioc_to_stix_pattern_hash_unknown_length_is_none():
+    from app.utils.stix_export import ioc_to_stix_pattern
+
+    assert ioc_to_stix_pattern("hash", "deadbeef") is None
+
+
+def test_ioc_to_stix_pattern_ipv6_and_ja3():
+    from app.utils.stix_export import ioc_to_stix_pattern
+
+    assert ioc_to_stix_pattern("ip", "2001:db8::1").startswith("[ipv6-addr")
+    assert ioc_to_stix_pattern("ip", "1.2.3.4").startswith("[ipv4-addr")
+    assert ioc_to_stix_pattern("ja3", "d" * 32).startswith("[x509-certificate")
+
+
+def test_ioc_to_stix_pattern_escapes_backslash_before_quote():
+    from app.utils.stix_export import ioc_to_stix_pattern
+
+    pattern = ioc_to_stix_pattern("domain", r"weird\'value")
+    assert pattern == r"[domain-name:value = 'weird\\\'value']"
+
+
+def test_ioc_to_stix_pattern_unknown_type_is_none():
+    from app.utils.stix_export import ioc_to_stix_pattern
+
+    assert ioc_to_stix_pattern("bogus", "x") is None
+
+
+def test_stix_hash_property():
+    from app.utils.stix_export import stix_hash_property
+
+    assert stix_hash_property("a" * 32) == "MD5"
+    assert stix_hash_property("a" * 40) == "'SHA-1'"
+    assert stix_hash_property("a" * 64) == "'SHA-256'"
+    assert stix_hash_property("a" * 128) == "'SHA-512'"
+    assert stix_hash_property("a" * 10) is None
+
+
+# =============================================================================
 # Q&A Tests
 # =============================================================================
 

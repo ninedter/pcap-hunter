@@ -218,14 +218,6 @@ def _to_stix_bundle(rows: list[dict]) -> dict:
 
 
 def _row_to_stix_pattern(r: dict) -> str | None:
-    t = r["type"]
-    v = r["value"].replace("'", "\\'")
-    if t == "ip":
-        return f"[ipv4-addr:value = '{v}']"
-    if t == "domain":
-        return f"[domain-name:value = '{v}']"
-    if t == "url":
-        return f"[url:value = '{v}']"
-    if t == "hash":
-        return f"[file:hashes.'SHA-256' = '{v}']"
-    return None
+    from app.utils.stix_export import ioc_to_stix_pattern
+
+    return ioc_to_stix_pattern(r["type"], r["value"])

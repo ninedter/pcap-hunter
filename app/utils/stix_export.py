@@ -19,6 +19,29 @@ def _escape_stix_value(value: str) -> str:
     return value.replace("\\", "\\\\").replace("'", "\\'")
 
 
+def stix_hash_property(value: str) -> str | None:
+    """STIX hash property name from hex-digest length. None if unrecognized."""
+    return {32: "MD5", 40: "'SHA-1'", 64: "'SHA-256'", 128: "'SHA-512'"}.get(len(value))
+
+
+def ioc_to_stix_pattern(ioc_type: str, value: str) -> str | None:
+    """Build a STIX 2.1 comparison-expression pattern for an IOC. None if unmappable."""
+    escaped = _escape_stix_value(value)
+    if ioc_type == "ip":
+        kind = "ipv6-addr" if ":" in value else "ipv4-addr"
+        return f"[{kind}:value = '{escaped}']"
+    if ioc_type == "domain":
+        return f"[domain-name:value = '{escaped}']"
+    if ioc_type == "url":
+        return f"[url:value = '{escaped}']"
+    if ioc_type == "hash":
+        prop = stix_hash_property(value)
+        return f"[file:hashes.{prop} = '{escaped}']" if prop else None
+    if ioc_type == "ja3":
+        return f"[x509-certificate:hashes.'JA3' = '{escaped}']"
+    return None
+
+
 # Try to import stix2 library
 try:
     import stix2
@@ -82,32 +105,7 @@ class STIXExporter:
 
     def _ioc_to_pattern(self, ioc: "IOCRecord") -> str | None:
         """Convert IOC to STIX pattern."""
-        escaped = _escape_stix_value(ioc.value)
-        if ioc.ioc_type == "ip":
-            # Check if IPv6
-            if ":" in ioc.value:
-                return f"[ipv6-addr:value = '{escaped}']"
-            return f"[ipv4-addr:value = '{escaped}']"
-        elif ioc.ioc_type == "domain":
-            return f"[domain-name:value = '{escaped}']"
-        elif ioc.ioc_type == "hash":
-            # Determine hash type by length
-            hash_len = len(ioc.value)
-            if hash_len == 32:
-                return f"[file:hashes.MD5 = '{escaped}']"
-            elif hash_len == 40:
-                return f"[file:hashes.'SHA-1' = '{escaped}']"
-            elif hash_len == 64:
-                return f"[file:hashes.'SHA-256' = '{escaped}']"
-            elif hash_len == 128:
-                return f"[file:hashes.'SHA-512' = '{escaped}']"
-        elif ioc.ioc_type == "url":
-            return f"[url:value = '{escaped}']"
-        elif ioc.ioc_type == "ja3":
-            # JA3 as x509 extension (non-standard but useful)
-            return f"[x509-certificate:hashes.'JA3' = '{escaped}']"
-
-        return None
+        return ioc_to_stix_pattern(ioc.ioc_type, ioc.value)
 
     def _get_indicator_labels(self, ioc: "IOCRecord") -> list[str]:
         """Get indicator labels based on IOC data."""

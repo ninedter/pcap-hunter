@@ -236,11 +236,17 @@ All routes implemented by the server, by router group:
 | PCAP Ingestion | POST | `/api/v1/pcaps` | `full` |
 | Job Tracking | GET | `/api/v1/jobs/{job_id}` | `full` |
 | Job Tracking | GET | `/api/v1/jobs/{job_id}/result` | `full` |
+| Case Management | GET | `/api/v1/cases` | `full` |
 | Case Management | GET | `/api/v1/cases/{case_id}` | `full` |
 | Case Management | GET | `/api/v1/cases/{case_id}/report.pdf` | `full` |
 | Case Management | DELETE | `/api/v1/cases/{case_id}` | `full` |
+| Case Management | PATCH | `/api/v1/cases/{case_id}` | `full` |
+| Case Management | POST | `/api/v1/cases/{case_id}/notes` | `full` |
+| Case Management | GET | `/api/v1/cases/{case_id}/notes` | `full` |
 | IOC Feed | GET | `/api/v1/iocs.json` | `feed` |
+| IOC Feed | GET | `/api/v1/iocs/lookup` | `feed` |
 | IOC Feed | GET | `/api/v1/iocs.csv` | `feed` |
+| IOC Feed | GET | `/api/v1/iocs.cef` | `feed` |
 | IOC Feed | GET | `/api/v1/iocs.stix` (alias: `/api/v1/iocs/stix`) | `feed` |
 | Admin | POST | `/api/v1/admin/keys` | `full` |
 | Admin | GET | `/api/v1/admin/keys` | `full` |
@@ -340,10 +346,34 @@ Submit a PCAP file for background analysis. The upload is streamed to disk in 1 
 | `osint_enabled` | boolean | No | `true` | Run OSINT enrichment after analysis (see below) |
 | `llm_enabled` | boolean | No | `true` | Accepted for forward compatibility — LLM reports are **not yet supported headless** (see below) |
 | `pyshark_packet_limit` | integer | No | server default (200,000) | Cap on packets to deep-parse |
+| `webhook_url` | string | No | (none) | `http`/`https` callback URL to POST when the job reaches a terminal state (see [Completion webhook](#completion-webhook-webhook_url) below). Validated at submit time; rejected with `422` if unsafe |
 
 **OSINT enrichment (`osint_enabled`):** when enabled, the worker enriches the top public IPs after analysis using provider keys from the saved Streamlit config (`cfg_*_key` values) or, as a fallback, the environment (`OTX_KEY`, `VT_KEY`, `ABUSEIPDB_KEY`, `GREYNOISE_KEY`, `SHODAN_KEY`). If no provider keys are configured, the job still completes — with the warning code `osint_not_configured` in the result. Note: the API path always queries providers fresh; the OSINT response cache is not used headless.
 
 **LLM reports (`llm_enabled`):** LLM report generation is not yet supported on the API path. The field is accepted so existing clients keep working, but jobs complete with the warning code `llm_unsupported_on_api_path` in the result — including default submissions, since the field defaults to `true`.
+
+#### Completion webhook (`webhook_url`)
+
+When `webhook_url` is supplied, the API POSTs a small JSON envelope to that URL once the job reaches a terminal state (`done` or `failed`) — useful for SOAR playbooks that would otherwise have to poll `GET /jobs/{job_id}`.
+
+- **SSRF-validated twice:** once at submit time (before any upload I/O — an unsafe URL fails fast with `422 invalid_webhook_url`), and again immediately before the callback POST fires (defense in depth against the target becoming unsafe between submission and job completion, e.g. a DNS change). A URL is safe only if its scheme is `http`/`https` and **every** address it resolves to is a public/global IP — not loopback, private, link-local, reserved, or multicast. `hardened_session` alone does not block private IPs, so this check is the only SSRF guard for this feature.
+- **Delivery happens in the analysis worker subprocess**, after the job's own terminal state is already persisted. A webhook delivery failure (timeout, connection error, non-2xx status) is logged and retried but **never** changes the job's `done`/`failed` status — polling `GET /jobs/{job_id}` remains the source of truth.
+- **Retries:** up to `PCAP_HUNTER_API_WEBHOOK_MAX_RETRIES` additional attempts (default `2`, so 3 attempts total) with a short fixed delay between attempts, each bounded by `PCAP_HUNTER_API_WEBHOOK_TIMEOUT_SECONDS` (default `10`). Any 2xx response stops retrying immediately.
+- **Redirects are not followed** (`allow_redirects=False`) — only submit-time validation covers the URL you supplied; following a redirect to an attacker-chosen `Location` (e.g. a cloud metadata endpoint) would reopen the SSRF hole.
+- **Optional HMAC signature:** if `PCAP_HUNTER_API_WEBHOOK_SECRET` is set on the server, every callback carries an `X-PCAP-Hunter-Signature: sha256=<hex hmac>` header (HMAC-SHA256 of the raw JSON body, keyed with the secret) so the receiver can authenticate the request.
+
+**Callback envelope** (`Content-Type: application/json`):
+
+```json
+{
+  "job_id": "j_7d4e9f21",
+  "case_id": "c4a1b2d9",
+  "status": "done",
+  "analysis_id": "9c2d1e0f-4a7"
+}
+```
+
+`status` is `"done"` or `"failed"`; `analysis_id` is `null` for a failed job, and also `null` on a done job whose analysis failed to persist (mirrors `analysis_id` on the [job result](#get-apiv1jobsjob_idresult) endpoint).
 
 **Sample request:**
 
@@ -355,7 +385,8 @@ curl -X POST http://localhost:8000/api/v1/pcaps \
   -F 'tags=["soar:tines","source:edr_alert"]' \
   -F "severity_hint=high" \
   -F "osint_enabled=true" \
-  -F "pyshark_packet_limit=100000"
+  -F "pyshark_packet_limit=100000" \
+  -F "webhook_url=https://soar.example.com/hooks/pcap-hunter"
 ```
 
 **Sample response — 202 Accepted:**
@@ -382,6 +413,7 @@ curl -X POST http://localhost:8000/api/v1/pcaps \
 | 413 | `pcap_too_large` | Upload exceeded `PCAP_HUNTER_API_MAX_PCAP_BYTES`; the partial file is deleted |
 | 415 | `pcap_invalid_format` | First bytes are not a known pcap/pcapng magic; the file is deleted |
 | 422 | `validation_error` | Malformed form field (e.g. non-boolean `osint_enabled`) |
+| 422 | `invalid_webhook_url` | `webhook_url` is not `http`/`https`, its host doesn't resolve, or any resolved address is private/loopback/link-local/reserved/multicast — checked before any upload I/O |
 | 429 | `rate_limit_exceeded` | DB key over its per-minute limit (`Retry-After` header set) |
 | 503 | `queue_full` | Active jobs ≥ `PCAP_HUNTER_API_QUEUE_DEPTH`; response carries `Retry-After: 60` |
 
@@ -611,6 +643,58 @@ Example `409`:
 
 ### Case Management
 
+#### `GET /api/v1/cases`
+
+List cases with optional filters — the light-weight complement to `GET /api/v1/cases/{case_id}`: each entry omits embedded `analyses[]`/`notes[]` so a full case listing stays cheap even when individual cases carry large feature blobs. Read-only and idempotent. Requires `full` scope. Note: an unrecognized `status` value does not `422` — it silently falls back to filtering on `open` (the same lenient string→enum conversion `PATCH` uses internally), so double-check spelling rather than relying on a validation error to catch a typo.
+
+**Auth:** `full` scope required
+
+**Parameters:**
+
+| Param | In | Type | Required | Default | Description |
+|-------|----|------|----------|---------|-------------|
+| `status` | query | string | No | (none) | Filter to one status: `open`, `in_progress`, or `closed`. An unrecognized value is treated as `open`, not rejected (see note above) |
+| `tag` | query | string | No | (none) | Filter to cases carrying this tag |
+| `search` | query | string | No | (none) | Case-insensitive substring match against title and description |
+| `limit` | query | integer | No | `100` | Results per page, 1–500 (422 outside that range) |
+| `offset` | query | integer | No | `0` | Results to skip, ≥ 0 |
+
+**Sample request:**
+
+```bash
+curl "http://localhost:8000/api/v1/cases?status=in_progress&limit=50" \
+  -H "Authorization: Bearer phk_4f8a2b9c1d3e5f60718293a4b5c6d7e8"
+```
+
+**Sample response — 200 OK:**
+
+```json
+{
+  "cases": [
+    {
+      "id": "c4a1b2d9",
+      "title": "Incident 2026-0042",
+      "description": "",
+      "status": "in_progress",
+      "severity": "high",
+      "created_at": "2026-06-12T09:14:02.731842",
+      "updated_at": "2026-06-12T09:15:41.557209",
+      "closed_at": null,
+      "tags": ["soar:tines", "source:edr_alert"]
+    }
+  ],
+  "count": 1
+}
+```
+
+**Error responses:**
+
+| Status | Code | When |
+|--------|------|------|
+| 401 | `missing_or_malformed_auth` / `invalid_key` | Auth failure |
+| 403 | `insufficient_scope` | Feed-scope key |
+| 422 | `validation_error` | Query constraint violated (e.g. `limit=0`, `limit=1000`) |
+
 #### `GET /api/v1/cases/{case_id}`
 
 Fetch the full case record — title, status, severity, tags, plus every persisted analysis (with its extracted IOCs) and case notes embedded. API-submitted cases are created with `status = in_progress` and the requested `severity_hint`; the same record is visible in the Streamlit Cases tab. Read-only and idempotent. Requires `full` scope. Note that embedded `analyses[]` can be large (the `features` object holds the full feature extraction); fetch the job result instead if you only need pipeline output.
@@ -786,13 +870,150 @@ Example `409`:
 }
 ```
 
+#### `PATCH /api/v1/cases/{case_id}`
+
+Partially update a case — title, description, status, severity, and/or tags. Omitted fields are left unchanged; there is no way to distinguish "field omitted" from "set to its current value" (both are no-ops). Setting `status` to `closed` also sets `closed_at` (via the same path the Streamlit "close case" action uses); setting any other status does not clear a previously-set `closed_at`. `tags` is a **full replace**, not a merge — send the complete desired tag list. Requires `full` scope.
+
+**Auth:** `full` scope required
+
+**Content-Type:** `application/json`
+
+**Parameters (JSON body, all optional):**
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `title` | string | No | New title (1–200 chars) |
+| `description` | string | No | New description (max 5000 chars) |
+| `status` | string | No | `open`, `in_progress`, or `closed` |
+| `severity` | string | No | `low`, `medium`, `high`, or `critical` |
+| `tags` | array of string | No | Full replacement tag list |
+
+**Sample request:**
+
+```bash
+curl -X PATCH http://localhost:8000/api/v1/cases/c4a1b2d9 \
+  -H "Authorization: Bearer phk_4f8a2b9c1d3e5f60718293a4b5c6d7e8" \
+  -H "Content-Type: application/json" \
+  -d '{"status": "closed", "severity": "critical", "tags": ["soar:tines", "confirmed"]}'
+```
+
+**Sample response — 200 OK** (full updated case record, same shape as `GET /api/v1/cases/{case_id}`):
+
+```json
+{
+  "id": "c4a1b2d9",
+  "title": "Incident 2026-0042",
+  "description": "",
+  "status": "closed",
+  "severity": "critical",
+  "created_at": "2026-06-12T09:14:02.731842",
+  "updated_at": "2026-06-12T09:20:11.004221",
+  "closed_at": "2026-06-12T09:20:11.004221",
+  "tags": ["soar:tines", "confirmed"],
+  "analyses": [],
+  "notes": []
+}
+```
+
+**Error responses:**
+
+| Status | Code | When |
+|--------|------|------|
+| 401 | `missing_or_malformed_auth` / `invalid_key` | Auth failure |
+| 403 | `insufficient_scope` | Feed-scope key |
+| 404 | `case_not_found` | Case ID does not exist |
+| 422 | `validation_error` | `status`/`severity` not one of the accepted values, `title` empty, or a field exceeds its max length |
+
+#### `POST /api/v1/cases/{case_id}/notes`
+
+Add an analyst note to a case. Notes are plain text with no formatting; there is no update or delete endpoint for an individual note. Not idempotent — every call adds a new note. Requires `full` scope.
+
+**Auth:** `full` scope required
+
+**Content-Type:** `application/json`
+
+**Parameters (JSON body):**
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `content` | string | Yes | Note text, min length 1 |
+
+**Sample request:**
+
+```bash
+curl -X POST http://localhost:8000/api/v1/cases/c4a1b2d9/notes \
+  -H "Authorization: Bearer phk_4f8a2b9c1d3e5f60718293a4b5c6d7e8" \
+  -H "Content-Type: application/json" \
+  -d '{"content": "Confirmed beaconing to 198.51.100.42 matches known C2 infrastructure."}'
+```
+
+**Sample response — 201 Created:**
+
+```json
+{
+  "id": 17,
+  "content": "Confirmed beaconing to 198.51.100.42 matches known C2 infrastructure."
+}
+```
+
+**Error responses:**
+
+| Status | Code | When |
+|--------|------|------|
+| 401 | `missing_or_malformed_auth` / `invalid_key` | Auth failure |
+| 403 | `insufficient_scope` | Feed-scope key |
+| 404 | `case_not_found` | Case ID does not exist |
+| 422 | `validation_error` | `content` missing or empty |
+
+#### `GET /api/v1/cases/{case_id}/notes`
+
+List all notes on a case, in insertion order. Read-only and idempotent. Requires `full` scope.
+
+**Auth:** `full` scope required
+
+**Parameters:**
+
+| Param | In | Type | Required | Description |
+|-------|----|------|----------|-------------|
+| `case_id` | path | string | Yes | Case ID (8 hex chars) |
+
+**Sample request:**
+
+```bash
+curl http://localhost:8000/api/v1/cases/c4a1b2d9/notes \
+  -H "Authorization: Bearer phk_4f8a2b9c1d3e5f60718293a4b5c6d7e8"
+```
+
+**Sample response — 200 OK:**
+
+```json
+{
+  "notes": [
+    {
+      "id": 17,
+      "content": "Confirmed beaconing to 198.51.100.42 matches known C2 infrastructure.",
+      "created_at": "2026-06-12T09:21:03.552104",
+      "updated_at": null
+    }
+  ]
+}
+```
+
+**Error responses:**
+
+| Status | Code | When |
+|--------|------|------|
+| 401 | `missing_or_malformed_auth` / `invalid_key` | Auth failure |
+| 403 | `insufficient_scope` | Feed-scope key |
+| 404 | `case_not_found` | Case ID does not exist |
+
 ---
 
 ### IOC Feed
 
-All feed endpoints require `feed` scope (a `full`-scope key also works), are read-only/idempotent, and support conditional requests via ETag. All three formats accept the **same query parameters** and apply the same dedup/ordering semantics — they differ only in serialization.
+All feed endpoints require `feed` scope (a `full`-scope key also works), are read-only/idempotent, and support conditional requests via ETag. The four bulk formats (`iocs.json`, `iocs.csv`, `iocs.cef`, `iocs.stix`) accept the **same query parameters** and apply the same dedup/ordering semantics — they differ only in serialization. `iocs/lookup` is the exception: it takes a single required `value` instead (see its own section below).
 
-**Shared query parameters:**
+**Shared query parameters** (`iocs.json` / `iocs.csv` / `iocs.cef` / `iocs.stix`):
 
 | Param | Type | Default | Description |
 |-------|------|---------|-------------|
@@ -808,6 +1029,7 @@ All feed endpoints require `feed` scope (a `full`-scope key also works), are rea
 
 - **Scoring:** each indicator's `score` derives from the **worst** severity recorded across its sightings: `low` = 25, `medium` = 50, `high` = 75, `critical` = 100; `severity` is the matching label.
 - **Deduplication:** the same indicator appearing in multiple analyses collapses to a single row carrying that maximum severity/score; `first_seen`/`last_seen` span all sightings and `case_ids` lists every contributing case.
+- **`mitre_techniques`:** the deduplicated union of MITRE ATT&CK technique IDs (e.g. `T1071.001`) from every analysis that produced the indicator, derived from each analysis's ATT&CK mapping. Empty for indicators whose contributing analyses matched no techniques — not a placeholder; it reflects real detections.
 - **Filtering:** `min_score` is applied in SQL (not post-filtered), so it composes correctly with `limit`/`cursor` — pages are always full up to `limit` and no matching rows are dropped at page boundaries.
 - **Ordering:** deterministic — `last_seen` descending, then indicator value ascending as a tie-breaker. Stable ordering makes cursor pagination reliable.
 - **Pagination:** `next_cursor` is non-null exactly when the page came back full (`count == limit`); pass it as `cursor` for the next page. (CSV/STIX responses don't carry a cursor — page by incrementing `cursor` by `limit` while pages stay full.)
@@ -841,7 +1063,7 @@ curl "http://localhost:8000/api/v1/iocs.json?min_score=50&type=ip,domain&limit=1
       "first_seen": "2026-06-10T08:02:11.402199",
       "last_seen": "2026-06-12T09:15:40.992103",
       "case_ids": ["c4a1b2d9"],
-      "mitre_techniques": []
+      "mitre_techniques": ["T1071.001"]
     },
     {
       "type": "domain",
@@ -887,6 +1109,68 @@ Example `422`:
 }
 ```
 
+#### `GET /api/v1/iocs/lookup`
+
+Exact-match single-IOC lookup — the #1 SOAR enrichment pattern (SIEM alert fires on an IP/domain, playbook asks "have we seen this before, and how bad?"). Unlike the bulk feed endpoints, this normally aggregates to 0 or 1 row, so `next_cursor` is always `null` and there is no `since`/`tag`/`case_id`/`cursor` filter. Matching is **exact** (`value = ?`, not a substring or prefix match) — looking up `1.2.3.4` never also returns `1.2.3.40`. An empty `value` is rejected with `422` rather than silently returning the whole feed. Read-only and idempotent.
+
+**Auth:** `feed` scope (or `full`)
+
+**Parameters:**
+
+| Param | In | Type | Required | Default | Description |
+|-------|----|------|----------|---------|-------------|
+| `value` | query | string | Yes | | Exact IOC value to look up (min length 1) |
+| `min_score` | query | integer | No | `0` | Minimum threat score, 0–100 (422 outside that range) |
+| `type` | query | string | No | (none) | Comma-separated IOC types to restrict to: `ip`, `domain`, `url`, `hash` |
+| `limit` | query | integer | No | `1000` | Results per page, 1–10000 (422 outside that range) — irrelevant in practice since a single value aggregates to at most one row |
+
+**Sample request:**
+
+```bash
+curl "http://localhost:8000/api/v1/iocs/lookup?value=198.51.100.42" \
+  -H "Authorization: Bearer phk_4f8a2b9c1d3e5f60718293a4b5c6d7e8"
+```
+
+**Sample response — 200 OK** (found):
+
+```json
+{
+  "iocs": [
+    {
+      "type": "ip",
+      "value": "198.51.100.42",
+      "severity": "high",
+      "score": 75,
+      "tags": ["malware", "c2-beacon"],
+      "first_seen": "2026-06-10T08:02:11.402199",
+      "last_seen": "2026-06-12T09:15:40.992103",
+      "case_ids": ["c4a1b2d9"],
+      "mitre_techniques": ["T1071.001"]
+    }
+  ],
+  "count": 1,
+  "next_cursor": null
+}
+```
+
+**Sample response — 200 OK** (not found — an empty result, not a `404`):
+
+```json
+{
+  "iocs": [],
+  "count": 0,
+  "next_cursor": null
+}
+```
+
+**Error responses:**
+
+| Status | Code | When |
+|--------|------|------|
+| 401 | `missing_or_malformed_auth` / `invalid_key` | Auth failure |
+| 422 | `validation_error` | `value` missing/empty, or `min_score`/`limit` outside their allowed range |
+| 429 | `rate_limit_exceeded` | DB key over its per-minute limit |
+
 #### `GET /api/v1/iocs.csv`
 
 The same feed as CSV (`Content-Type: text/csv`) — built for lookup tables: Splunk lookups, Graylog CSV adapters, Wazuh CDB lists. Same query parameters, dedup, ordering, and ETag caching as the JSON feed. List-valued fields (`tags`, `case_ids`, `mitre_techniques`) are `;`-joined inside one CSV column. Values that a spreadsheet would interpret as a formula (leading `=`, `+`, `-`, `@`) are prefixed with a single quote to prevent CSV injection.
@@ -904,11 +1188,32 @@ curl "http://localhost:8000/api/v1/iocs.csv?min_score=25" \
 
 ```csv
 type,value,score,severity,tags,first_seen,last_seen,case_ids,mitre_techniques
-ip,198.51.100.42,75,high,malware;c2-beacon,2026-06-10T08:02:11.402199,2026-06-12T09:15:40.992103,c4a1b2d9,
+ip,198.51.100.42,75,high,malware;c2-beacon,2026-06-10T08:02:11.402199,2026-06-12T09:15:40.992103,c4a1b2d9,T1071.001
 domain,updates.evil-cdn.example,100,critical,malware,2026-06-11T17:44:03.215587,2026-06-11T17:44:03.215587,b91e0f2c;c4a1b2d9,
 ```
 
 **Error responses:** same as `iocs.json` (401 / 422 / 429), plus `405 method_not_allowed` for non-GET methods (applies to every endpoint).
+
+#### `GET /api/v1/iocs.cef`
+
+The same feed as CEF (Common Event Format) syslog lines (`Content-Type: text/plain`) — for ArcSight/QRadar/Sentinel-style SIEM ingestion. Same query parameters, dedup, ordering, and ETag caching as the JSON feed. Uses a dedicated feed-to-CEF adapter rather than the app's general-purpose correlation/beacon CEF exporter, so it faithfully emits **every** row the filters selected — including LOW-severity IOCs, which the general exporter's `priority_score >= 0.4` gate would otherwise silently drop. Reserved CEF characters (`=`, `\`, CR, LF) in IOC values are escaped per the CEF spec, so an attacker-influenced indicator value can't inject a second event into the ingesting SIEM.
+
+**Auth:** `feed` scope (or `full`)
+
+**Sample request:**
+
+```bash
+curl "http://localhost:8000/api/v1/iocs.cef?min_score=25" \
+  -H "Authorization: Bearer phk_4f8a2b9c1d3e5f60718293a4b5c6d7e8"
+```
+
+**Sample response — 200 OK** (`text/plain`, one line per indicator):
+
+```
+Jun 12 09:15:41 pcap-hunter CEF:0|PCAPHunter|ThreatWorkbench|1.0|IOC-FEED-001|IOC Feed Entry (high)|8|value=198.51.100.42 type=ip score=75 tags=malware;c2-beacon
+```
+
+**Error responses:** same as `iocs.json` (401 / 422 / 429).
 
 #### `GET /api/v1/iocs.stix`
 
@@ -1425,6 +1730,7 @@ Revoking a key clears its rate-limit window immediately.
 | `rate_limit_exceeded` | 429 | Per-key rate limit exceeded (`Retry-After` header) |
 | `pcap_too_large` | 413 | File exceeds `max_pcap_bytes` |
 | `pcap_invalid_format` | 415 | Missing valid PCAP/pcapng magic signature |
+| `invalid_webhook_url` | 422 | `webhook_url` fails the SSRF guard (non-http(s) scheme, unresolvable host, or a resolved address that's private/loopback/link-local/reserved/multicast) |
 | `queue_full` | 503 | Job queue at capacity (`Retry-After: 60` header) |
 | `job_not_found` | 404 | Job ID does not exist |
 | `result_not_ready` | 409 | Job has not finished (or finished `failed`/`cancelled`); additive `current_status` field |
@@ -1482,6 +1788,16 @@ All settings are read from environment variables at startup. Defaults are suitab
 | `PCAP_HUNTER_API_MAX_PCAP_BYTES` | `2147483648` (2 GiB) | Maximum upload size |
 | `PCAP_HUNTER_API_QUEUE_DEPTH` | `100` | Maximum active (queued + running) jobs |
 | `PCAP_HUNTER_API_UPLOAD_TIMEOUT_SEC` | `600` | Reserved — parsed but **not currently enforced** |
+
+### Webhooks
+
+Settings for the optional completion webhook (see [Completion webhook](#completion-webhook-webhook_url) under `POST /api/v1/pcaps`). Only relevant when a submission includes `webhook_url`.
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `PCAP_HUNTER_API_WEBHOOK_TIMEOUT_SECONDS` | `10` | Per-attempt HTTP timeout (seconds) for the completion callback POST |
+| `PCAP_HUNTER_API_WEBHOOK_MAX_RETRIES` | `2` | Additional attempts after the first on a non-2xx response or request exception (default: 3 attempts total) |
+| `PCAP_HUNTER_API_WEBHOOK_SECRET` | (none — signing disabled) | When set, every callback carries `X-PCAP-Hunter-Signature: sha256=<hmac>`, an HMAC-SHA256 of the raw JSON body keyed with this secret |
 
 ### Retention
 

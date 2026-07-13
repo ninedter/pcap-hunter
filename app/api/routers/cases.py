@@ -1,4 +1,4 @@
-"""GET /api/v1/cases/{id}, DELETE, /report.pdf"""
+"""Case CRUD: GET (get/list), PATCH, DELETE, /report.pdf, and notes."""
 
 from __future__ import annotations
 
@@ -10,11 +10,13 @@ import re
 import shutil
 import tempfile
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import FileResponse, JSONResponse, Response
 
 from app.api.deps import get_repo, require_full_scope
+from app.api.models import CaseListItem, CasePatchRequest, NoteRequest
 from app.api.queue import cancel_queued_job
+from app.database.models import CaseStatus, Severity
 
 logger = logging.getLogger(__name__)
 
@@ -25,6 +27,39 @@ def _reports_dir() -> pathlib.Path:
     return pathlib.Path(
         os.environ.get("PCAP_HUNTER_API_REPORTS_DIR") or os.environ.get("PCAP_HUNTER_REPORTS_DIR", "data/reports")
     )
+
+
+# Registered BEFORE the "/{case_id}" routes below — a literal "" path never
+# actually collides with "/{case_id}" (different segment counts), but keeping
+# the list route first avoids relying on that being true forever.
+@router.get("")
+def list_cases(
+    status: str | None = Query(default=None),
+    tag: str | None = Query(default=None),
+    search: str | None = Query(default=None),
+    limit: int = Query(default=100, ge=1, le=500),
+    offset: int = Query(default=0, ge=0),
+    _scope=Depends(require_full_scope),
+    repo=Depends(get_repo),
+):
+    status_filter = CaseStatus.from_str(status) if status else None
+    tags_filter = [tag] if tag else None
+    cases = repo.list_cases(status=status_filter, tags=tags_filter, search=search, limit=limit, offset=offset)
+    items = [
+        CaseListItem(
+            id=c.id,
+            title=c.title,
+            description=c.description,
+            status=c.status.value,
+            severity=c.severity.value,
+            created_at=c.created_at.isoformat() if c.created_at else None,
+            updated_at=c.updated_at.isoformat() if c.updated_at else None,
+            closed_at=c.closed_at.isoformat() if c.closed_at else None,
+            tags=c.tags,
+        )
+        for c in cases
+    ]
+    return {"cases": [item.model_dump() for item in items], "count": len(items)}
 
 
 @router.get("/{case_id}")
@@ -176,3 +211,63 @@ def delete_case(case_id: str, _scope=Depends(require_full_scope), repo=Depends(g
         logger.warning("Artifact cleanup after deleting case %s failed: %s", case_id, exc)
 
     return Response(status_code=204)
+
+
+@router.patch("/{case_id}")
+def patch_case(
+    case_id: str,
+    body: CasePatchRequest,
+    _scope=Depends(require_full_scope),
+    repo=Depends(get_repo),
+):
+    case = repo.get_case(case_id)
+    if not case:
+        raise HTTPException(status_code=404, detail="case_not_found")
+
+    if body.title is not None:
+        case.title = body.title
+    if body.description is not None:
+        case.description = body.description
+    if body.severity is not None:
+        case.severity = Severity.from_str(body.severity)
+    if body.tags is not None:
+        case.tags = body.tags
+
+    if body.status is not None:
+        new_status = CaseStatus.from_str(body.status)
+        if new_status == CaseStatus.CLOSED:
+            case.close()  # sets closed_at + updated_at
+        else:
+            case.status = new_status
+
+    repo.update_case(case)
+    return JSONResponse(content=case.to_dict())
+
+
+@router.post("/{case_id}/notes", status_code=201)
+def add_note(
+    case_id: str,
+    body: NoteRequest,
+    _scope=Depends(require_full_scope),
+    repo=Depends(get_repo),
+):
+    # add_note() does not validate case_id (FK enforcement is off), so check first.
+    case = repo.get_case(case_id)
+    if not case:
+        raise HTTPException(status_code=404, detail="case_not_found")
+
+    note_id = repo.add_note(case_id, body.content)
+    return {"id": note_id, "content": body.content}
+
+
+@router.get("/{case_id}/notes")
+def list_notes(
+    case_id: str,
+    _scope=Depends(require_full_scope),
+    repo=Depends(get_repo),
+):
+    case = repo.get_case(case_id)
+    if not case:
+        raise HTTPException(status_code=404, detail="case_not_found")
+
+    return {"notes": [n.to_dict() for n in case.notes]}

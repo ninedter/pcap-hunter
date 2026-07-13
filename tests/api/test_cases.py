@@ -416,3 +416,246 @@ def test_api_reports_dir_env_takes_precedence(client, tmp_path, monkeypatch):
     assert not (legacy_reports / f"{case_id}.pdf").exists(), (
         "PCAP_HUNTER_REPORTS_DIR must be ignored when PCAP_HUNTER_API_REPORTS_DIR is set"
     )
+
+
+# ==================== GET /api/v1/cases (list) ====================
+
+
+def test_list_cases_returns_seeded_cases(client):
+    from app.api.deps import get_repo
+    from app.database.models import Case
+
+    repo = get_repo()
+    id1 = repo.create_case(Case(title="alpha"))
+    id2 = repo.create_case(Case(title="beta"))
+
+    r = client.get("/api/v1/cases", headers={"Authorization": "Bearer MAIN"})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["count"] == 2
+    ids = {c["id"] for c in body["cases"]}
+    assert ids == {id1, id2}
+    # Light shape: list_cases() never loads analyses/notes, so the response must not
+    # imply case content it never fetched.
+    assert "analyses" not in body["cases"][0]
+    assert "notes" not in body["cases"][0]
+
+
+def test_list_cases_filters_by_status(client):
+    from app.api.deps import get_repo
+    from app.database.models import Case, CaseStatus
+
+    repo = get_repo()
+    repo.create_case(Case(title="open-case", status=CaseStatus.OPEN))
+    closed_id = repo.create_case(Case(title="closed-case", status=CaseStatus.CLOSED))
+
+    r = client.get("/api/v1/cases", params={"status": "closed"}, headers={"Authorization": "Bearer MAIN"})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["count"] == 1
+    assert body["cases"][0]["id"] == closed_id
+
+
+def test_list_cases_filters_by_tag(client):
+    from app.api.deps import get_repo
+    from app.database.models import Case
+
+    repo = get_repo()
+    tagged_id = repo.create_case(Case(title="tagged", tags=["malware"]))
+    repo.create_case(Case(title="untagged"))
+
+    r = client.get("/api/v1/cases", params={"tag": "malware"}, headers={"Authorization": "Bearer MAIN"})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["count"] == 1
+    assert body["cases"][0]["id"] == tagged_id
+
+
+def test_list_cases_search_filter(client):
+    from app.api.deps import get_repo
+    from app.database.models import Case
+
+    repo = get_repo()
+    match_id = repo.create_case(Case(title="beacon investigation"))
+    repo.create_case(Case(title="unrelated"))
+
+    r = client.get("/api/v1/cases", params={"search": "beacon"}, headers={"Authorization": "Bearer MAIN"})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["count"] == 1
+    assert body["cases"][0]["id"] == match_id
+
+
+def test_list_cases_limit_offset(client):
+    from app.api.deps import get_repo
+    from app.database.models import Case
+
+    repo = get_repo()
+    for i in range(3):
+        repo.create_case(Case(title=f"case-{i}"))
+
+    r = client.get("/api/v1/cases", params={"limit": 1, "offset": 0}, headers={"Authorization": "Bearer MAIN"})
+    assert r.status_code == 200
+    assert len(r.json()["cases"]) == 1
+
+
+def test_list_cases_requires_auth(client):
+    r = client.get("/api/v1/cases")
+    assert r.status_code == 401
+
+
+# ==================== PATCH /api/v1/cases/{id} ====================
+
+
+def test_patch_case_updates_fields(client):
+    from app.api.deps import get_repo
+    from app.database.models import Case
+
+    case_id = get_repo().create_case(Case(title="orig", description="orig-desc"))
+
+    r = client.patch(
+        f"/api/v1/cases/{case_id}",
+        json={"title": "new-title", "severity": "high", "tags": ["a", "b"]},
+        headers={"Authorization": "Bearer MAIN"},
+    )
+    assert r.status_code == 200
+    body = r.json()
+    assert body["title"] == "new-title"
+    assert body["severity"] == "high"
+    assert sorted(body["tags"]) == ["a", "b"]
+    assert body["description"] == "orig-desc"  # untouched
+
+
+def test_patch_case_status_closed_sets_closed_at(client):
+    from app.api.deps import get_repo
+    from app.database.models import Case
+
+    case_id = get_repo().create_case(Case(title="orig"))
+
+    r = client.patch(
+        f"/api/v1/cases/{case_id}",
+        json={"status": "closed"},
+        headers={"Authorization": "Bearer MAIN"},
+    )
+    assert r.status_code == 200
+    body = r.json()
+    assert body["status"] == "closed"
+    assert body["closed_at"] is not None
+
+
+def test_patch_case_404_on_missing(client):
+    r = client.patch(
+        "/api/v1/cases/zzzz9999",
+        json={"title": "x"},
+        headers={"Authorization": "Bearer MAIN"},
+    )
+    assert r.status_code == 404
+    assert r.json()["code"] == "case_not_found"
+
+
+def test_patch_case_invalid_status_returns_422(client):
+    from app.api.deps import get_repo
+    from app.database.models import Case
+
+    case_id = get_repo().create_case(Case(title="orig"))
+
+    r = client.patch(
+        f"/api/v1/cases/{case_id}",
+        json={"status": "not-a-status"},
+        headers={"Authorization": "Bearer MAIN"},
+    )
+    assert r.status_code == 422
+
+
+def test_patch_case_invalid_severity_returns_422(client):
+    from app.api.deps import get_repo
+    from app.database.models import Case
+
+    case_id = get_repo().create_case(Case(title="orig"))
+
+    r = client.patch(
+        f"/api/v1/cases/{case_id}",
+        json={"severity": "not-a-severity"},
+        headers={"Authorization": "Bearer MAIN"},
+    )
+    assert r.status_code == 422
+
+
+def test_patch_case_empty_body_is_noop(client):
+    from app.api.deps import get_repo
+    from app.database.models import Case
+
+    case_id = get_repo().create_case(Case(title="orig", description="d"))
+
+    r = client.patch(f"/api/v1/cases/{case_id}", json={}, headers={"Authorization": "Bearer MAIN"})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["title"] == "orig"
+    assert body["description"] == "d"
+
+
+# ==================== POST/GET /api/v1/cases/{id}/notes ====================
+
+
+def test_post_note_adds_note(client):
+    from app.api.deps import get_repo
+    from app.database.models import Case
+
+    case_id = get_repo().create_case(Case(title="x"))
+
+    r = client.post(
+        f"/api/v1/cases/{case_id}/notes",
+        json={"content": "analyst note"},
+        headers={"Authorization": "Bearer MAIN"},
+    )
+    assert r.status_code == 201
+    body = r.json()
+    assert body["content"] == "analyst note"
+    assert isinstance(body["id"], int)
+
+
+def test_post_note_404_on_missing_case(client):
+    r = client.post(
+        "/api/v1/cases/zzzz9999/notes",
+        json={"content": "x"},
+        headers={"Authorization": "Bearer MAIN"},
+    )
+    assert r.status_code == 404
+    assert r.json()["code"] == "case_not_found"
+
+
+def test_post_note_empty_content_returns_422(client):
+    from app.api.deps import get_repo
+    from app.database.models import Case
+
+    case_id = get_repo().create_case(Case(title="x"))
+
+    r = client.post(
+        f"/api/v1/cases/{case_id}/notes",
+        json={"content": ""},
+        headers={"Authorization": "Bearer MAIN"},
+    )
+    assert r.status_code == 422
+
+
+def test_get_notes_lists_notes(client):
+    from app.api.deps import get_repo
+    from app.database.models import Case
+
+    repo = get_repo()
+    case_id = repo.create_case(Case(title="x"))
+    repo.add_note(case_id, "first note")
+    repo.add_note(case_id, "second note")
+
+    r = client.get(f"/api/v1/cases/{case_id}/notes", headers={"Authorization": "Bearer MAIN"})
+    assert r.status_code == 200
+    body = r.json()
+    assert len(body["notes"]) == 2
+    contents = {n["content"] for n in body["notes"]}
+    assert contents == {"first note", "second note"}
+
+
+def test_get_notes_404_on_missing_case(client):
+    r = client.get("/api/v1/cases/zzzz9999/notes", headers={"Authorization": "Bearer MAIN"})
+    assert r.status_code == 404
+    assert r.json()["code"] == "case_not_found"

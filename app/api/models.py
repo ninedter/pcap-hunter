@@ -73,6 +73,34 @@ class IOCFeedResponse(BaseModel):
     next_cursor: str | None = None
 
 
+class CaseListItem(BaseModel):
+    """Light case shape for GET /api/v1/cases — no embedded analyses/notes."""
+
+    id: str
+    title: str
+    description: str = ""
+    status: str
+    severity: str
+    created_at: str | None = None
+    updated_at: str | None = None
+    closed_at: str | None = None
+    tags: list[str] = Field(default_factory=list)
+
+
+class CasePatchRequest(BaseModel):
+    """Partial update for PATCH /api/v1/cases/{id} — all fields optional."""
+
+    title: str | None = Field(default=None, min_length=1, max_length=200)
+    description: str | None = Field(default=None, max_length=5000)
+    status: str | None = Field(default=None, pattern=r"^(open|in_progress|closed)$")
+    severity: str | None = Field(default=None, pattern=r"^(low|medium|high|critical)$")
+    tags: list[str] | None = None
+
+
+class NoteRequest(BaseModel):
+    content: str = Field(..., min_length=1)
+
+
 class PcapSubmissionForm(BaseModel):
     """Multipart form fields for POST /pcaps."""
 

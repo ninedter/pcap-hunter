@@ -28,6 +28,8 @@ SIGNAL_WEIGHTS = {
     "flow_asymmetry": 0.04,
     "shodan_vulns": 0.10,
     "shodan_exposure": 0.04,
+    "http_cleartext_cred": 0.10,
+    "http_suspicious_ua": 0.06,
 }
 
 VERDICT_THRESHOLDS = {
@@ -78,6 +80,30 @@ def _get_verdict(score: float) -> str:
     return "low"
 
 
+def _build_http_lookup(http_analysis: dict | None) -> dict[str, list[tuple[str, Any, float]]]:
+    """Build a Host-header -> [(signal_name, value, score), ...] lookup from HTTP analysis.
+
+    The Zeek ``http.log`` Host header may be a raw IP or a domain, so this
+    lookup is matched against both IP and domain indicators by the callers
+    (``_collect_ip_signals`` / ``_collect_domain_signals``).
+    """
+    lookup: dict[str, list[tuple[str, Any, float]]] = {}
+    if not http_analysis:
+        return lookup
+
+    for cred in http_analysis.get("cleartext_credentials", []) or []:
+        host = cred.get("host") if isinstance(cred, dict) else None
+        if host:
+            lookup.setdefault(host, []).append(("http_cleartext_cred", cred.get("username", ""), 0.9))
+
+    for ua in http_analysis.get("suspicious_user_agents", []) or []:
+        host = ua.get("host") if isinstance(ua, dict) else None
+        if host:
+            lookup.setdefault(host, []).append(("http_suspicious_ua", ua.get("reason", ""), 0.6))
+
+    return lookup
+
+
 def _collect_ip_signals(
     ip: str,
     osint: dict,
@@ -85,6 +111,7 @@ def _collect_ip_signals(
     tls_lookup: dict[str, list[str]],
     yara_ips: set[str],
     asymmetry_lookup: dict[str, float],
+    http_lookup: dict[str, list[tuple[str, Any, float]]],
 ) -> list[CorrelationSignal]:
     """Collect all signals for an IP indicator."""
     signals: list[CorrelationSignal] = []
@@ -147,6 +174,10 @@ def _collect_ip_signals(
             CorrelationSignal("flow_asymmetry", round(asymmetry_lookup[ip], 2), asymmetry_lookup[ip], "flow_analysis")
         )
 
+    # HTTP findings (Host header matched a raw IP)
+    for name, value, score in http_lookup.get(ip, []):
+        signals.append(CorrelationSignal(name, value, score, "http"))
+
     return signals
 
 
@@ -154,6 +185,7 @@ def _collect_domain_signals(
     domain: str,
     osint: dict,
     dns_analysis: dict,
+    http_lookup: dict[str, list[tuple[str, Any, float]]],
 ) -> list[CorrelationSignal]:
     """Collect all signals for a domain indicator."""
     signals: list[CorrelationSignal] = []
@@ -182,13 +214,24 @@ def _collect_domain_signals(
             signals.append(CorrelationSignal("dns_tunneling", tunnel.get("score", 0), tunnel["score"], "dns"))
             break
 
+    # HTTP findings (Host header matched a domain)
+    for name, value, score in http_lookup.get(domain, []):
+        signals.append(CorrelationSignal(name, value, score, "http"))
+
     return signals
 
 
 # Tier definitions — a strong OSINT hit alone can push to "high"; behavioural
 # signals need corroboration; contextual signals alone cap at "medium".
 _TIER1_DEFINITIVE = {"vt_detections", "greynoise_malicious"}
-_TIER2_BEHAVIOURAL = {"beacon_score", "flow_asymmetry", "dns_tunneling", "dga_domain"}
+_TIER2_BEHAVIOURAL = {
+    "beacon_score",
+    "flow_asymmetry",
+    "dns_tunneling",
+    "dga_domain",
+    "http_cleartext_cred",
+    "http_suspicious_ua",
+}
 _TIER3_CONTEXTUAL = {"abuseipdb", "self_signed_cert", "expired_cert", "yara_match", "shodan_vulns", "shodan_exposure"}
 
 # Strong-signal floors — a single definitive signal sets a minimum score
@@ -243,6 +286,7 @@ def correlate_indicators(
     tls_analysis: dict | None = None,
     yara_results: dict | None = None,
     asymmetry_results: list | None = None,
+    http_analysis: dict | None = None,
 ) -> list[CorrelationResult]:
     """
     Correlate indicators across all analysis modules.
@@ -255,6 +299,9 @@ def correlate_indicators(
         tls_analysis: TLS certificate analysis
         yara_results: YARA scan results
         asymmetry_results: Flow asymmetry results
+        http_analysis: HTTP analysis results (cleartext credentials, suspicious
+            user agents). The Host header may be an IP or a domain, so matches
+            are attributed to whichever indicator type it corresponds to.
 
     Returns:
         List of CorrelationResult sorted by composite score (highest first)
@@ -301,12 +348,14 @@ def correlate_indicators(
                 if dst:
                     asymmetry_lookup[dst] = max(asymmetry_lookup.get(dst, 0), score)
 
+    http_lookup = _build_http_lookup(http_analysis)
+
     results: list[CorrelationResult] = []
 
     # Correlate IPs
     ips = [ip for ip in features.get("artifacts", {}).get("ips", []) if is_public_ipv4(ip)]
     for ip in ips:
-        signals = _collect_ip_signals(ip, osint, beacon_lookup, tls_lookup, yara_ips, asymmetry_lookup)
+        signals = _collect_ip_signals(ip, osint, beacon_lookup, tls_lookup, yara_ips, asymmetry_lookup, http_lookup)
         if not signals:
             continue
         composite = _compute_composite(signals)
@@ -323,7 +372,7 @@ def correlate_indicators(
     # Correlate domains
     domains = features.get("artifacts", {}).get("domains", [])
     for domain in domains:
-        signals = _collect_domain_signals(domain, osint, dns_analysis)
+        signals = _collect_domain_signals(domain, osint, dns_analysis, http_lookup)
         if not signals:
             continue
         composite = _compute_composite(signals)

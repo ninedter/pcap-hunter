@@ -671,6 +671,7 @@ with tab_progress:
                     dns_analysis=st.session_state.get("dns_analysis"),
                     tls_analysis=st.session_state.get("tls_analysis"),
                     yara_results=st.session_state.get("yara_results"),
+                    http_analysis=st.session_state.get("http_analysis"),
                 )
                 st.session_state["correlations"] = correlations
 
@@ -763,6 +764,7 @@ with tab_progress:
                     dns_analysis=st.session_state.get("dns_analysis"),
                     tls_analysis=st.session_state.get("tls_analysis"),
                     yara_results=st.session_state.get("yara_results"),
+                    http_analysis=st.session_state.get("http_analysis"),
                 )
                 st.session_state["correlations"] = correlations
 

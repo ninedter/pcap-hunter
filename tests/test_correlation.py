@@ -203,3 +203,89 @@ def test_correlate_shodan_transport_error_dict_ignored():
     }
     results = correlate_indicators(features=features, osint=osint)
     assert results == []
+
+
+def test_correlate_http_cleartext_cred_lights_up_ip_indicator():
+    """A cleartext-credential finding whose Host header is a raw IP should
+    attribute an http_cleartext_cred signal to that IP indicator."""
+    features = {
+        "artifacts": {"ips": ["1.2.3.4"], "domains": []},
+        "flows": [],
+    }
+    http_analysis = {
+        "cleartext_credentials": [{"host": "1.2.3.4", "uri": "/login", "username": "admin"}],
+        "suspicious_user_agents": [],
+    }
+    results = correlate_indicators(features=features, http_analysis=http_analysis)
+    assert len(results) == 1
+    assert results[0].indicator == "1.2.3.4"
+    assert results[0].indicator_type == "ip"
+    sig = next(s for s in results[0].signals if s.name == "http_cleartext_cred")
+    assert sig.source == "http"
+    assert 0.0 < sig.score <= 1.0
+
+
+def test_correlate_http_cleartext_cred_lights_up_domain_indicator():
+    """The same finding, but with a domain Host header, should attribute the
+    signal to the domain indicator instead (host may be IP OR domain)."""
+    features = {
+        "artifacts": {"ips": [], "domains": ["portal.evil-corp.test"]},
+        "flows": [],
+    }
+    http_analysis = {
+        "cleartext_credentials": [{"host": "portal.evil-corp.test", "uri": "/login", "username": "admin"}],
+        "suspicious_user_agents": [],
+    }
+    results = correlate_indicators(features=features, http_analysis=http_analysis)
+    assert len(results) == 1
+    assert results[0].indicator == "portal.evil-corp.test"
+    assert results[0].indicator_type == "domain"
+    assert any(s.name == "http_cleartext_cred" and s.source == "http" for s in results[0].signals)
+
+
+def test_correlate_http_suspicious_ua_signal():
+    features = {
+        "artifacts": {"ips": ["5.6.7.8"], "domains": []},
+        "flows": [],
+    }
+    http_analysis = {
+        "cleartext_credentials": [],
+        "suspicious_user_agents": [
+            {"host": "5.6.7.8", "user_agent": "sqlmap/1.6", "uri": "/", "reason": "known tool user-agent (sqlmap)"}
+        ],
+    }
+    results = correlate_indicators(features=features, http_analysis=http_analysis)
+    assert len(results) == 1
+    sig = next(s for s in results[0].signals if s.name == "http_suspicious_ua")
+    assert sig.source == "http"
+    assert 0.0 < sig.score <= 1.0
+
+
+def test_correlate_http_cleartext_cred_scores_higher_than_suspicious_ua():
+    """Cleartext creds are a stronger indicator than a suspicious UA alone."""
+    features = {"artifacts": {"ips": ["9.9.9.9"], "domains": []}, "flows": []}
+    http_analysis = {
+        "cleartext_credentials": [{"host": "9.9.9.9", "uri": "/login", "username": "admin"}],
+        "suspicious_user_agents": [{"host": "9.9.9.9", "user_agent": "sqlmap/1.6", "uri": "/", "reason": "known tool"}],
+    }
+    results = correlate_indicators(features=features, http_analysis=http_analysis)
+    cred_sig = next(s for s in results[0].signals if s.name == "http_cleartext_cred")
+    ua_sig = next(s for s in results[0].signals if s.name == "http_suspicious_ua")
+    assert cred_sig.score > ua_sig.score
+
+
+def test_correlate_without_http_analysis_has_no_http_signals():
+    """Omitting http_analysis (the pre-3.5 default) must not change behaviour."""
+    features = {"artifacts": {"ips": ["8.8.8.8"], "domains": []}, "flows": []}
+    osint = {"ips": {"8.8.8.8": {"greynoise": {"classification": "malicious"}}}, "domains": {}}
+    results = correlate_indicators(features=features, osint=osint)
+    assert len(results) == 1
+    assert not any(s.name.startswith("http_") for s in results[0].signals)
+
+
+def test_correlate_http_analysis_none_explicit_is_noop():
+    features = {"artifacts": {"ips": ["8.8.8.8"], "domains": []}, "flows": []}
+    osint = {"ips": {"8.8.8.8": {"greynoise": {"classification": "malicious"}}}, "domains": {}}
+    results = correlate_indicators(features=features, osint=osint, http_analysis=None)
+    assert len(results) == 1
+    assert not any(s.name.startswith("http_") for s in results[0].signals)

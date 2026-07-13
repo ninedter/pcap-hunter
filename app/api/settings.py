@@ -31,6 +31,9 @@ class APISettings:
     job_ttl_days: int
     require_https: bool
     cors_origins: list[str]
+    webhook_timeout_seconds: int
+    webhook_max_retries: int
+    webhook_secret: str | None = None
 
     @classmethod
     def from_env(cls) -> "APISettings":
@@ -56,4 +59,7 @@ class APISettings:
             cors_origins=[
                 o.strip() for o in os.environ.get("PCAP_HUNTER_API_CORS_ORIGINS", "").split(",") if o.strip()
             ],
+            webhook_timeout_seconds=int(os.environ.get("PCAP_HUNTER_API_WEBHOOK_TIMEOUT_SECONDS", "10")),
+            webhook_max_retries=int(os.environ.get("PCAP_HUNTER_API_WEBHOOK_MAX_RETRIES", "2")),
+            webhook_secret=os.environ.get("PCAP_HUNTER_API_WEBHOOK_SECRET") or None,
         )

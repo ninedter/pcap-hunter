@@ -26,6 +26,8 @@ def _settings(main: str | None = "MAIN_KEY", feed: str | None = "FEED_KEY") -> A
         job_ttl_days=30,
         require_https=False,
         cors_origins=[],
+        webhook_timeout_seconds=10,
+        webhook_max_retries=2,
     )
 
 

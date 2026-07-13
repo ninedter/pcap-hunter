@@ -11,6 +11,7 @@ from app.utils.network_utils import (
     bulk_resolve_ips,
     is_enrichable_domain,
     is_public_ipv4,
+    is_safe_webhook_url,
     pick_top_public_ips,
     resolve_ip,
 )
@@ -169,3 +170,111 @@ def test_pick_top_public_ips_ranks_by_packet_volume():
     assert pick_top_public_ips(features, 1) == ["8.8.8.8"]
     # n <= 0 -> all public ips from artifacts
     assert set(pick_top_public_ips(features, 0)) == {"8.8.8.8", "1.1.1.1"}
+
+
+class TestIsSafeWebhookUrl:
+    """SSRF guard for the API v2 completion-webhook feature (Task 4.4).
+
+    hardened_session does NOT block private IPs, so this guard is the only
+    SSRF protection — the "public URL" and "unresolvable host" cases mock
+    socket.getaddrinfo so the suite never depends on real DNS/network access.
+    """
+
+    def test_rejects_non_http_scheme(self):
+        assert is_safe_webhook_url("ftp://example.com/hook") is False
+
+    def test_rejects_missing_host(self):
+        assert is_safe_webhook_url("http:///hook") is False
+
+    def test_rejects_empty_string(self):
+        assert is_safe_webhook_url("") is False
+
+    def test_rejects_private_10(self):
+        assert is_safe_webhook_url("http://10.0.0.5/hook") is False
+
+    def test_rejects_loopback(self):
+        assert is_safe_webhook_url("http://127.0.0.1/hook") is False
+
+    def test_rejects_link_local(self):
+        assert is_safe_webhook_url("http://169.254.169.254/hook") is False
+
+    def test_rejects_localhost_hostname(self):
+        # "localhost" resolves via the hosts file/nsswitch without hitting
+        # the network, so this is safe to assert without mocking.
+        assert is_safe_webhook_url("http://localhost/hook") is False
+
+    def test_rejects_unresolvable_host(self, monkeypatch):
+        import socket as socket_mod
+
+        def boom(host, port, *args, **kwargs):
+            raise socket_mod.gaierror("nodename nor servname provided")
+
+        monkeypatch.setattr("app.utils.network_utils.socket.getaddrinfo", boom)
+        assert is_safe_webhook_url("https://does-not-exist.invalid/hook") is False
+
+    def test_accepts_public_https_url(self, monkeypatch):
+        def fake_getaddrinfo(host, port, *args, **kwargs):
+            return [(2, 1, 6, "", ("93.184.216.34", 0))]
+
+        monkeypatch.setattr("app.utils.network_utils.socket.getaddrinfo", fake_getaddrinfo)
+        assert is_safe_webhook_url("https://example.com/hook") is True
+
+    def test_rejects_when_any_resolved_ip_is_private(self, monkeypatch):
+        """DNS-rebinding-style bypass: if ANY resolved address is private, refuse."""
+
+        def fake_getaddrinfo(host, port, *args, **kwargs):
+            return [
+                (2, 1, 6, "", ("93.184.216.34", 0)),
+                (2, 1, 6, "", ("10.0.0.9", 0)),
+            ]
+
+        monkeypatch.setattr("app.utils.network_utils.socket.getaddrinfo", fake_getaddrinfo)
+        assert is_safe_webhook_url("https://rebinding.example/hook") is False
+
+    def test_rejects_ipv4_multicast(self, monkeypatch):
+        """ipaddress.is_global is (surprisingly) True for IPv4 multicast — must be rejected explicitly."""
+
+        def fake_getaddrinfo(host, port, *args, **kwargs):
+            return [(2, 1, 6, "", ("239.255.255.250", 0))]
+
+        monkeypatch.setattr("app.utils.network_utils.socket.getaddrinfo", fake_getaddrinfo)
+        assert is_safe_webhook_url("http://multicast.example/hook") is False
+
+    def test_rejects_ipv6_link_local_multicast(self, monkeypatch):
+        """ipaddress.is_global is also True for some IPv6 multicast ranges (e.g. ff02::1)."""
+
+        def fake_getaddrinfo(host, port, *args, **kwargs):
+            return [(10, 1, 6, "", ("ff02::1", 0, 0, 0))]
+
+        monkeypatch.setattr("app.utils.network_utils.socket.getaddrinfo", fake_getaddrinfo)
+        assert is_safe_webhook_url("http://[ff02::1]/hook") is False
+
+    def test_rejects_ipv6_unspecified(self, monkeypatch):
+        def fake_getaddrinfo(host, port, *args, **kwargs):
+            return [(10, 1, 6, "", ("::", 0, 0, 0))]
+
+        monkeypatch.setattr("app.utils.network_utils.socket.getaddrinfo", fake_getaddrinfo)
+        assert is_safe_webhook_url("http://[::]/hook") is False
+
+    def test_accepts_public_ipv6_url(self, monkeypatch):
+        def fake_getaddrinfo(host, port, *args, **kwargs):
+            return [(10, 1, 6, "", ("2606:4700:4700::1111", 0, 0, 0))]
+
+        monkeypatch.setattr("app.utils.network_utils.socket.getaddrinfo", fake_getaddrinfo)
+        assert is_safe_webhook_url("https://public-v6.example/hook") is True
+
+    @pytest.mark.parametrize(
+        "url",
+        [
+            "http://[::ffff:127.0.0.1]/",  # IPv4-mapped IPv6 loopback
+            "http://2130706433/",  # decimal-encoded 127.0.0.1
+            "http://0x7f000001/",  # hex-encoded 127.0.0.1
+            "http://100.64.0.1/",  # CGNAT shared address space (100.64.0.0/10)
+            "http://240.0.0.1/",  # reserved (240.0.0.0/4)
+        ],
+    )
+    def test_rejects_known_ssrf_bypass_vectors(self, url):
+        """Lock the guard against classic SSRF encoding/range bypasses across
+        Python versions -- these use the real resolver (getaddrinfo handles the
+        IP literals / integer forms without network access)."""
+        assert is_safe_webhook_url(url) is False

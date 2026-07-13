@@ -50,6 +50,28 @@ def test_env_overrides(monkeypatch):
     assert s.require_https is True
 
 
+def test_webhook_settings_defaults(monkeypatch):
+    monkeypatch.setenv("PCAP_HUNTER_API_KEY", "x")
+    monkeypatch.delenv("PCAP_HUNTER_API_WEBHOOK_TIMEOUT_SECONDS", raising=False)
+    monkeypatch.delenv("PCAP_HUNTER_API_WEBHOOK_MAX_RETRIES", raising=False)
+    monkeypatch.delenv("PCAP_HUNTER_API_WEBHOOK_SECRET", raising=False)
+    s = APISettings.from_env()
+    assert s.webhook_timeout_seconds == 10
+    assert s.webhook_max_retries == 2
+    assert s.webhook_secret is None
+
+
+def test_webhook_settings_env_overrides(monkeypatch):
+    monkeypatch.setenv("PCAP_HUNTER_API_KEY", "x")
+    monkeypatch.setenv("PCAP_HUNTER_API_WEBHOOK_TIMEOUT_SECONDS", "5")
+    monkeypatch.setenv("PCAP_HUNTER_API_WEBHOOK_MAX_RETRIES", "4")
+    monkeypatch.setenv("PCAP_HUNTER_API_WEBHOOK_SECRET", "shh")
+    s = APISettings.from_env()
+    assert s.webhook_timeout_seconds == 5
+    assert s.webhook_max_retries == 4
+    assert s.webhook_secret == "shh"
+
+
 def test_create_app_refuses_start_without_any_auth(monkeypatch, tmp_path):
     """create_app() raises NoKeysConfiguredError when no auth sources exist."""
     monkeypatch.delenv("PCAP_HUNTER_API_KEY", raising=False)

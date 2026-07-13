@@ -244,6 +244,65 @@ def is_public_ipv4(s: str) -> bool:
         return False
 
 
+def is_safe_webhook_url(url: str) -> bool:
+    """SSRF guard for user-supplied outbound webhook URLs.
+
+    ``hardened_session`` (app/security/opsec.py) hardens TLS/redirect/timeout
+    behavior but does **not** block requests to private IPs — this is the
+    only SSRF protection for the completion-webhook feature (API v2).
+
+    True only when: the scheme is ``http``/``https``, the host resolves
+    (``socket.getaddrinfo``), and *every* resolved address is a public/global
+    IP — not loopback, private, link-local, reserved, multicast, or
+    unspecified. Requiring all resolved addresses to be public (rather than
+    just the first) closes a DNS-rebinding-style bypass where a hostname
+    round-robins between a public and a private address.
+
+    Args:
+        url: Candidate webhook URL.
+
+    Returns:
+        False for non-http(s) schemes, missing host, resolution failures, or
+        any resolved address that is not public.
+    """
+    try:
+        parsed = urllib.parse.urlparse(url)
+    except ValueError:
+        return False
+    if parsed.scheme not in ("http", "https"):
+        return False
+    host = parsed.hostname
+    if not host:
+        return False
+
+    # getaddrinfo handles hostnames and IP literals uniformly and returns
+    # every resolved address (A + AAAA), which is what we need to check.
+    try:
+        infos = socket.getaddrinfo(host, None)
+    except (socket.gaierror, socket.herror, OSError, UnicodeError):
+        return False
+    if not infos:
+        return False
+
+    for info in infos:
+        ip_str = info[4][0].split("%", 1)[0]  # strip IPv6 zone id (e.g. "fe80::1%eth0")
+        try:
+            ip = ipaddress.ip_address(ip_str)
+        except ValueError:
+            return False
+        # ipaddress.is_global is True for some multicast ranges (e.g. IPv4
+        # 224.0.0.1, IPv6 ff02::1) — reject those explicitly rather than
+        # trusting is_global alone.
+        if ip.is_multicast or ip.is_unspecified:
+            return False
+        if isinstance(ip, ipaddress.IPv4Address):
+            if not is_public_ipv4(ip_str):
+                return False
+        elif not ip.is_global or ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved:
+            return False
+    return True
+
+
 def pick_top_public_ips(features: dict, n: int) -> list[str]:
     """
     Return top-N public IPv4s by packet volume across flows.

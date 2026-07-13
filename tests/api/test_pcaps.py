@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import json
 import pathlib
 
 import pytest
@@ -75,6 +76,59 @@ def test_post_with_invalid_magic_returns_415(client):
         files={"pcap": ("not.pcap", b"PK\x03\x04" + b"\x00" * 200)},
     )
     assert r.status_code == 415
+
+
+# ---------------------------------------------------------------------------
+# Task 4.4: SSRF-safe completion webhook on submit
+# ---------------------------------------------------------------------------
+
+
+def test_post_with_private_webhook_url_returns_422(client):
+    """Fail fast (before upload I/O) on a webhook_url that fails the SSRF guard."""
+    r = client.post(
+        "/api/v1/pcaps",
+        headers={"Authorization": "Bearer MAIN"},
+        files={"pcap": ("a.pcap", b"\x00" * 100)},
+        data={"webhook_url": "http://10.0.0.5/hook"},
+    )
+    assert r.status_code == 422
+    assert r.json()["detail"] == "invalid_webhook_url"
+
+
+def test_post_with_loopback_webhook_url_returns_422(client):
+    r = client.post(
+        "/api/v1/pcaps",
+        headers={"Authorization": "Bearer MAIN"},
+        files={"pcap": ("a.pcap", b"\x00" * 100)},
+        data={"webhook_url": "http://127.0.0.1:9000/hook"},
+    )
+    assert r.status_code == 422
+    assert r.json()["detail"] == "invalid_webhook_url"
+
+
+@pytest.mark.skipif(not FIXTURE.exists(), reason="fixture missing")
+def test_post_with_public_webhook_url_returns_202_and_persists_option(client, monkeypatch):
+    """A public https webhook_url must be accepted and carried into the job's options_json."""
+    monkeypatch.setattr("app.api.routers.pcaps.is_safe_webhook_url", lambda url: True)
+
+    with FIXTURE.open("rb") as f:
+        r = client.post(
+            "/api/v1/pcaps",
+            headers={"Authorization": "Bearer MAIN"},
+            files={"pcap": ("tiny.pcap", f, "application/vnd.tcpdump.pcap")},
+            data={
+                "osint_enabled": "false",
+                "llm_enabled": "false",
+                "webhook_url": "https://example.com/hook",
+            },
+        )
+    assert r.status_code == 202, r.text
+    job_id = r.json()["job_id"]
+
+    from app.api.deps import get_repo
+
+    job = get_repo().get_job(job_id)
+    assert json.loads(job.options_json)["webhook_url"] == "https://example.com/hook"
 
 
 @pytest.mark.skipif(not FIXTURE.exists(), reason="fixture missing")

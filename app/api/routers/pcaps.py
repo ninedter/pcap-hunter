@@ -7,12 +7,14 @@ import pathlib
 import uuid
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
+from starlette.concurrency import run_in_threadpool
 
 from app.api.deps import get_queue, get_repo, get_settings, require_full_scope
 from app.api.models import JobLinks, PcapSubmissionForm, PcapSubmissionResponse
 from app.api.queue import JobSubmission, QueueFullError
 from app.api.validation import is_valid_pcap_magic
 from app.database.models import Case, CaseStatus, Severity
+from app.utils.network_utils import is_safe_webhook_url
 
 router = APIRouter(prefix="/api/v1/pcaps", tags=["ingress"])
 
@@ -34,11 +36,18 @@ async def submit_pcap(
     osint_enabled: bool = Form(default=True),
     llm_enabled: bool = Form(default=True),
     pyshark_packet_limit: int | None = Form(default=None),
+    webhook_url: str | None = Form(default=None),
     _scope=Depends(require_full_scope),
     repo=Depends(get_repo),
     queue=Depends(get_queue),
     settings=Depends(get_settings),
 ) -> PcapSubmissionResponse:
+    # Fail fast, before any upload I/O: reject unsafe webhook targets up front.
+    # is_safe_webhook_url resolves DNS (socket.getaddrinfo, blocking), so run
+    # it off the event loop to avoid stalling other in-flight requests.
+    if webhook_url and not await run_in_threadpool(is_safe_webhook_url, webhook_url):
+        raise HTTPException(status_code=422, detail="invalid_webhook_url")
+
     case_id = uuid.uuid4().hex[:8]
     out_path = _uploads_dir() / f"{case_id}.pcap"
 
@@ -99,6 +108,7 @@ async def submit_pcap(
         "do_zeek": True,
         "pre_count": True,
         "pyshark_packet_limit": pyshark_packet_limit,
+        "webhook_url": webhook_url,
     }
     try:
         job_id = queue.enqueue(

@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import time
 from abc import ABC, abstractmethod
 from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass, field
@@ -198,6 +199,82 @@ def _persist_analysis(
         result.warnings.append(WARNING_PERSISTENCE_FAILED)
 
 
+def _dispatch_webhook(url: str, payload: dict, timeout: int, max_retries: int) -> None:
+    """POST a job-completion webhook from the worker subprocess; never raises.
+
+    Called from ``_worker_run`` on both terminal branches (done + failed).
+    A webhook delivery failure must never change the job's own terminal
+    state, so every failure mode here is caught and logged, not propagated.
+
+    Re-validates the URL with ``is_safe_webhook_url`` immediately before the
+    network call — defense in depth against the target becoming unsafe
+    between submit-time validation (the router) and job completion (e.g. a
+    DNS change). ``hardened_session`` does not itself block private IPs.
+
+    Args:
+        url: Destination webhook URL (already submit-time validated).
+        payload: JSON-serializable envelope to POST.
+        timeout: Per-attempt request timeout, seconds.
+        max_retries: Additional attempts after the first, on non-2xx status
+            or request exception.
+    """
+    # Every failure mode -- including the lazy imports below -- is caught by
+    # this outer guard so this function NEVER raises. If it did, the
+    # exception would propagate into _worker_run's `except Exception`, whose
+    # unconditional `update_job_status(..., FAILED, ...)` would revert an
+    # already-DONE job to FAILED. The imports live inside the try for exactly
+    # that reason.
+    try:
+        from app.security.opsec import hardened_session, redact
+        from app.utils.network_utils import is_safe_webhook_url
+
+        if not is_safe_webhook_url(url):
+            logger.warning("Webhook dispatch refused: %s no longer passes the SSRF guard", redact(url))
+            return
+
+        body = json.dumps(payload).encode("utf-8")
+        headers = {"Content-Type": "application/json"}
+
+        # Optional HMAC signing so the receiver can authenticate the callback.
+        secret = os.environ.get("PCAP_HUNTER_API_WEBHOOK_SECRET") or None
+        if secret:
+            import hashlib
+            import hmac
+
+            signature = hmac.new(secret.encode("utf-8"), body, hashlib.sha256).hexdigest()
+            headers["X-PCAP-Hunter-Signature"] = f"sha256={signature}"
+
+        attempts = max(1, max_retries + 1)
+        last_error = "unknown"
+        for attempt in range(1, attempts + 1):
+            try:
+                # allow_redirects=False: the SSRF guard only validated `url`.
+                # Following a redirect (hardened_session permits up to 3, and
+                # only blocks https->http downgrades) to an attacker-chosen
+                # Location -- e.g. http://169.254.169.254/ -- would reach an
+                # unvalidated internal host and reopen the SSRF hole. Webhooks
+                # do not need redirects.
+                resp = hardened_session(timeout=timeout).post(url, data=body, headers=headers, allow_redirects=False)
+                if 200 <= resp.status_code < 300:
+                    logger.info(
+                        "Webhook delivered to %s (attempt %d/%d, status %d)",
+                        redact(url),
+                        attempt,
+                        attempts,
+                        resp.status_code,
+                    )
+                    return
+                last_error = f"http_{resp.status_code}"
+            except Exception as exc:
+                last_error = f"{type(exc).__name__}: {exc}"
+            if attempt < attempts:
+                time.sleep(0.25)
+        logger.warning("Webhook delivery to %s failed after %d attempt(s): %s", redact(url), attempts, last_error)
+    except Exception:
+        # No redact() here: the import that provides it may be what failed.
+        logger.exception("Webhook dispatch crashed unexpectedly")
+
+
 def _worker_run(job_id: str, db_path: str, pcap_path: str, options_dict: dict) -> None:
     """Top-level worker function (must be picklable for ProcessPoolExecutor)."""
     from app.utils.logger import get_logger
@@ -261,6 +338,23 @@ def _worker_run(job_id: str, db_path: str, pcap_path: str, options_dict: dict) -
 
         result_blob = json.dumps(result.to_dict()).encode("utf-8")
         repo.complete_job(job_id, result_blob)
+
+        webhook_url = options_dict.get("webhook_url")
+        if webhook_url:
+            from app.api.settings import APISettings
+
+            settings = APISettings.from_env()
+            _dispatch_webhook(
+                webhook_url,
+                {
+                    "job_id": job_id,
+                    "case_id": job.case_id,
+                    "status": "done",
+                    "analysis_id": result.analysis_id or None,
+                },
+                timeout=settings.webhook_timeout_seconds,
+                max_retries=settings.webhook_max_retries,
+            )
     except Exception as exc:
         logger.exception("Job %s failed: %s", job_id, exc)
         repo.update_job_status(
@@ -269,6 +363,23 @@ def _worker_run(job_id: str, db_path: str, pcap_path: str, options_dict: dict) -
             error_code="pipeline_error",
             error_detail=str(exc)[:500],
         )
+
+        webhook_url = options_dict.get("webhook_url")
+        if webhook_url:
+            from app.api.settings import APISettings
+
+            settings = APISettings.from_env()
+            _dispatch_webhook(
+                webhook_url,
+                {
+                    "job_id": job_id,
+                    "case_id": job.case_id,
+                    "status": "failed",
+                    "analysis_id": None,
+                },
+                timeout=settings.webhook_timeout_seconds,
+                max_retries=settings.webhook_max_retries,
+            )
 
 
 class InProcessJobQueue(JobQueue):

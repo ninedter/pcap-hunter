@@ -32,6 +32,8 @@ def _settings(main="MAIN", feed="FEED") -> APISettings:
         job_ttl_days=3,
         require_https=False,
         cors_origins=[],
+        webhook_timeout_seconds=10,
+        webhook_max_retries=2,
     )
 
 

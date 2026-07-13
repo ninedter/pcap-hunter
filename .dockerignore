@@ -16,3 +16,4 @@ docker-compose.yml
 *.db
 *.pcap
 *.pcapng
+!pcaps/demo.pcap

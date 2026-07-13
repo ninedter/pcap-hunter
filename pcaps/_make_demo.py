@@ -11,8 +11,9 @@ facing an empty app, and so that loading it actually exercises real
 detection paths in the pipeline:
 
 - DNS query/response pairs (UDP/53): two normal-looking domains plus one
-  high-entropy, DGA-looking domain that ``app.pipeline.dns_analysis.detect_dga``
-  scores above its confirmation threshold.
+  digit-heavy, all-consonant DGA-looking domain that
+  ``app.pipeline.dns_analysis.detect_dga`` scores above its confirmation
+  threshold (via the digit-ratio / consonant-ratio / no-vowel bonuses).
 - A minimal TLS ClientHello (TCP/443) with an SNI extension, for protocol
   variety.
 - Two HTTP GET requests (TCP/80): one with a normal browser User-Agent, one
@@ -68,7 +69,7 @@ BEACON_PORT = 4444  # in app.config.C2_SUSPECT_PORTS
 # --- Domains ---
 DOMAIN_NORMAL_1 = "www.example.com"
 DOMAIN_NORMAL_2 = "vault.example.net"
-# High-entropy, digit-heavy, all-consonant-alpha synthetic name — not a real
+# Digit-heavy, all-consonant-alpha synthetic name — not a real
 # registered domain. Scores well above app.pipeline.dns_analysis's DGA
 # confirmation threshold (0.5) via digit-ratio + consonant-ratio + no-vowels
 # heuristics.

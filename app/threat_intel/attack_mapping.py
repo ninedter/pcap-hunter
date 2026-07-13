@@ -6,6 +6,8 @@ import json
 import logging
 from dataclasses import dataclass, field
 
+from app.pipeline.ja3 import lookup_ja3
+
 logger = logging.getLogger(__name__)
 
 # Valid IOC types for validation
@@ -17,6 +19,17 @@ MAX_YARA_RESULTS = 20
 MAX_TLS_ALERTS = 20
 MAX_JA3_FINGERPRINTS = 50
 MAX_FLOWS = 1000
+
+# Confidence assigned to a malicious JA3 match, keyed by the authoritative
+# severity from app.pipeline.ja3.KNOWN_JA3_FINGERPRINTS. Unknown/missing
+# severities fall back to JA3_DEFAULT_CONFIDENCE.
+JA3_SEVERITY_CONFIDENCE = {
+    "critical": 0.9,
+    "high": 0.75,
+    "medium": 0.6,
+    "low": 0.4,
+}
+JA3_DEFAULT_CONFIDENCE = 0.75
 
 # Average packet size estimate (bytes) when only packet count is available
 AVG_PACKET_SIZE_ESTIMATE = 800
@@ -504,24 +517,19 @@ class ATTACKMapper:
         if not ja3_list:
             return techniques
 
-        # Known malicious JA3 patterns (subset for demonstration)
-        # In production, this would query a threat intel database
-        known_malware_ja3 = {
-            "72a589da586844d7f0818ce684948eea": "Emotet",
-            "a0e9f5d64349fb13191bc781f81f42e1": "TrickBot",
-        }
-
         for ja3 in ja3_list:
             ja3_hash = ja3 if isinstance(ja3, str) else ja3.get("hash", "")
-            if ja3_hash in known_malware_ja3:
-                malware_name = known_malware_ja3[ja3_hash]
+            match = lookup_ja3(ja3_hash)
+            if match and match.get("malware"):
+                client = match.get("client", "Unknown")
+                confidence = JA3_SEVERITY_CONFIDENCE.get(match.get("severity"), JA3_DEFAULT_CONFIDENCE)
                 techniques.append(
                     TechniqueMatch(
                         technique_id="T1071.001",
                         technique_name="Web Protocols",
                         tactic="command-and-control",
-                        confidence=0.85,
-                        evidence=[f"Known malware JA3 fingerprint detected: {malware_name}"],
+                        confidence=confidence,
+                        evidence=[f"Known malware JA3 fingerprint detected: {client}"],
                     )
                 )
 

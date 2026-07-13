@@ -178,6 +178,39 @@ class TestATTACKMapper:
         # DNS tunneling maps to command-and-control and exfiltration
         assert mapping.kill_chain_phase in ["command-and-control", "exfiltration"]
 
+    def test_ja3_uses_authoritative_db(self):
+        mapper = ATTACKMapper()
+        m = mapper.map_analysis(
+            osint={"ja3": {"a0e9f5d64349fb13191bc781f81f42e1": {"malware": True, "client": "Cobalt Strike"}}}
+        )
+        # technique evidence should reference the ja3.py client, and the hash must resolve
+        from app.pipeline.ja3 import lookup_ja3
+
+        assert lookup_ja3("a0e9f5d64349fb13191bc781f81f42e1")["client"] == "Cobalt Strike"
+        technique_ids = [t.technique_id for t in m.techniques]
+        assert technique_ids  # sanity: osint ja3 path still produces a technique
+
+    def test_ja3_from_features_uses_authoritative_db(self):
+        """Regression test: attack_mapping._check_ja3_from_features previously carried its
+        own inline `known_malware_ja3` dict that contradicted app.pipeline.ja3's
+        KNOWN_JA3_FINGERPRINTS — the same hash was attributed to two different malware
+        families. This hash is authoritatively "Cobalt Strike" per ja3.py, NOT "TrickBot"
+        (the old inline dict's wrong label for this hash).
+        """
+        from app.pipeline.ja3 import lookup_ja3
+
+        ja3_hash = "a0e9f5d64349fb13191bc781f81f42e1"
+        authoritative = lookup_ja3(ja3_hash)
+        assert authoritative["client"] == "Cobalt Strike"
+
+        mapper = ATTACKMapper()
+        features = {"artifacts": {"ja3": [ja3_hash]}}
+        mapping = mapper.map_analysis(features=features)
+
+        evidence_text = " ".join(e for t in mapping.techniques for e in t.evidence)
+        assert "Cobalt Strike" in evidence_text
+        assert "TrickBot" not in evidence_text
+
 
 # =============================================================================
 # IOC Scorer Tests

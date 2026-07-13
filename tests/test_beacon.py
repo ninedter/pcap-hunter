@@ -1,3 +1,4 @@
+from app.config import BEACON_SCORE_THRESHOLD
 from app.pipeline.beacon import jitter_score, periodicity_score, rank_beaconing
 
 
@@ -100,3 +101,95 @@ def test_jitter_score_random():
     # Random traffic should score lower than periodic
     periodic = jitter_score([float(i) for i in range(1, 21)])
     assert res["jitter_score"] < periodic["jitter_score"]
+
+
+def test_rank_beaconing_regular_443_clears_threshold():
+    # A genuinely periodic, SMALL-PAYLOAD HTTPS beacon (raw score ~1.0) must
+    # survive the port-443 benign-service penalty and still clear
+    # BEACON_SCORE_THRESHOLD. Before the conditional softening, the blanket
+    # 0.15 multiplier crushed this down to ~0.15 — real HTTPS C2 was invisible
+    # to the pipeline. Small payloads (80 bytes) are what real C2 beacons look
+    # like, and are required for softening.
+    flows = [
+        {
+            "src": "10.0.0.3",
+            "dst": "203.0.113.5",
+            "sport": "51000",
+            "dport": "443",
+            "proto": "tcp",
+            "pkt_times": [float(i) for i in range(1, 60)],  # perfectly periodic
+            "pkt_lens": [80] * 59,  # small, C2-like payloads
+        }
+    ]
+    df = rank_beaconing(flows, top_n=10)
+    assert len(df) == 1
+    assert df.iloc[0]["score"] > BEACON_SCORE_THRESHOLD
+
+
+def test_rank_beaconing_regular_443_large_payload_not_softened():
+    # A machine-regular flow on 443 with LARGE payloads (like a CDN heartbeat)
+    # is indistinguishable from C2 by timing+jitter alone — it must NOT be
+    # softened. Only small-payload flows qualify; this keeps the full 0.15
+    # penalty and stays well below threshold. Locks in the small-payload
+    # distinction that guards tests/test_integration.py::test_https_cdn_not_flagged.
+    flows = [
+        {
+            "src": "10.0.0.5",
+            "dst": "13.224.0.9",  # CDN-like IP
+            "sport": "51002",
+            "dport": "443",
+            "proto": "tcp",
+            "pkt_times": [float(i) for i in range(1, 60)],  # perfectly periodic
+            "pkt_lens": [1200] * 59,  # large payloads → NOT C2-like
+        }
+    ]
+    df = rank_beaconing(flows, top_n=10)
+    assert len(df) == 1
+    # Full 0.15 penalty applied (raw ~1.0 * 0.15 = 0.15), no softening.
+    assert df.iloc[0]["score"] <= 0.15
+    assert df.iloc[0]["score"] < BEACON_SCORE_THRESHOLD
+
+
+def test_rank_beaconing_regular_443_no_pkt_lens_not_softened():
+    # Conservative default: without pkt_lens we cannot confirm the flow is
+    # C2-like (small payloads), so we do NOT soften. Keeps the full penalty.
+    flows = [
+        {
+            "src": "10.0.0.6",
+            "dst": "203.0.113.7",
+            "sport": "51003",
+            "dport": "443",
+            "proto": "tcp",
+            "pkt_times": [float(i) for i in range(1, 60)],  # perfectly periodic
+            # no pkt_lens
+        }
+    ]
+    df = rank_beaconing(flows, top_n=10)
+    assert len(df) == 1
+    assert df.iloc[0]["score"] <= 0.15
+    assert df.iloc[0]["score"] < BEACON_SCORE_THRESHOLD
+
+
+def test_rank_beaconing_jittery_443_stays_suppressed():
+    # An ordinary HTTPS keep-alive with real-world jitter must NOT be
+    # promoted by the softening — only extremely regular, high-confidence
+    # signals qualify. This flow's raw score drops well below the 0.85
+    # softening gate once jitter is introduced, so it keeps the full 0.15
+    # penalty and stays suppressed below threshold.
+    import random
+
+    random.seed(42)
+    ts = sorted(10.0 * i + random.uniform(-2, 2) for i in range(30))
+    flows = [
+        {
+            "src": "10.0.0.4",
+            "dst": "203.0.113.6",
+            "sport": "51001",
+            "dport": "443",
+            "proto": "tcp",
+            "pkt_times": ts,
+        }
+    ]
+    df = rank_beaconing(flows, top_n=10)
+    assert len(df) == 1
+    assert df.iloc[0]["score"] < BEACON_SCORE_THRESHOLD

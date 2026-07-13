@@ -53,6 +53,39 @@ BENIGN_SERVICE_PORTS: dict[str, float] = {
     "5353": 0.15,  # mDNS
 }
 
+# Ports where a very regular, high-confidence signal is allowed to soften
+# (not erase) the benign-service penalty above. Restricted to HTTPS/HTTP —
+# the transports real C2 frameworks actually abuse to blend in. DNS/NTP and
+# the other BENIGN_SERVICE_PORTS entries are deliberately excluded: they are
+# genuinely periodic infrastructure traffic by design, not something C2 uses
+# as cover, so no amount of "regularity" should un-suppress them.
+SOFTENABLE_BENIGN_PORTS: frozenset[str] = frozenset({"443"})
+
+# Average packet size (bytes) below which a flow's payloads look C2-like.
+# Real C2 beacons are SMALL packets; CDN/streaming keep-alives carry large
+# payloads. Reused by both the softening gate below and the large-payload
+# penalty in rank_beaconing.
+C2_PAYLOAD_MAX_BYTES = 500
+
+# Softened multiplier applied instead of BENIGN_SERVICE_PORTS[dport] when a
+# flow on a softenable port meets ALL THREE C2-like conditions:
+#   1. very high-confidence   — raw score >= 0.85
+#   2. essentially jitter-free — jitter_pct <= 15
+#   3. small average payload   — pkt_lens present and mean < C2_PAYLOAD_MAX_BYTES
+# That combination is exactly what genuine small-packet HTTPS C2 looks like.
+# Tuned against tests/test_beacon.py so a perfectly periodic small-payload
+# 443 flow (raw score ~1.0) clears BEACON_SCORE_THRESHOLD (0.6) with margin:
+# 1.0 * 0.7 = 0.7 > 0.6. The naive "penalty * 4" (0.15 -> 0.6) is NOT enough:
+# a 0.9-raw flow would land at 0.9 * 0.6 = 0.54, still below threshold.
+#
+# The small-payload condition (3) is load-bearing: a machine-regular CDN
+# heartbeat (zero jitter, LARGE 1200-byte payloads) is indistinguishable
+# from C2 by timing+jitter alone, so requiring small payloads keeps those
+# fully penalised. When pkt_lens is absent/empty we CANNOT confirm the flow
+# is C2-like, so we conservatively do NOT soften. Ordinary jittery HTTPS
+# keep-alives also fail the >=0.85 gate and keep the full 0.15 penalty.
+SOFTENED_PENALTY = 0.7
+
 
 def periodicity_score(ts: list[float]) -> dict[str, object]:
     """Score timestamp periodicity for beaconing detection.
@@ -205,10 +238,28 @@ def rank_beaconing(flows: list[dict[str, object]], top_n: int = 20) -> pd.DataFr
         # Applied BEFORE any threshold checks so that benign traffic
         # is scored down before it can appear as a candidate.
 
+        pkt_lens = f.get("pkt_lens", [])
+
         # 1. Benign service ports FIRST — this is the most common FP source
         #    (e.g., HTTPS keep-alives to CDNs on port 443)
         if dport in BENIGN_SERVICE_PORTS:
-            final_score *= BENIGN_SERVICE_PORTS[dport]
+            penalty = BENIGN_SERVICE_PORTS[dport]
+            # A very regular, high-confidence, SMALL-PAYLOAD signal on a
+            # softenable port (443) is exactly what real HTTPS C2 looks like
+            # — soften the penalty so it can still surface above threshold,
+            # instead of guaranteeing a sub-threshold score. Ordinary HTTPS
+            # keep-alives score moderately/show jitter, and CDN heartbeats
+            # carry large payloads — both keep the full penalty.
+            jitter_pct = jitter.get("jitter_pct")
+            if jitter_pct is None:
+                jitter_pct = 100.0
+            # Small average payload is required and conservative: when pkt_lens
+            # is absent/empty we cannot confirm the flow is C2-like, so we do
+            # NOT soften.
+            small_payload = bool(pkt_lens) and (sum(pkt_lens) / len(pkt_lens) < C2_PAYLOAD_MAX_BYTES)
+            if dport in SOFTENABLE_BENIGN_PORTS and final_score >= 0.85 and jitter_pct <= 15 and small_payload:
+                penalty = SOFTENED_PENALTY
+            final_score *= penalty
 
         # 2. Well-known infrastructure IPs (DNS resolvers, NTP servers)
         if dst in INFRA_ALLOWLIST or src in INFRA_ALLOWLIST:
@@ -220,10 +271,9 @@ def rank_beaconing(flows: list[dict[str, object]], top_n: int = 20) -> pd.DataFr
 
         # 4. High-volume large-payload flows (streaming/downloads, not C2)
         #    Real C2 beacons are small, infrequent packets.
-        pkt_lens = f.get("pkt_lens", [])
         if pkt_lens and len(ts) > 200:
             avg_pkt_size = sum(pkt_lens) / len(pkt_lens)
-            if avg_pkt_size > 500:
+            if avg_pkt_size > C2_PAYLOAD_MAX_BYTES:
                 final_score *= 0.25
 
         rows.append(

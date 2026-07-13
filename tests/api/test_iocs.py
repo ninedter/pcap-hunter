@@ -68,6 +68,55 @@ def test_iocs_json_filter_by_type(client):
     assert all(i["type"] == "ip" for i in r.json()["iocs"])
 
 
+# ── mitre_techniques derivation ─────────────────────────────────────────────
+
+
+def test_iocs_json_includes_mitre_techniques(client):
+    """mitre_techniques must be derived from the analysis, not the hardcoded []."""
+    from app.api.deps import get_repo
+
+    repo = get_repo()
+    case = Case(id="case0007", title="mitre")
+    repo.create_case(case)
+    repo.save_analysis(
+        Analysis(
+            case_id=case.id,
+            pcap_path="/tmp/m.pcap",
+            mitre_techniques=["T1071.001"],
+            iocs=[IOC(ioc_type=IOCType.IP, value="9.9.9.9", severity=Severity.HIGH)],
+        )
+    )
+
+    r = client.get("/api/v1/iocs.json", headers={"Authorization": "Bearer FEED"})
+    assert r.status_code == 200
+    row = next(i for i in r.json()["iocs"] if i["value"] == "9.9.9.9")
+    assert row["mitre_techniques"] == ["T1071.001"]
+
+
+def test_iocs_json_multi_technique_multi_tag_no_tag_duplication(client):
+    """Fan-out guard at the API layer: multiple techniques + multiple tags on the
+    same IOC's analysis must not duplicate tags or technique IDs in the response."""
+    from app.api.deps import get_repo
+
+    repo = get_repo()
+    case = Case(id="case0008", title="multi", tags=["tag-x", "tag-y"])
+    repo.create_case(case)
+    repo.save_analysis(
+        Analysis(
+            case_id=case.id,
+            pcap_path="/tmp/m2.pcap",
+            mitre_techniques=["T1059", "T1071.001"],
+            iocs=[IOC(ioc_type=IOCType.IP, value="7.7.7.7", severity=Severity.HIGH)],
+        )
+    )
+
+    r = client.get("/api/v1/iocs.json", headers={"Authorization": "Bearer FEED"})
+    assert r.status_code == 200
+    row = next(i for i in r.json()["iocs"] if i["value"] == "7.7.7.7")
+    assert sorted(row["mitre_techniques"]) == ["T1059", "T1071.001"]
+    assert sorted(row["tags"]) == ["tag-x", "tag-y"]
+
+
 # ── ETag / 304 ──────────────────────────────────────────────────────────────
 
 

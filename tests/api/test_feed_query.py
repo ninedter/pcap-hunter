@@ -109,3 +109,73 @@ def test_duplicate_ioc_takes_max_severity_score(tmp_path):
     row = next(r for r in rows if r["value"] == "198.51.100.7")
     assert row["score"] == 100
     assert row["severity"] == "critical"
+
+
+def test_query_iocs_derives_mitre_techniques(tmp_path):
+    """mitre_techniques must be derived from the analysis's technique IDs, not hardcoded []."""
+    repo = CaseRepository(db_path=str(tmp_path / "t.db"))
+    repo.create_case(Case(id="case9001", title="t"))
+    analysis = Analysis(
+        case_id="case9001",
+        pcap_path="/tmp/x.pcap",
+        mitre_techniques=["T1071.001"],
+        iocs=[IOC(ioc_type=IOCType.IP, value="9.9.9.9", severity=Severity.HIGH)],
+    )
+    repo.save_analysis(analysis)
+
+    rows = query_iocs(repo, IOCFilter())
+    row = next(r for r in rows if r["value"] == "9.9.9.9")
+    assert row["mitre_techniques"] == ["T1071.001"]
+
+
+def test_query_iocs_no_techniques_returns_empty_list(tmp_path):
+    """An analysis with no mapped techniques must yield [], not crash the LEFT JOIN."""
+    repo = _seed(tmp_path)
+    rows = query_iocs(repo, IOCFilter())
+    for r in rows:
+        assert r["mitre_techniques"] == []
+
+
+def test_query_iocs_multi_technique_multi_tag_no_duplication(tmp_path):
+    """Fan-out guard: the LEFT JOIN analysis_techniques multiplies result rows
+    (one per technique), which could silently corrupt any non-DISTINCT aggregate.
+    Seed multiple techniques AND multiple tags on the same IOC's analysis and
+    confirm both tags and technique IDs come back deduped, not repeated."""
+    repo = CaseRepository(db_path=str(tmp_path / "t.db"))
+    repo.create_case(Case(id="case9002", title="t", tags=["tag-a", "tag-b"]))
+    analysis = Analysis(
+        case_id="case9002",
+        pcap_path="/tmp/y.pcap",
+        mitre_techniques=["T1071.001", "T1059"],
+        iocs=[IOC(ioc_type=IOCType.IP, value="8.8.8.8", severity=Severity.HIGH)],
+    )
+    repo.save_analysis(analysis)
+
+    rows = query_iocs(repo, IOCFilter())
+    row = next(r for r in rows if r["value"] == "8.8.8.8")
+    assert row["mitre_techniques"] == ["T1059", "T1071.001"]  # sorted
+    assert sorted(row["tags"]) == ["tag-a", "tag-b"]
+
+
+def test_query_iocs_techniques_dont_affect_pagination(tmp_path):
+    """LIMIT/OFFSET must still page over distinct (ioc_type, value) groups, not
+    over the post-join fan-out rows, when techniques are present."""
+    repo = CaseRepository(db_path=str(tmp_path / "t.db"))
+    repo.create_case(Case(id="case9003", title="t", status=CaseStatus.IN_PROGRESS, severity=Severity.LOW))
+    analysis = Analysis(
+        case_id="case9003",
+        pcap_path="x.pcap",
+        features={"artifacts": {}},
+        mitre_techniques=["T1071.001", "T1059", "T1105"],
+    )
+    analysis.iocs = [
+        IOC(ioc_type=IOCType.IP, value="203.0.113.10", severity=Severity.HIGH),
+        IOC(ioc_type=IOCType.IP, value="203.0.113.11", severity=Severity.HIGH),
+    ]
+    repo.save_analysis(analysis)
+
+    page1 = query_iocs(repo, IOCFilter(limit=1, offset=0))
+    page2 = query_iocs(repo, IOCFilter(limit=1, offset=1))
+    assert len(page1) == 1
+    assert len(page2) == 1
+    assert page1[0]["value"] != page2[0]["value"]

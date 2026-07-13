@@ -148,6 +148,7 @@ class TestAnalysis:
         assert analysis.packet_count == 0
         assert analysis.features == {}
         assert analysis.iocs == []
+        assert analysis.mitre_techniques == []
 
     def test_to_dict(self):
         analysis = Analysis(
@@ -373,6 +374,19 @@ class TestCaseRepository:
         finally:
             conn.close()
 
+    def test_clear_all_removes_analysis_techniques(self, repo):
+        """clear_all must delete analysis_techniques rows along with the case data."""
+        case_id = repo.create_case(Case(title="With Techniques"))
+        repo.save_analysis(Analysis(case_id=case_id, pcap_path="/p.pcap", mitre_techniques=["T1071.001"]))
+
+        assert repo.clear_all() is True
+
+        conn = repo._get_conn()
+        try:
+            assert conn.execute("SELECT COUNT(*) FROM analysis_techniques").fetchone()[0] == 0
+        finally:
+            conn.close()
+
     def test_save_analysis_to_case(self, repo):
         """Test saving analysis to case."""
         case_id = repo.create_case(Case(title="With Analysis"))
@@ -445,6 +459,49 @@ class TestCaseRepository:
         retrieved = repo.get_analysis(analysis_id)
         assert retrieved is not None
         assert retrieved.attack_mapping == {}
+
+    def test_save_analysis_round_trips_mitre_techniques(self, repo):
+        """mitre_techniques (technique IDs) must survive save -> get, dedup by table UNIQUE."""
+        case_id = repo.create_case(Case(title="With MITRE Techniques"))
+        analysis = Analysis(
+            case_id=case_id,
+            pcap_path="/test.pcap",
+            mitre_techniques=["T1071.001", "T1059"],
+        )
+        analysis_id = repo.save_analysis(analysis)
+
+        retrieved = repo.get_analysis(analysis_id)
+        assert retrieved is not None
+        assert sorted(retrieved.mitre_techniques) == ["T1059", "T1071.001"]
+
+        # Also verify it round-trips via the case-level fetch path.
+        restored_case = repo.get_case(case_id)
+        assert sorted(restored_case.analyses[0].mitre_techniques) == ["T1059", "T1071.001"]
+
+    def test_get_analysis_defaults_mitre_techniques_to_empty_list(self, repo):
+        """Analyses saved without techniques must not crash on read."""
+        case_id = repo.create_case(Case(title="No MITRE Techniques"))
+        analysis = Analysis(case_id=case_id, pcap_path="/test.pcap")
+        analysis_id = repo.save_analysis(analysis)
+
+        retrieved = repo.get_analysis(analysis_id)
+        assert retrieved is not None
+        assert retrieved.mitre_techniques == []
+
+    def test_save_analysis_resaved_mitre_techniques_replaces_not_accumulates(self, repo):
+        """Re-saving the same analysis_id with a different technique list must fully
+        replace the prior set, not accumulate across saves (mirrors full-replace
+        semantics of attack_json/features_json, unlike the accumulating iocs table)."""
+        case_id = repo.create_case(Case(title="Resaved Techniques"))
+        analysis = Analysis(case_id=case_id, pcap_path="/test.pcap", mitre_techniques=["T1071.001"])
+        analysis_id = repo.save_analysis(analysis)
+
+        analysis.id = analysis_id
+        analysis.mitre_techniques = ["T1059"]
+        repo.save_analysis(analysis)
+
+        retrieved = repo.get_analysis(analysis_id)
+        assert retrieved.mitre_techniques == ["T1059"]
 
     def test_save_analysis_with_iocs(self, repo):
         """Test saving analysis with IOCs."""
@@ -542,7 +599,13 @@ class TestCascadeDeletion:
         repo.create_case(
             Case(id="del00001", title="t", status=CaseStatus.IN_PROGRESS, severity=Severity.LOW, tags=["x"])
         )
-        analysis = Analysis(case_id="del00001", pcap_path="x.pcap", packet_count=1, features={"artifacts": {}})
+        analysis = Analysis(
+            case_id="del00001",
+            pcap_path="x.pcap",
+            packet_count=1,
+            features={"artifacts": {}},
+            mitre_techniques=["T1071.001"],
+        )
         analysis.iocs = [IOC(ioc_type=IOCType.IP, value="203.0.113.9", context="t", severity=Severity.HIGH)]
         aid = repo.save_analysis(analysis)
         repo.add_note("del00001", "investigation note", analysis_id=aid)
@@ -555,6 +618,7 @@ class TestCascadeDeletion:
             for table, where, arg in [
                 ("analyses", "id = ?", aid),
                 ("iocs", "analysis_id = ?", aid),
+                ("analysis_techniques", "analysis_id = ?", aid),
                 ("jobs", "id = ?", job_id),
                 ("case_tags", "case_id = ?", "del00001"),
                 ("notes", "case_id = ?", "del00001"),

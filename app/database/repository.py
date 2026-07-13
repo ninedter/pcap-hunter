@@ -102,6 +102,14 @@ class CaseRepository:
                     updated_at TIMESTAMP
                 );
 
+                -- MITRE ATT&CK technique IDs derived per analysis (feeds the IOC feed's
+                -- mitre_techniques aggregation without post-SQL Python filtering).
+                CREATE TABLE IF NOT EXISTS analysis_techniques (
+                    analysis_id TEXT REFERENCES analyses(id) ON DELETE CASCADE,
+                    technique_id TEXT NOT NULL,
+                    UNIQUE(analysis_id, technique_id)
+                );
+
                 -- Tags for organization
                 CREATE TABLE IF NOT EXISTS tags (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -137,6 +145,7 @@ class CaseRepository:
                 CREATE INDEX IF NOT EXISTS idx_analyses_case ON analyses(case_id);
                 CREATE INDEX IF NOT EXISTS idx_iocs_analysis ON iocs(analysis_id);
                 CREATE INDEX IF NOT EXISTS idx_iocs_type_value ON iocs(ioc_type, value);
+                CREATE INDEX IF NOT EXISTS idx_analysis_techniques ON analysis_techniques(analysis_id);
                 CREATE INDEX IF NOT EXISTS idx_notes_case ON notes(case_id);
                 CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status);
                 CREATE INDEX IF NOT EXISTS idx_jobs_case ON jobs(case_id);
@@ -355,6 +364,10 @@ class CaseRepository:
                 (case_id,),
             )
             conn.execute(
+                "DELETE FROM analysis_techniques WHERE analysis_id IN (SELECT id FROM analyses WHERE case_id = ?)",
+                (case_id,),
+            )
+            conn.execute(
                 "DELETE FROM notes WHERE case_id = ? OR analysis_id IN (SELECT id FROM analyses WHERE case_id = ?)",
                 (case_id, case_id),
             )
@@ -382,6 +395,7 @@ class CaseRepository:
         try:
             conn.execute("DELETE FROM notes")
             conn.execute("DELETE FROM iocs")
+            conn.execute("DELETE FROM analysis_techniques")
             conn.execute("DELETE FROM analyses")
             conn.execute("DELETE FROM case_tags")
             conn.execute("DELETE FROM tags")
@@ -448,6 +462,17 @@ class CaseRepository:
             # Save IOCs
             for ioc in analysis.iocs:
                 self._save_ioc(conn, analysis.id, ioc)
+
+            # Save MITRE ATT&CK technique associations. Full replace (delete then
+            # insert) rather than accumulate: unlike iocs, a re-analysis's technique
+            # set should reflect only the most recent save, mirroring the
+            # full-replace semantics of attack_json/features_json on this row.
+            conn.execute("DELETE FROM analysis_techniques WHERE analysis_id = ?", (analysis.id,))
+            for technique_id in analysis.mitre_techniques:
+                conn.execute(
+                    "INSERT OR IGNORE INTO analysis_techniques (analysis_id, technique_id) VALUES (?, ?)",
+                    (analysis.id, technique_id),
+                )
 
             conn.commit()
             logger.info("Saved analysis: %s", analysis.id)
@@ -734,6 +759,12 @@ class CaseRepository:
             for r in ioc_rows
         ]
 
+        # Load MITRE ATT&CK technique IDs
+        technique_rows = conn.execute(
+            "SELECT technique_id FROM analysis_techniques WHERE analysis_id = ?", (row["id"],)
+        ).fetchall()
+        mitre_techniques = [r["technique_id"] for r in technique_rows]
+
         return Analysis(
             id=row["id"],
             case_id=row.get("case_id") or "",
@@ -748,6 +779,7 @@ class CaseRepository:
             dns_analysis=dns_analysis,
             tls_analysis=tls_analysis,
             attack_mapping=attack_mapping,
+            mitre_techniques=mitre_techniques,
             iocs=iocs,
         )
 

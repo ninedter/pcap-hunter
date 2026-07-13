@@ -48,11 +48,13 @@ def query_iocs(repo: CaseRepository, filt: IOCFilter) -> list[dict[str, Any]]:
                MIN(a.analyzed_at) AS first_seen,
                MAX(a.analyzed_at) AS last_seen,
                GROUP_CONCAT(DISTINCT a.case_id) AS case_ids,
-               GROUP_CONCAT(DISTINCT t.name) AS tag_names
+               GROUP_CONCAT(DISTINCT t.name) AS tag_names,
+               GROUP_CONCAT(DISTINCT at.technique_id) AS technique_ids
         FROM iocs i
         JOIN analyses a ON i.analysis_id = a.id
         LEFT JOIN case_tags ct ON ct.case_id = a.case_id
         LEFT JOIN tags t ON t.id = ct.tag_id
+        LEFT JOIN analysis_techniques at ON at.analysis_id = i.analysis_id
     """
     where: list[str] = []
     params: list[Any] = []
@@ -102,7 +104,7 @@ def query_iocs(repo: CaseRepository, filt: IOCFilter) -> list[dict[str, Any]]:
                 "first_seen": d["first_seen"],
                 "last_seen": d["last_seen"],
                 "case_ids": [c for c in (d.get("case_ids") or "").split(",") if c],
-                "mitre_techniques": [],  # Future: derive from analysis features
+                "mitre_techniques": sorted({t for t in (d.get("technique_ids") or "").split(",") if t}),
             }
         )
     return out

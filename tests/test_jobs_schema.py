@@ -36,6 +36,29 @@ def test_analyses_has_attack_json_column(tmp_path):
     assert "attack_json" in cols, "analyses.attack_json column should exist for persisted ATT&CK mappings"
 
 
+def test_analysis_techniques_table_exists(tmp_path):
+    repo = CaseRepository(db_path=str(tmp_path / "test.db"))
+    conn = repo._get_conn()
+    try:
+        row = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='analysis_techniques'"
+        ).fetchone()
+        cols = [r[1] for r in conn.execute("PRAGMA table_info(analysis_techniques)").fetchall()]
+    finally:
+        conn.close()
+    assert row is not None, "analysis_techniques table should exist for feed mitre_techniques derivation"
+    assert set(cols) == {"analysis_id", "technique_id"}
+
+
+def test_analysis_techniques_table_idempotent_recreate(tmp_path):
+    """_init_schema runs on every CaseRepository construction; the CREATE TABLE
+    IF NOT EXISTS / CREATE INDEX IF NOT EXISTS statements must not raise on a
+    second open against the same database file."""
+    db_path = str(tmp_path / "test.db")
+    CaseRepository(db_path=db_path)
+    CaseRepository(db_path=db_path)  # must not raise
+
+
 def test_jobs_table_columns(tmp_path):
     """Verify the jobs table has all expected columns."""
     repo = CaseRepository(db_path=str(tmp_path / "test.db"))

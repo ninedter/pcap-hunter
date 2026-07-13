@@ -157,6 +157,7 @@ class Analysis:
     dns_analysis: dict | None = None
     tls_analysis: dict | None = None
     attack_mapping: dict = field(default_factory=dict)
+    mitre_techniques: list[str] = field(default_factory=list)
     iocs: list[IOC] = field(default_factory=list)
 
     def to_dict(self) -> dict:
@@ -174,6 +175,7 @@ class Analysis:
             "dns_analysis": self.dns_analysis,
             "tls_analysis": self.tls_analysis,
             "attack_mapping": self.attack_mapping,
+            "mitre_techniques": list(self.mitre_techniques),
             "iocs": [ioc.to_dict() for ioc in self.iocs],
         }
 
@@ -199,6 +201,7 @@ class Analysis:
             dns_analysis=data.get("dns_analysis"),
             tls_analysis=data.get("tls_analysis"),
             attack_mapping=data.get("attack_mapping", {}),
+            mitre_techniques=data.get("mitre_techniques", []),
             iocs=iocs,
         )
 

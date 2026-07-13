@@ -93,6 +93,21 @@ BEACON_SCORE_THRESHOLD = 0.6  # Score above this → beacon candidate
 BEACON_MIN_PACKETS = 4  # Minimum packets to evaluate for beaconing
 BEACON_TOP_N = 20  # Number of top beacon candidates to report
 
+# HTTP Analysis
+HTTP_SUSPICIOUS_URI_LEN = 512  # URI length above this → suspicious (possible exfil/exploit)
+HTTP_SUSPICIOUS_UA_TOKENS = frozenset(
+    {
+        "python-requests",
+        "curl",
+        "wget",
+        "powershell",
+        "go-http-client",
+        "nmap",
+        "sqlmap",
+        "masscan",
+    }
+)
+
 # Flow Analysis
 FLOW_ASYMMETRY_RATIO = 10  # Outbound/inbound ratio above this → suspicious
 FLOW_ASYMMETRY_MIN_BYTES = 1_000_000  # 1 MB minimum to flag asymmetry

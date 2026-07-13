@@ -43,6 +43,28 @@ class TestCEFEvent:
         cef = event.to_cef()
         assert cef.endswith("|1|")
 
+    def test_extension_value_newline_escaping(self):
+        """A newline/CR embedded in an attacker-influenced extension value must not
+        be able to forge a second CEF/syslog line."""
+        event = CEFEvent(
+            signature_id="T-1",
+            name="Test",
+            severity=1,
+            extensions={"cs1": "evil\nCEF:0|Fake|Fake|1.0|999|Forged Event|10|src=9.9.9.9\r"},
+        )
+        cef = event.to_cef()
+        assert "\n" not in cef
+        assert "\r" not in cef
+        assert "cs1=evil\\nCEF:0|Fake|Fake|1.0|999|Forged Event|10|src\\=9.9.9.9\\r" in cef
+
+    def test_name_newline_does_not_split_header(self):
+        """A newline embedded in the name field must not split the CEF header
+        into a second forged line."""
+        event = CEFEvent(signature_id="T-1", name="Evil\nCEF:0|Fake|Fake|1.0|999|Forged|10|", severity=1)
+        cef = event.to_cef()
+        assert "\n" not in cef
+        assert "\r" not in cef
+
 
 class TestFormatSyslog:
     def test_syslog_header(self):
@@ -205,3 +227,21 @@ class TestFeedRowsToCEF:
         rows = [{"type": "ip", "value": "1.2.3.4", "score": 75, "severity": "high", "tags": []}]
         text = feed_rows_to_cef(rows, hostname="feedhost")
         assert "feedhost" in text
+
+    def test_hostile_value_with_embedded_newline_yields_one_line_per_event(self):
+        """IOC values are attacker-influenced (derived from PCAP data). A value
+        containing an embedded newline must not be able to inject a forged
+        second CEF/syslog line into the SIEM feed."""
+        rows = [
+            {
+                "type": "domain",
+                "value": "evil.example\nCEF:0|Fake|Fake|1.0|999|Forged Event|10|src=9.9.9.9",
+                "score": 100,
+                "severity": "critical",
+                "tags": [],
+            },
+            {"type": "ip", "value": "2.2.2.2", "score": 50, "severity": "medium", "tags": []},
+        ]
+        text = feed_rows_to_cef(rows)
+        lines = [ln for ln in text.strip().splitlines() if ln]
+        assert len(lines) == 2

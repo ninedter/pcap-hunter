@@ -40,6 +40,30 @@ _SEVERITY_MAP = {
 }
 
 
+def _escape_cef_extension(value: str) -> str:
+    """Escape a CEF extension value per the CEF spec.
+
+    Backslash MUST be escaped first, so the literal ``\\n``/``\\r`` sequences
+    introduced below for real newline/CR characters are not themselves
+    re-escaped. Embedded CR/LF are rendered as the literal two-character
+    escape sequences (not stripped) so attacker-influenced IOC values (e.g.
+    derived from PCAP data) can't inject a second CEF/syslog line into the
+    ingesting SIEM.
+    """
+    return str(value).replace("\\", "\\\\").replace("=", "\\=").replace("\r", "\\r").replace("\n", "\\n")
+
+
+def _escape_cef_header_field(value: str) -> str:
+    """Escape a CEF header field (e.g. ``name``) per the CEF spec.
+
+    Backslash and pipe are escaped per spec. Header fields have no
+    standard escape sequence for a literal newline, so embedded CR/LF are
+    collapsed to a space instead — this keeps the record on a single line
+    without silently deleting the word-break the character implied.
+    """
+    return value.replace("\\", "\\\\").replace("|", "\\|").replace("\r", " ").replace("\n", " ")
+
+
 @dataclass
 class CEFEvent:
     """A single CEF event ready for syslog emission."""
@@ -54,13 +78,11 @@ class CEFEvent:
         """Render as a CEF-formatted string (without syslog header)."""
         ext_parts = []
         for k, v in self.extensions.items():
-            # CEF extension values: escape = and backslash
-            safe_v = str(v).replace("\\", "\\\\").replace("=", "\\=")
-            ext_parts.append(f"{k}={safe_v}")
+            ext_parts.append(f"{k}={_escape_cef_extension(v)}")
         ext_str = " ".join(ext_parts)
 
-        # Escape pipe characters in header fields
-        name_safe = self.name.replace("|", "\\|")
+        # Escape pipe/backslash and neutralize CR/LF in header fields
+        name_safe = _escape_cef_header_field(self.name)
 
         return (
             f"CEF:{_CEF_VERSION}|{_VENDOR}|{_PRODUCT}|{_PRODUCT_VERSION}"

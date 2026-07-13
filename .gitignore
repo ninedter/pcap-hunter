@@ -39,6 +39,7 @@ htmlcov/
 data/
 *.pcap
 !tests/fixtures/*.pcap
+!pcaps/demo.pcap
 *.log
 .DS_Store
 

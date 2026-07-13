@@ -61,6 +61,10 @@ RUN pip install --no-cache-dir /wheels/*
 # The previous flattened COPY (app/ -> /app/) broke `uvicorn app.api.app`.
 COPY app/ ./app/
 
+# Synthetic first-run demo capture (see pcaps/_make_demo.py) — powers the
+# "Load demo capture" button so a fresh install has something to analyze.
+COPY pcaps/demo.pcap ./pcaps/demo.pcap
+
 # Non-root + data dirs
 RUN useradd -m runner && mkdir -p /data /app/data && chown -R runner:runner /app /data
 USER runner

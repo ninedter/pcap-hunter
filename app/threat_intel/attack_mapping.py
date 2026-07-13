@@ -55,6 +55,22 @@ class TechniqueMatch:
             "evidence": self.evidence,
         }
 
+    @classmethod
+    def from_dict(cls, d: dict) -> TechniqueMatch:
+        """Reconstruct a ``TechniqueMatch`` from its ``to_dict()`` form.
+
+        Missing keys fall back to safe defaults so a partial/malformed dict
+        (e.g. from a stale session-state entry) does not raise.
+        """
+        d = d or {}
+        return cls(
+            technique_id=d.get("technique_id", ""),
+            technique_name=d.get("technique_name", ""),
+            tactic=d.get("tactic", ""),
+            confidence=d.get("confidence", 0.0),
+            evidence=list(d.get("evidence") or []),
+        )
+
 
 @dataclass
 class AttackMapping:
@@ -73,6 +89,23 @@ class AttackMapping:
             "kill_chain_phase": self.kill_chain_phase,
             "overall_severity": self.overall_severity,
         }
+
+    @classmethod
+    def from_dict(cls, d: dict) -> AttackMapping:
+        """Reconstruct an ``AttackMapping`` from its ``to_dict()`` form.
+
+        Handles an empty or partial dict gracefully — the mapper-failure
+        default stored in ``st.session_state["attack_mapping"]`` is ``{}``,
+        and ``from_dict({})`` must return a valid empty ``AttackMapping()``
+        rather than raising.
+        """
+        d = d or {}
+        return cls(
+            techniques=[TechniqueMatch.from_dict(t) for t in d.get("techniques") or []],
+            tactics_summary=dict(d.get("tactics_summary") or {}),
+            kill_chain_phase=d.get("kill_chain_phase", "unknown"),
+            overall_severity=d.get("overall_severity", "low"),
+        )
 
 
 # Kill chain phases in order of advancement

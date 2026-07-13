@@ -74,6 +74,17 @@ class TestTechniqueMatch:
         assert d["confidence"] == 0.7
         assert len(d["evidence"]) == 2
 
+    def test_from_dict_round_trip(self):
+        tech = TechniqueMatch(
+            technique_id="T1071.001",
+            technique_name="Application Layer Protocol: Web Protocols",
+            tactic="command-and-control",
+            confidence=0.85,
+            evidence=["HTTP beaconing detected", "second signal"],
+        )
+        rebuilt = TechniqueMatch.from_dict(tech.to_dict())
+        assert rebuilt == tech
+
 
 class TestAttackMapping:
     """Test AttackMapping dataclass."""
@@ -113,6 +124,40 @@ class TestAttackMapping:
         assert "techniques" in d
         assert d["kill_chain_phase"] == "command-and-control"
         assert d["overall_severity"] == "high"
+
+    def test_from_dict_round_trip(self):
+        mapping = AttackMapping(
+            techniques=[
+                TechniqueMatch("T1071", "Test1", "command-and-control", 0.8, ["e1"]),
+                TechniqueMatch("T1095", "Test2", "command-and-control", 0.7, []),
+                TechniqueMatch("T1041", "Test3", "exfiltration", 0.6, ["e2", "e3"]),
+            ],
+            tactics_summary={"command-and-control": 2, "exfiltration": 1},
+            kill_chain_phase="exfiltration",
+            overall_severity="critical",
+        )
+        rebuilt = AttackMapping.from_dict(mapping.to_dict())
+        assert rebuilt == mapping
+        assert [t.technique_id for t in rebuilt.techniques] == [t.technique_id for t in mapping.techniques]
+        assert rebuilt.tactics_summary == mapping.tactics_summary
+        assert rebuilt.kill_chain_phase == mapping.kill_chain_phase
+        assert rebuilt.overall_severity == mapping.overall_severity
+
+    def test_from_dict_empty_dict_returns_valid_empty_mapping(self):
+        mapping = AttackMapping.from_dict({})
+        assert mapping == AttackMapping()
+        assert mapping.techniques == []
+        assert mapping.tactics_summary == {}
+        assert mapping.kill_chain_phase == "unknown"
+        assert mapping.overall_severity == "low"
+
+    def test_from_dict_none_like_partial_dict_does_not_crash(self):
+        # Mapper-failure default is {}; also guard a partial dict missing keys.
+        mapping = AttackMapping.from_dict({"kill_chain_phase": "execution"})
+        assert mapping.techniques == []
+        assert mapping.tactics_summary == {}
+        assert mapping.kill_chain_phase == "execution"
+        assert mapping.overall_severity == "low"
 
 
 class TestATTACKMapper:

@@ -46,6 +46,7 @@ from app.ui.layout import (
     make_results_panel,
     make_tabs,
     render_active_filters,
+    render_attack_mapping,
     render_batch_summary,
     render_carved,
     render_chart_hint,
@@ -330,6 +331,7 @@ for k, v in [
     ("correlations", None),
     ("flow_asymmetry", None),
     ("port_anomalies", None),
+    ("attack_mapping", {}),
     ("__pcap_paths", []),
     ("__batch_mode", False),
     ("__batch_result", None),
@@ -1389,6 +1391,16 @@ with tab_dashboard:
 
     # Cross-Indicator Correlations (own section)
     render_correlation_results(st.container(), st.session_state.get("correlations"))
+
+    st.markdown("---")
+
+    # MITRE ATT&CK Mapping (session state holds the dict form; reconstruct
+    # the AttackMapping object the renderer expects)
+    _attack = st.session_state.get("attack_mapping")
+    if _attack:
+        from app.threat_intel import AttackMapping
+
+        render_attack_mapping(st.container(), AttackMapping.from_dict(_attack))
 
     st.markdown("---")
 

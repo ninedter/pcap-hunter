@@ -1,10 +1,10 @@
 """Capture README screenshots of the PCAP Hunter UI and redact all IPs.
 
 Drives a headless Chromium via Playwright against a running Streamlit
-instance (default http://localhost:8501), uploads ``data/sample.pcap``
-by entering its path into the "type a container path" text input,
-clicks Extract & Analyze, waits for the pipeline to finish, then
-snapshots each tab at 1440×900.
+instance (default http://localhost:8501), uploads ``pcaps/demo.pcap``
+(the committed synthetic DNS/HTTP/beacon capture) by entering its path
+into the "type a container path" text input, clicks Extract & Analyze,
+waits for the pipeline to finish, then snapshots each tab at 1440×900.
 
 After capture, every PNG is post-processed with Pillow to redact IPv4
 addresses. We do this at the pixel level using OCR-free regex scanning
@@ -32,7 +32,7 @@ from playwright.sync_api import Page, sync_playwright
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 OUT_DIR = REPO_ROOT / "docs" / "images"
-SAMPLE_PCAP = REPO_ROOT / "data" / "sample.pcap"
+SAMPLE_PCAP = REPO_ROOT / "pcaps" / "demo.pcap"
 
 # IPv4 pattern — matches anything that looks like a.b.c.d with 0-255 octets.
 # We redact any IP, including RFC1918/loopback — the goal is zero IPs visible.
@@ -106,7 +106,7 @@ def upload_sample_pcap(page: Page, pcap_path: str) -> None:
     """Fill the 'type a container path' text input to load the sample.
 
     ``pcap_path`` must be valid for the SERVER process — when the app runs in
-    Docker that means a container-visible path like ``data/sample.pcap``, not
+    Docker that means a container-visible path like ``pcaps/demo.pcap``, not
     the host's absolute path.
     """
     path_input = page.get_by_label("...or type a container path (e.g., /data/capture.pcap)")
@@ -139,7 +139,7 @@ def run_extract_analyze(page: Page, wait_for_llm: bool = False, timeout_s: int =
     if "Please upload a PCAP or provide a valid path" in page.inner_text("body"):
         raise RuntimeError(
             "the server rejected the pcap path — pass a path the SERVER can see "
-            "(container-relative like data/sample.pcap when using Docker)"
+            "(container-relative like pcaps/demo.pcap when using Docker)"
         )
     print(f"  waiting for pipeline (up to {timeout_s}s)...")
     deadline = time.time() + timeout_s
@@ -480,7 +480,7 @@ def main() -> int:
     )
     parser.add_argument(
         "--pcap",
-        default="data/sample.pcap",
+        default="pcaps/demo.pcap",
         help="pcap path AS THE SERVER SEES IT (container-relative when the app runs in Docker)",
     )
     parser.add_argument("--pipeline-timeout", type=int, default=600, help="seconds to wait for the data stages")
@@ -498,7 +498,7 @@ def main() -> int:
         return 0
 
     if not SAMPLE_PCAP.is_file() and not args.skip_analysis:
-        print(f"ERROR: {SAMPLE_PCAP} not found. Copy sample.pcap → data/ first.", file=sys.stderr)
+        print(f"ERROR: {SAMPLE_PCAP} not found. Demo capture should be committed at pcaps/demo.pcap.", file=sys.stderr)
         return 1
 
     redact = not args.keep_ips

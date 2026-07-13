@@ -351,7 +351,8 @@ with tab_upload:
         with st.container(border=True):
             st.markdown("##### 🚀 Getting started")
             st.markdown(
-                "1. **Upload a PCAP** below (or type a container path).\n"
+                "1. **Upload a PCAP** below (or type a container path) — or click "
+                "**Load demo capture** to try a bundled synthetic sample.\n"
                 "2. Click **Extract & Analyze** — the 10-stage pipeline parses packets (tshark/PyShark), "
                 "runs Zeek, hunts DNS/TLS/beaconing anomalies, carves HTTP payloads, scans with YARA, "
                 "and enriches IOCs via OSINT.\n"
@@ -373,6 +374,18 @@ with tab_upload:
         )
     with col_b:
         pcap_path_text = st.text_input("...or type a container path (e.g., /data/capture.pcap)", value="")
+
+    _demo_path = validate_pcap_path(str(pathlib.Path("pcaps/demo.pcap").resolve()))
+    if _demo_path:
+        if st.button(
+            "Load demo capture",
+            key="_load_demo",
+            help="Analyze a bundled synthetic capture (DNS/HTTP/beacon) to try the pipeline.",
+        ):
+            st.session_state["__pcap_path"] = _demo_path
+            st.session_state["__pcap_paths"] = [_demo_path]
+            st.session_state["__batch_mode"] = False
+            st.rerun()
 
     ensure_dir(C.DATA_DIR)
     ensure_dir(C.ZEEK_DIR)

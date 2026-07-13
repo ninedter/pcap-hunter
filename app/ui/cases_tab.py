@@ -46,6 +46,25 @@ def _get_repo() -> CaseRepository:
     return st.session_state["case_repo"]
 
 
+def _session_mitre_techniques() -> list[str]:
+    """Derive MITRE ATT&CK technique IDs from the session's attack mapping.
+
+    Mirrors how the API/queue path derives ``Analysis.mitre_techniques`` from
+    ``result.mitre_techniques`` (see ``app/api/queue.py``) so that analyses
+    saved through the UI populate the IOC feed's ``mitre_techniques`` field
+    the same way as analyses saved via the API — both share ``data/cases.db``.
+
+    Returns:
+        List of technique IDs (e.g. ``["T1071.001"]``), or an empty list if
+        no attack mapping is present in session state.
+    """
+    return [
+        t.get("technique_id")
+        for t in (st.session_state.get("attack_mapping") or {}).get("techniques", [])
+        if t.get("technique_id")
+    ]
+
+
 def _restore_analysis_to_session(analysis: Analysis) -> None:
     """Load a saved analysis back into session state for the Dashboard/Results tabs.
 
@@ -606,6 +625,7 @@ def _quick_save_analysis():
         dns_analysis=st.session_state.get("dns_analysis"),
         tls_analysis=st.session_state.get("tls_analysis"),
         attack_mapping=st.session_state.get("attack_mapping") or {},
+        mitre_techniques=_session_mitre_techniques(),
     )
 
     # Extract IOCs
@@ -640,6 +660,7 @@ def _add_current_analysis_to_case(case: Case):
         dns_analysis=st.session_state.get("dns_analysis"),
         tls_analysis=st.session_state.get("tls_analysis"),
         attack_mapping=st.session_state.get("attack_mapping") or {},
+        mitre_techniques=_session_mitre_techniques(),
     )
 
     analysis.iocs = repo.extract_iocs(analysis)

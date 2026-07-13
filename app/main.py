@@ -640,13 +640,16 @@ with tab_progress:
             st.session_state["beacon_df"] = batch_result.merged_beacons
             st.session_state["dns_analysis"] = batch_result.aggregated_dns
             st.session_state["tls_analysis"] = batch_result.aggregated_tls
-            # No cross-file ATT&CK aggregation yet (batch.py has no merge helper for
-            # it) — mirror the first successful file's mapping, same fallback used
-            # for merged_features above.
-            st.session_state["attack_mapping"] = (first_ok.attack_mapping if first_ok else None) or {}
-            # No cross-file HTTP aggregation helper either (see attack_mapping
-            # above) — mirror the first successful file's HTTP findings.
-            st.session_state["http_analysis"] = (first_ok.http_analysis if first_ok else None) or {}
+            # HTTP findings merged across every file (app.pipeline.batch.aggregate_http_analysis)
+            # — previously only mirrored the first successful file's findings.
+            st.session_state["http_analysis"] = batch_result.aggregated_http
+            # Rebuilt further below, once merged features/dns/tls/beacon_df are
+            # all available, from the AGGREGATED batch inputs (mirrors the
+            # per-file ATTACKMapper call in app/pipeline/runner.py). Previously
+            # this mirrored only the first successful file's mapping, which
+            # under-reported ATT&CK techniques found in files 2..N. Placeholder
+            # here in case that rebuild raises.
+            st.session_state["attack_mapping"] = {}
             # Carved payloads concatenated across all successful files
             st.session_state["carved"] = [
                 item for r in batch_result.pcap_results if not r.error for item in r.carved_items
@@ -715,6 +718,27 @@ with tab_progress:
             except Exception as e:
                 logger.debug("timeline precompute failed: %s", e)
                 st.session_state["attack_timeline"] = []
+
+            # Rebuild the ATT&CK mapping from the AGGREGATED batch inputs (same
+            # merged features/dns/tls/beacon_df used for the timeline above),
+            # mirroring the per-file ATTACKMapper call in app/pipeline/runner.py.
+            # Replaces the earlier first-successful-file-only placeholder so the
+            # dashboard ATT&CK panel and batch-quick-saved mitre_techniques
+            # reflect techniques detected across every file, not just file 1.
+            try:
+                from app.threat_intel import ATTACKMapper
+
+                _mapping = ATTACKMapper().map_analysis(
+                    features=st.session_state.get("features"),
+                    dns_analysis=st.session_state.get("dns_analysis"),
+                    tls_analysis=st.session_state.get("tls_analysis"),
+                    beacon_results=(
+                        get_df_state("beacon_df").to_dict("records") if not get_df_state("beacon_df").empty else []
+                    ),
+                )
+                st.session_state["attack_mapping"] = _mapping.to_dict()
+            except Exception as e:
+                logger.warning("Batch ATT&CK mapping rebuild failed: %s", e)
 
             batch_tracker.finish_all(
                 f"Batch complete: {batch_result.summary['successful']}/{batch_result.summary['total_files']} files."
@@ -1321,7 +1345,35 @@ with tab_dashboard:
     # Attack timeline (full-width, if available) — stored at pipeline-completion
     # time (see post-analysis blocks above) so it survives without needing to
     # recompute here, and so the PDF report can reuse the same data.
+    #
+    # A restored case resets attack_timeline to [] (it isn't a persisted Analysis
+    # column — see app/ui/cases_tab.py::_restore_analysis_to_session) even though
+    # features/dns/tls/beacon data ARE restored. Lazily recompute from the
+    # CURRENT restored state in that case so restored cases don't lose the
+    # timeline chart; a fresh run's own post-analysis block always populates
+    # attack_timeline directly, so this only fires for the restore path.
     timeline_dicts = st.session_state.get("attack_timeline") or []
+    if not timeline_dicts and st.session_state.get("features"):
+        try:
+            from app.analysis.narrator import AttackNarrator
+
+            _tl = AttackNarrator().create_timeline(
+                features=st.session_state.get("features"),
+                dns_analysis=st.session_state.get("dns_analysis"),
+                yara_results=st.session_state.get("yara_results"),
+                beacon_results=(
+                    get_df_state("beacon_df").to_dict("records") if not get_df_state("beacon_df").empty else []
+                ),
+                tls_analysis=st.session_state.get("tls_analysis"),
+            )
+            timeline_dicts = [e.to_dict() for e in _tl]
+            # Cache back so we don't re-run the narrator on every dashboard
+            # rerun (filter toggles, etc.) for a restored case. Safe against the
+            # cross-run stale-leak: a fresh run's reset clears this key, and this
+            # value was just derived from the CURRENT restored features.
+            st.session_state["attack_timeline"] = timeline_dicts
+        except Exception as e:
+            logger.debug("timeline lazy recompute failed: %s", e)
     if timeline_dicts:
         st.plotly_chart(
             plot_attack_timeline(timeline_dicts),

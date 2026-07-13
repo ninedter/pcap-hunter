@@ -75,8 +75,22 @@ C2_PAYLOAD_MAX_BYTES = 500
 # That combination is exactly what genuine small-packet HTTPS C2 looks like.
 # Tuned against tests/test_beacon.py so a perfectly periodic small-payload
 # 443 flow (raw score ~1.0) clears BEACON_SCORE_THRESHOLD (0.6) with margin:
-# 1.0 * 0.7 = 0.7 > 0.6. The naive "penalty * 4" (0.15 -> 0.6) is NOT enough:
+# 1.0 * 0.69 = 0.69 > 0.6. The naive "penalty * 4" (0.15 -> 0.6) is NOT enough:
 # a 0.9-raw flow would land at 0.9 * 0.6 = 0.54, still below threshold.
+#
+# 0.69, not 0.7: the ATT&CK mapper's beacon->C2 rule (DETECTION_RULES
+# ["beacon_score"]["threshold"] in app/threat_intel/attack_mapping.py) fires
+# at score >= 0.7 and auto-sets overall_severity="high". Since the max
+# softened output is final_score(<=1.0) * SOFTENED_PENALTY, 0.7 would let a
+# perfectly periodic, zero-jitter softened beacon land EXACTLY on the ATT&CK
+# threshold — a benign small-payload HTTPS flow with flawless periodicity
+# would then get flagged as T1071.001 C2 at HIGH severity purely from
+# timing, which is exactly the false positive this softening bucket exists
+# to avoid. 0.69 keeps the max softened score strictly below 0.7 (decoupled
+# from the ATT&CK rule) while staying comfortably above the 0.6 beacon
+# candidate floor and the 0.5 correlation ingest gate, so genuine HTTPS
+# beacons still surface as candidates — they just don't trip the ATT&CK
+# C2 technique on timing alone.
 #
 # The small-payload condition (3) is load-bearing: a machine-regular CDN
 # heartbeat (zero jitter, LARGE 1200-byte payloads) is indistinguishable
@@ -84,7 +98,7 @@ C2_PAYLOAD_MAX_BYTES = 500
 # fully penalised. When pkt_lens is absent/empty we CANNOT confirm the flow
 # is C2-like, so we conservatively do NOT soften. Ordinary jittery HTTPS
 # keep-alives also fail the >=0.85 gate and keep the full 0.15 penalty.
-SOFTENED_PENALTY = 0.7
+SOFTENED_PENALTY = 0.69
 
 
 def periodicity_score(ts: list[float]) -> dict[str, object]:

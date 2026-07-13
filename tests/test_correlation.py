@@ -243,6 +243,39 @@ def test_correlate_http_cleartext_cred_lights_up_domain_indicator():
     assert any(s.name == "http_cleartext_cred" and s.source == "http" for s in results[0].signals)
 
 
+def test_correlate_http_cleartext_cred_host_with_port_normalized():
+    """A Host header carrying an explicit port (e.g. "example.com:8443")
+    must still attach its signal to the bare domain/IP indicator instead of
+    being silently dropped because the exact strings don't match."""
+    features = {
+        "artifacts": {"ips": [], "domains": ["example.com"]},
+        "flows": [],
+    }
+    http_analysis = {
+        "cleartext_credentials": [{"host": "example.com:8443", "uri": "/login", "username": "admin"}],
+        "suspicious_user_agents": [],
+    }
+    results = correlate_indicators(features=features, http_analysis=http_analysis)
+    assert len(results) == 1
+    assert results[0].indicator == "example.com"
+    sig = next(s for s in results[0].signals if s.name == "http_cleartext_cred")
+    assert sig.source == "http"
+
+
+def test_normalize_http_host_is_ipv6_safe():
+    """Stripping the :port suffix must not mangle a bracketed IPv6 literal
+    (a naive rsplit on ':' would split one of the address's own colons)."""
+    from app.analysis.correlation import _normalize_http_host
+
+    assert _normalize_http_host("example.com:8443") == "example.com"
+    assert _normalize_http_host("203.0.113.5:8443") == "203.0.113.5"
+    assert _normalize_http_host("example.com") == "example.com"
+    # Bracketed IPv6, with and without an explicit port — the address is preserved.
+    assert _normalize_http_host("[::1]") == "[::1]"
+    assert _normalize_http_host("[2001:db8::1]:8443") == "[2001:db8::1]"
+    assert _normalize_http_host("") == ""
+
+
 def test_correlate_http_suspicious_ua_signal():
     features = {
         "artifacts": {"ips": ["5.6.7.8"], "domains": []},

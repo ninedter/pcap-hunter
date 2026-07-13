@@ -80,12 +80,38 @@ def _get_verdict(score: float) -> str:
     return "low"
 
 
+def _normalize_http_host(host: str) -> str:
+    """Strip a trailing ``:port`` suffix from an HTTP Host-header value.
+
+    Zeek's ``http.log`` Host field may include an explicit port (e.g.
+    ``example.com:8443`` or ``203.0.113.5:8443``), but the IP/domain
+    indicators this lookup is later matched against are always bare. A naive
+    ``host.rsplit(":", 1)[0]`` would mangle a bracketed IPv6 literal like
+    ``[::1]`` (splitting on one of the address's own colons), so bracketed
+    hosts are only trimmed after the closing bracket and otherwise left
+    untouched.
+    """
+    if not host:
+        return host
+    if host.startswith("["):
+        close = host.find("]")
+        return host[: close + 1] if close != -1 else host
+    if ":" in host:
+        head, _, tail = host.rpartition(":")
+        if tail.isdigit():
+            return head
+    return host
+
+
 def _build_http_lookup(http_analysis: dict | None) -> dict[str, list[tuple[str, Any, float]]]:
     """Build a Host-header -> [(signal_name, value, score), ...] lookup from HTTP analysis.
 
     The Zeek ``http.log`` Host header may be a raw IP or a domain, so this
     lookup is matched against both IP and domain indicators by the callers
-    (``_collect_ip_signals`` / ``_collect_domain_signals``).
+    (``_collect_ip_signals`` / ``_collect_domain_signals``). Host values are
+    normalised (trailing ``:port`` stripped) before being used as keys so a
+    Host like ``example.com:8443`` still attaches its signal to the
+    ``example.com`` indicator.
     """
     lookup: dict[str, list[tuple[str, Any, float]]] = {}
     if not http_analysis:
@@ -94,11 +120,13 @@ def _build_http_lookup(http_analysis: dict | None) -> dict[str, list[tuple[str, 
     for cred in http_analysis.get("cleartext_credentials", []) or []:
         host = cred.get("host") if isinstance(cred, dict) else None
         if host:
+            host = _normalize_http_host(host)
             lookup.setdefault(host, []).append(("http_cleartext_cred", cred.get("username", ""), 0.9))
 
     for ua in http_analysis.get("suspicious_user_agents", []) or []:
         host = ua.get("host") if isinstance(ua, dict) else None
         if host:
+            host = _normalize_http_host(host)
             lookup.setdefault(host, []).append(("http_suspicious_ua", ua.get("reason", ""), 0.6))
 
     return lookup

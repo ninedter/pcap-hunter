@@ -1,5 +1,6 @@
 from app.config import BEACON_SCORE_THRESHOLD
 from app.pipeline.beacon import jitter_score, periodicity_score, rank_beaconing
+from app.threat_intel.attack_mapping import DETECTION_RULES, ATTACKMapper
 
 
 def test_periodicity_score_empty():
@@ -168,6 +169,43 @@ def test_rank_beaconing_regular_443_no_pkt_lens_not_softened():
     assert len(df) == 1
     assert df.iloc[0]["score"] <= 0.15
     assert df.iloc[0]["score"] < BEACON_SCORE_THRESHOLD
+
+
+def test_rank_beaconing_softened_443_score_decoupled_from_attack_mapper_threshold():
+    # Locks in the FIX 3 invariant: a softened-443 beacon must clear the
+    # BEACON_SCORE_THRESHOLD candidate floor (so genuine HTTPS beacons still
+    # surface) but must NOT, on timing alone, reach the ATT&CK mapper's
+    # beacon->C2 rule threshold (score >= 0.7, which auto-sets HIGH
+    # severity with a T1071.001 false positive for a benign perfectly
+    # periodic small-payload flow). See app/pipeline/beacon.py's
+    # SOFTENED_PENALTY comment for the full rationale.
+    flows = [
+        {
+            "src": "10.0.0.3",
+            "dst": "203.0.113.5",
+            "sport": "51000",
+            "dport": "443",
+            "proto": "tcp",
+            "pkt_times": [float(i) for i in range(1, 60)],  # perfectly periodic
+            "pkt_lens": [80] * 59,  # small, C2-like payloads
+        }
+    ]
+    df = rank_beaconing(flows, top_n=10)
+    assert len(df) == 1
+    score = df.iloc[0]["score"]
+
+    # Still a beacon candidate...
+    assert score > BEACON_SCORE_THRESHOLD
+    # ...but decoupled from the ATT&CK mapper's C2 threshold.
+    beacon_rule_threshold = DETECTION_RULES["beacon_score"]["threshold"]
+    assert score < beacon_rule_threshold
+
+    # End-to-end: feeding this exact beacon candidate into the mapper must not
+    # produce the T1071.001 C2 technique (and therefore not force HIGH severity
+    # from timing alone).
+    mapping = ATTACKMapper().map_analysis(beacon_results=df.to_dict("records"))
+    ids = {t.technique_id for t in mapping.techniques}
+    assert "T1071.001" not in ids
 
 
 def test_rank_beaconing_jittery_443_stays_suppressed():

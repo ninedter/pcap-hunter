@@ -6,6 +6,7 @@ from app.pipeline.batch import (
     BatchProcessor,
     PCAPResult,
     aggregate_dns_analysis,
+    aggregate_http_analysis,
     aggregate_tls_analysis,
     correlate_results,
     merge_beacon_candidates,
@@ -338,6 +339,80 @@ class TestAggregateTLS:
         ]
         aggregated = aggregate_tls_analysis(results)
         assert aggregated["total_certificates"] == 2  # Deduplicated
+
+
+class TestAggregateHTTP:
+    """Test aggregating HTTP request analysis results (FIX 1: batch mode must
+    not under-report intel from files 2..N)."""
+
+    def test_empty_results(self):
+        aggregated = aggregate_http_analysis([])
+        assert aggregated["total_requests"] == 0
+        assert aggregated["cleartext_credentials"] == []
+
+    def test_skips_errored_and_skipped_files(self):
+        results = [
+            PCAPResult(path="/data/1.pcap", filename="1.pcap", features={}, error="boom"),
+            PCAPResult(path="/data/2.pcap", filename="2.pcap", features={}, http_analysis={"skipped": True}),
+            PCAPResult(
+                path="/data/3.pcap",
+                filename="3.pcap",
+                features={},
+                http_analysis={"error": "No HTTP log data", "records": 0},
+            ),
+        ]
+        aggregated = aggregate_http_analysis(results)
+        assert aggregated["total_requests"] == 0
+
+    def test_aggregate_merges_findings_from_every_file(self):
+        # Regression for the bug where st.session_state["http_analysis"] only
+        # reflected the FIRST successful file in batch mode — this asserts the
+        # aggregate carries findings from file 2 as well.
+        results = [
+            PCAPResult(
+                path="/data/1.pcap",
+                filename="1.pcap",
+                features={},
+                http_analysis={
+                    "total_requests": 10,
+                    "unique_hosts": 3,
+                    "methods": {"GET": 8, "POST": 2},
+                    "status_codes": {"200": 10},
+                    "suspicious_user_agents": [],
+                    "cleartext_credentials": [{"host": "1.2.3.4", "uri": "/login", "username": "admin"}],
+                    "suspicious_uris": [],
+                    "alerts": {"suspicious_ua_count": 0, "cleartext_cred_count": 1, "suspicious_uri_count": 0},
+                },
+            ),
+            PCAPResult(
+                path="/data/2.pcap",
+                filename="2.pcap",
+                features={},
+                http_analysis={
+                    "total_requests": 5,
+                    "unique_hosts": 2,
+                    "methods": {"GET": 5},
+                    "status_codes": {"200": 4, "404": 1},
+                    "suspicious_user_agents": [
+                        {"host": "evil.example", "user_agent": "sqlmap/1.6", "uri": "/", "reason": "known tool"}
+                    ],
+                    "cleartext_credentials": [],
+                    "suspicious_uris": [],
+                    "alerts": {"suspicious_ua_count": 1, "cleartext_cred_count": 0, "suspicious_uri_count": 0},
+                },
+            ),
+        ]
+        aggregated = aggregate_http_analysis(results)
+        assert aggregated["total_requests"] == 15
+        assert aggregated["methods"]["GET"] == 13
+        assert aggregated["status_codes"]["200"] == 14
+        # File 1's cred finding AND file 2's UA finding must both be present.
+        assert len(aggregated["cleartext_credentials"]) == 1
+        assert aggregated["cleartext_credentials"][0]["host"] == "1.2.3.4"
+        assert len(aggregated["suspicious_user_agents"]) == 1
+        assert aggregated["suspicious_user_agents"][0]["host"] == "evil.example"
+        assert aggregated["alerts"]["cleartext_cred_count"] == 1
+        assert aggregated["alerts"]["suspicious_ua_count"] == 1
 
 
 class TestBatchProcessor:

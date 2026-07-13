@@ -17,6 +17,8 @@ from typing import Any
 
 import pandas as pd
 
+from app.pipeline.http_analysis import MAX_HTTP_RESULTS
+
 logger = logging.getLogger(__name__)
 
 # --- Constants ---
@@ -469,6 +471,78 @@ def aggregate_tls_analysis(results: list[PCAPResult]) -> dict[str, Any]:
     }
 
 
+def aggregate_http_analysis(results: list[PCAPResult]) -> dict[str, Any]:
+    """
+    Aggregate HTTP request analysis from multiple PCAPs.
+
+    Mirrors the shape app.pipeline.http_analysis.analyze_http returns for a
+    single file, so downstream consumers (correlation, ATT&CK mapping, the
+    dashboard HTTP panel) don't need batch-specific handling.
+
+    Args:
+        results: List of PCAPResult
+
+    Returns:
+        Aggregated HTTP analysis dictionary.
+    """
+    total_requests = 0
+    # Summed per-file, like aggregate_dns_analysis's total_records — an
+    # approximation when the same host appears in multiple files, since only
+    # per-file counts (not raw host sets) are persisted on PCAPResult.
+    unique_hosts = 0
+    methods: Counter = Counter()
+    status_codes: Counter = Counter()
+    all_uas = []
+    all_creds = []
+    all_uris = []
+
+    for r in results:
+        if r.error or not r.http_analysis:
+            continue
+
+        http = r.http_analysis
+        if http.get("skipped") or http.get("error"):
+            continue
+
+        total_requests += http.get("total_requests", 0)
+        unique_hosts += http.get("unique_hosts", 0)
+
+        for method, count in (http.get("methods") or {}).items():
+            methods[method] += count
+        for code, count in (http.get("status_codes") or {}).items():
+            status_codes[code] += count
+
+        for ua in http.get("suspicious_user_agents", []) or []:
+            ua_copy = dict(ua)
+            ua_copy["_source_file"] = r.filename
+            all_uas.append(ua_copy)
+
+        for cred in http.get("cleartext_credentials", []) or []:
+            cred_copy = dict(cred)
+            cred_copy["_source_file"] = r.filename
+            all_creds.append(cred_copy)
+
+        for uri in http.get("suspicious_uris", []) or []:
+            uri_copy = dict(uri)
+            uri_copy["_source_file"] = r.filename
+            all_uris.append(uri_copy)
+
+    return {
+        "total_requests": total_requests,
+        "unique_hosts": unique_hosts,
+        "methods": dict(methods),
+        "status_codes": dict(status_codes),
+        "suspicious_user_agents": all_uas[:MAX_HTTP_RESULTS],
+        "cleartext_credentials": all_creds[:MAX_HTTP_RESULTS],
+        "suspicious_uris": all_uris[:MAX_HTTP_RESULTS],
+        "alerts": {
+            "suspicious_ua_count": len(all_uas),
+            "cleartext_cred_count": len(all_creds),
+            "suspicious_uri_count": len(all_uris),
+        },
+    }
+
+
 @dataclass
 class BatchResult:
     """Complete batch processing result."""
@@ -480,6 +554,7 @@ class BatchResult:
     merged_beacons: pd.DataFrame
     aggregated_dns: dict[str, Any]
     aggregated_tls: dict[str, Any]
+    aggregated_http: dict[str, Any]
     summary: dict[str, Any]
 
 
@@ -565,6 +640,7 @@ class BatchProcessor:
         merged_beacons = merge_beacon_candidates(self.results)
         aggregated_dns = aggregate_dns_analysis(self.results)
         aggregated_tls = aggregate_tls_analysis(self.results)
+        aggregated_http = aggregate_http_analysis(self.results)
 
         # Build summary
         successful = sum(1 for r in self.results if not r.error)
@@ -608,6 +684,7 @@ class BatchProcessor:
             merged_beacons=merged_beacons,
             aggregated_dns=aggregated_dns,
             aggregated_tls=aggregated_tls,
+            aggregated_http=aggregated_http,
             summary=summary,
         )
 

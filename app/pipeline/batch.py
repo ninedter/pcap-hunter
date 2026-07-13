@@ -85,6 +85,9 @@ class PCAPResult:
     beacon_df: pd.DataFrame | None = None
     dns_analysis: dict[str, Any] = field(default_factory=dict)
     tls_analysis: dict[str, Any] = field(default_factory=dict)
+    # MITRE ATT&CK mapping (AttackMapping.to_dict() shape) from the runner —
+    # may be {} on mapper failure; treated shape-agnostically downstream.
+    attack_mapping: dict = field(default_factory=dict)
     packet_count: int = 0
     error: str | None = None
 

@@ -162,6 +162,18 @@ class TestPCAPResultShape:
         result = PCAPResult(path="/data/test.pcap", filename="test.pcap", carved_items=carved)
         assert result.carved_items == carved
 
+    def test_attack_mapping_defaults_empty(self):
+        result = PCAPResult(path="/data/test.pcap", filename="test.pcap")
+        assert result.attack_mapping == {}
+
+    def test_attack_mapping_accepts_mapping(self):
+        mapping = {
+            "techniques": ["T1071.001"],
+            "tactics": {"command-and-control": ["T1071.001"]},
+        }
+        result = PCAPResult(path="/data/test.pcap", filename="test.pcap", attack_mapping=mapping)
+        assert result.attack_mapping == mapping
+
 
 class TestMergeZeekTables:
     """Test merging Zeek tables from multiple PCAPs."""

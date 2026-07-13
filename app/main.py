@@ -226,6 +226,7 @@ def _run_single_pcap_pipeline(
         beacon_df=beacon_df if isinstance(beacon_df, pd.DataFrame) else None,
         dns_analysis=result.dns_analysis or {},
         tls_analysis=result.tls_analysis or {},
+        attack_mapping=result.attack_mapping or {},
         packet_count=result.packet_count,
     )
 
@@ -468,6 +469,7 @@ with tab_upload:
                 "flow_asymmetry": None,
                 "port_anomalies": None,
                 "attack_timeline": [],
+                "attack_mapping": {},
                 "__batch_result": None,
             }
         )
@@ -617,6 +619,10 @@ with tab_progress:
             st.session_state["beacon_df"] = batch_result.merged_beacons
             st.session_state["dns_analysis"] = batch_result.aggregated_dns
             st.session_state["tls_analysis"] = batch_result.aggregated_tls
+            # No cross-file ATT&CK aggregation yet (batch.py has no merge helper for
+            # it) — mirror the first successful file's mapping, same fallback used
+            # for merged_features above.
+            st.session_state["attack_mapping"] = (first_ok.attack_mapping if first_ok else None) or {}
             # Carved payloads concatenated across all successful files
             st.session_state["carved"] = [
                 item for r in batch_result.pcap_results if not r.error for item in r.carved_items
@@ -722,6 +728,7 @@ with tab_progress:
             st.session_state["carved"] = result.carved_items
             st.session_state["dns_analysis"] = result.dns_analysis or None
             st.session_state["tls_analysis"] = result.tls_analysis or None
+            st.session_state["attack_mapping"] = result.attack_mapping or {}
 
             _precompute_dash_aggregates(features.get("flows"))
             # a fresh run supersedes any restored case

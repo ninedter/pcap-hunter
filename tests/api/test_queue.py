@@ -303,6 +303,52 @@ def test_worker_beacon_records_round_trip(tmp_path, monkeypatch):
     assert persisted.features["beacon_records"] == records
 
 
+def test_worker_persists_attack_mapping(tmp_path, monkeypatch):
+    """attack_mapping must round-trip from the runner result into the persisted
+    Analysis, and mitre_techniques must flow through the job result blob."""
+    import app.pipeline.runner as runner_mod
+    from app.pipeline.runner import PipelineResult
+
+    mapping = {
+        "techniques": ["T1071.001"],
+        "tactics": {"command-and-control": ["T1071.001"]},
+    }
+    techniques = ["T1071.001"]
+
+    def fake_run_pipeline(pcap_path, case_id, options, progress, heartbeat=None):
+        return PipelineResult(
+            case_id=case_id,
+            packet_count=1,
+            features={
+                "flows": [{"src": "10.0.0.1", "dst": "8.8.8.8", "proto": "TCP", "count": 9}],
+                "artifacts": {"ips": ["10.0.0.1", "8.8.8.8"], "domains": [], "urls": [], "hashes": [], "ja3": []},
+            },
+            attack_mapping=dict(mapping),
+            mitre_techniques=list(techniques),
+        )
+
+    # _worker_run imports run_pipeline from app.pipeline.runner at call time,
+    # so the patch must target the source module, not queue_mod.
+    monkeypatch.setattr(runner_mod, "run_pipeline", fake_run_pipeline)
+
+    fake_pcap = tmp_path / "fake.pcap"
+    fake_pcap.write_bytes(b"\xd4\xc3\xb2\xa1" + b"\x00" * 20)
+
+    db = str(tmp_path / "t.db")
+    repo = CaseRepository(db_path=db)
+    repo.create_case(Case(id="cafe0030", title="t", status=CaseStatus.IN_PROGRESS, severity=Severity.LOW))
+    job_id = repo.create_job(Job(case_id="cafe0030", pcap_path=str(fake_pcap), options_json="{}"))
+
+    _worker_run(job_id, db, str(fake_pcap), {"osint_enabled": False, "llm_enabled": False})
+
+    result = json.loads(repo.get_job(job_id).result_json)
+    assert result["mitre_techniques"] == techniques, "mitre_techniques must flow into the job result blob"
+    assert result["analysis_id"], "persistence must succeed with the faked pipeline result"
+
+    persisted = repo.get_analysis(result["analysis_id"])
+    assert persisted.attack_mapping == mapping, "attack_mapping must be persisted on the Analysis row"
+
+
 # ---------------------------------------------------------------------------
 # Task 3: progress reconciliation on completion
 # ---------------------------------------------------------------------------

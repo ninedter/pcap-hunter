@@ -68,6 +68,7 @@ def _restore_analysis_to_session(analysis: Analysis) -> None:
     st.session_state["dns_analysis"] = analysis.dns_analysis
     st.session_state["tls_analysis"] = analysis.tls_analysis
     st.session_state["yara_results"] = analysis.yara_results
+    st.session_state["attack_mapping"] = analysis.attack_mapping or {}
     # Model default for report is "" but the app's no-report sentinel is None.
     st.session_state["report"] = analysis.report or None
     # Everything below isn't persisted on Analysis — reset it all, otherwise the
@@ -604,6 +605,7 @@ def _quick_save_analysis():
         yara_results=st.session_state.get("yara_results"),
         dns_analysis=st.session_state.get("dns_analysis"),
         tls_analysis=st.session_state.get("tls_analysis"),
+        attack_mapping=st.session_state.get("attack_mapping") or {},
     )
 
     # Extract IOCs
@@ -637,6 +639,7 @@ def _add_current_analysis_to_case(case: Case):
         yara_results=st.session_state.get("yara_results"),
         dns_analysis=st.session_state.get("dns_analysis"),
         tls_analysis=st.session_state.get("tls_analysis"),
+        attack_mapping=st.session_state.get("attack_mapping") or {},
     )
 
     analysis.iocs = repo.extract_iocs(analysis)

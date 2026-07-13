@@ -182,6 +182,7 @@ def _persist_analysis(
             dns_analysis=result.dns_analysis or None,
             tls_analysis=result.tls_analysis or None,
         )
+        analysis.attack_mapping = result.attack_mapping
         if result.beacon_df_records:
             analysis.features["beacon_records"] = result.beacon_df_records
         analysis.iocs = repo.extract_iocs(analysis)

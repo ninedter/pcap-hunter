@@ -58,3 +58,27 @@ jobs:
 
       - name: Ruff format check
         run: ruff format --check .
+
+  audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    # Advisory only: a discovered CVE surfaces here without blocking merges.
+    # The required check for branch protection stays `test`.
+    continue-on-error: true
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install pip-audit
+        run: pip install pip-audit
+
+      - name: Audit dependencies
+        run: pip-audit -r requirements.txt

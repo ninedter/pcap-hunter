@@ -14,6 +14,8 @@ from cryptography.fernet import Fernet
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
 
+from app import config as C
+
 logger = logging.getLogger(__name__)
 
 # Keys that should be encrypted
@@ -30,8 +32,8 @@ SENSITIVE_KEYS = {
 
 # Default configuration values
 DEFAULT_CONFIG = {
-    "cfg_llm_endpoint": "http://localhost:11434/v1",
-    "cfg_llm_model": "llama3.1:8b",
+    "cfg_llm_endpoint": C.LM_BASE_URL,
+    "cfg_llm_model": C.LM_MODEL,
     "cfg_llm_language": "US English",
     "cfg_llm_provider": "lmstudio",
     "cfg_openai_model": "gpt-4o",

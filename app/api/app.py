@@ -19,6 +19,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
+from app import __version__
 from app.api.auth import Scope
 from app.api.deps import get_key_repo, get_settings, get_usage_tracker
 from app.api.queue import recover_stale_running_jobs
@@ -183,7 +184,7 @@ def create_app() -> FastAPI:
 
     app = FastAPI(
         title="PCAP Hunter Integrations API",
-        version="1.0.0",
+        version=__version__,
         docs_url="/docs",
         redoc_url="/redoc",
         openapi_url="/api/v1/openapi.json",

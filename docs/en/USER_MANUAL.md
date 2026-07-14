@@ -14,14 +14,15 @@ This manual walks through the application the way a new SOC analyst would: insta
 2. [Loading PCAPs](#loading-pcaps)
 3. [The Analysis Pipeline & Progress Tab](#the-analysis-pipeline--progress-tab)
 4. [Dashboard](#dashboard)
-5. [OSINT Enrichment](#osint-enrichment)
-6. [LLM Analysis (AI Threat Report)](#llm-analysis-ai-threat-report)
-7. [Raw Data](#raw-data)
-8. [Cases](#cases)
-9. [Exports & PDF Reports](#exports--pdf-reports)
-10. [Configuration](#configuration)
-11. [Data Retention](#data-retention)
-12. [Troubleshooting](#troubleshooting)
+5. [MITRE ATT&CK Analysis](#mitre-attck-analysis)
+6. [OSINT Enrichment](#osint-enrichment)
+7. [LLM Analysis (AI Threat Report)](#llm-analysis-ai-threat-report)
+8. [Raw Data](#raw-data)
+9. [Cases](#cases)
+10. [Exports & PDF Reports](#exports--pdf-reports)
+11. [Configuration](#configuration)
+12. [Data Retention](#data-retention)
+13. [Troubleshooting](#troubleshooting)
 
 ---
 
@@ -145,6 +146,12 @@ Treat ✅ as an answer and 📭 as a gap to close before signing off an investig
 ### Flow table
 
 The flow table includes explicit **First Seen (UTC)** and **Last Seen (UTC)** columns — true flow start/end times are kept exact even when per-flow packet samples are capped (5,000 samples per flow).
+
+## MITRE ATT&CK Analysis
+
+The **MITRE ATT&CK Analysis** tab is a separate workspace from the Dashboard. It presents network-derived technique matches as **hypotheses**, with supporting evidence and a confidence band for each match. It also shows detector coverage and visibility gaps so an unavailable stage is not mistaken for a clean result.
+
+The page is deliberately scoped to the capture: PCAP evidence cannot establish process lineage, user identity, authorization, host persistence, or traffic outside the sensor. Validate the raw flows and supporting endpoint telemetry before treating a technique as confirmed. The **Coverage & Gaps** sub-tab records packet parse coverage, capture window, flow totals, sampling limits, stage warnings, and detector availability. The **Exports** sub-tab provides an ATT&CK Navigator layer using current ATT&CK version metadata.
 
 ---
 
@@ -299,7 +306,7 @@ Programmatic keys for the Integrations API are managed in the separate **API Key
 | Red banner: required binary missing (e.g. `tshark`) | Dependencies not installed | Follow the banner's OS-specific hint, or run `python3 scripts/install.py`; verify with `make doctor`. In Docker this never happens — binaries are baked in |
 | YARA panel: "no rules configured" | No rules directory set and `data/yara_rules/` absent | Set Config → YARA Rules to your rules folder, or create `data/yara_rules/` (Docker: `./data/yara_rules`); check the live rule-count feedback |
 | OSINT pill ⏳ *GreyNoise rate limited* | Free/community quota exhausted | Wait for the quota window to reset or upgrade the key; cached results (💾) remain usable |
-| LM Studio "Test Connection" fails from Docker | Container can't see `localhost` on the host | Use `http://host.docker.internal:1234/v1` (the compose default); confirm LM Studio's server is started |
+| LM Studio "Test Connection" fails from Docker | Container networking differs from the host; LAN/loopback addresses may not route directly | Use `http://host.docker.internal:1234/v1` (the compose default). The Docker runtime also adapts a host LAN address such as `192.168.2.114:1234` automatically; confirm LM Studio's server is started |
 | OSINT pill ➖ *no data* | Provider has no records for these indicators | Nothing to fix — that's an honest negative, not an error |
 | PDF generation error (standalone macOS/Linux) | WeasyPrint system libraries missing | macOS: `brew install pango glib cairo`; Linux: install the `libpango`/`libcairo` set (the installer does this). Docker images include them |
 | Dashboard panel shows 📭 after loading a case | That artifact isn't persisted in cases | Re-run the original PCAP to regenerate it |

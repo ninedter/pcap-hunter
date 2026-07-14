@@ -35,6 +35,7 @@ from typing import Callable
 import pandas as pd
 
 from app import config as C
+from app.analysis.visibility import build_capture_metrics
 from app.pipeline.beacon import rank_beaconing
 from app.pipeline.carve import CarveError, carve_http_payloads
 from app.pipeline.dns_analysis import analyze_dns
@@ -43,6 +44,7 @@ from app.pipeline.progress import Progress
 from app.pipeline.pyshark_pass import parse_pcap_pyshark
 from app.pipeline.tls_certs import analyze_certificates
 from app.pipeline.zeek import load_zeek_any, merge_zeek_dns, run_zeek
+from app.threat_intel.attack_mapping import ATTACKMapper
 from app.utils.string_utils import uniq_sorted
 
 logger = logging.getLogger(__name__)
@@ -119,6 +121,8 @@ class PipelineResult:
     warnings: list[str] = field(default_factory=list)
     summary_narrative: str | None = None
     mitre_techniques: list[str] = field(default_factory=list)
+    attack_mapping: dict | None = None
+    capture_metrics: dict | None = None
     dns_analysis: dict = field(default_factory=dict)
     tls_analysis: dict = field(default_factory=dict)
     beacon_df_records: list[dict] = field(default_factory=list)
@@ -143,6 +147,8 @@ class PipelineResult:
             "warnings": list(self.warnings),
             "summary_narrative": self.summary_narrative,
             "mitre_techniques": list(self.mitre_techniques),
+            "attack_mapping": self.attack_mapping,
+            "capture_metrics": self.capture_metrics,
             "dns_analysis": dict(self.dns_analysis),
             "tls_analysis": dict(self.tls_analysis),
             "beacon_df_records": list(self.beacon_df_records),
@@ -397,6 +403,23 @@ def run_pipeline(
                 features["artifacts"]["hashes"].append(sha)
         features["artifacts"]["hashes"] = uniq_sorted(features["artifacts"]["hashes"])
 
+    partial_mapping = ATTACKMapper().map_analysis(
+        features=features,
+        dns_analysis=dns_result,
+        tls_analysis=tls_result,
+        beacon_results=beacon_records,
+    )
+    capture_metrics = build_capture_metrics(
+        {
+            "features": features,
+            "__total_pkts": total_pkts,
+            "dns_analysis": dns_result,
+            "tls_analysis": tls_result,
+            "zeek_tables": zeek_tables,
+            "pipeline_warnings": warnings,
+        }
+    )
+
     return PipelineResult(
         case_id=case_id,
         analysis_id=None,  # caller writes the Analysis row and fills this in
@@ -411,4 +434,7 @@ def run_pipeline(
         zeek_tables=zeek_tables,
         zeek_log_paths=zeek_log_paths,
         carved_items=carved if options.do_carve else [],
+        mitre_techniques=[technique.technique_id for technique in partial_mapping.techniques],
+        attack_mapping=partial_mapping.to_dict(),
+        capture_metrics=capture_metrics,
     )

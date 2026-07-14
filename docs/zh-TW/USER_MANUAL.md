@@ -14,14 +14,15 @@
 2. [載入 PCAP](#載入-pcap)
 3. [分析管道與 Progress 分頁](#分析管道與-progress-分頁)
 4. [儀表板](#儀表板)
-5. [OSINT 情資豐富化](#osint-情資豐富化)
-6. [LLM 分析與 AI 威脅報告](#llm-分析與-ai-威脅報告)
-7. [Raw Data 分頁](#raw-data-分頁)
-8. [案件管理](#案件管理)
-9. [匯出與 PDF 報告](#匯出與-pdf-報告)
-10. [設定](#設定)
-11. [資料保留](#資料保留)
-12. [疑難排解](#疑難排解)
+5. [MITRE ATT&CK 分析](#mitre-attck-分析)
+6. [OSINT 情資豐富化](#osint-情資豐富化)
+7. [LLM 分析與 AI 威脅報告](#llm-分析與-ai-威脅報告)
+8. [Raw Data 分頁](#raw-data-分頁)
+9. [案件管理](#案件管理)
+10. [匯出與 PDF 報告](#匯出與-pdf-報告)
+11. [設定](#設定)
+12. [資料保留](#資料保留)
+13. [疑難排解](#疑難排解)
 
 ---
 
@@ -133,6 +134,12 @@ PCAP Hunter 執行 10 階段管道：
 - **📭 未執行 / 無資料** — 該階段被跳過、執行失敗，或其資料未被保存（例如 "📭 DNS analysis was skipped for this run."）。這不能當作「沒有威脅」的證據。
 
 把 ✅ 視為一個答案，把 📭 視為結案前必須補齊的缺口。
+
+## MITRE ATT&CK 分析
+
+**MITRE ATT&CK Analysis** 是獨立於 Dashboard 的工作區。它會把網路證據對應成**分析假設**，並為每項技術顯示支援證據與信心等級；同時呈現偵測器涵蓋範圍與可見性缺口，避免把未執行的階段誤認為乾淨結果。
+
+此頁面刻意限定在擷取檔範圍內：單靠 PCAP 無法證明程序來源、使用者身分、授權狀態、主機持久化或感測器以外的流量。確認技術前，請回看原始流量並補充端點遙測。**Coverage & Gaps** 子分頁會記錄封包解析涵蓋率、擷取時間窗、流量總量、取樣限制、階段警告與偵測器可見性；**Exports** 子分頁可下載含目前 ATT&CK 版本資訊的 Navigator 圖層。
 
 ### 篩選器與圖表
 
@@ -299,7 +306,7 @@ PCAP Hunter 執行 10 階段管道：
 | 紅色橫幅：缺少必要執行檔（例如 `tshark`） | 相依套件未安裝 | 依照橫幅上的作業系統專屬提示操作，或執行 `python3 scripts/install.py`；以 `make doctor` 驗證。Docker 中不會發生——執行檔已內建 |
 | YARA 面板顯示「no rules configured」 | 未設定規則目錄，且 `data/yara_rules/` 不存在 | 將 Config → YARA Rules 指向你的規則資料夾，或建立 `data/yara_rules/`（Docker：`./data/yara_rules`）；留意即時規則數量回饋 |
 | OSINT 標籤 ⏳ *GreyNoise rate limited* | 免費 / 社群配額用罄 | 等待配額視窗重置或升級金鑰；快取結果（💾）仍可使用 |
-| Docker 環境中 LM Studio「Test Connection」失敗 | 容器看不到主機的 `localhost` | 使用 `http://host.docker.internal:1234/v1`（compose 預設值）；確認 LM Studio 的伺服器已啟動 |
+| Docker 環境中 LM Studio「Test Connection」失敗 | 容器網路與主機不同，區域網路或迴路位址可能無法直接路由 | 使用 `http://host.docker.internal:1234/v1`（compose 預設值）。Docker 執行環境也會自動將 `192.168.2.114:1234` 這類主機區域網路位址轉換；確認 LM Studio 伺服器已啟動 |
 | OSINT 標籤 ➖ *no data* | 供應商沒有這些指標的紀錄 | 不需處理——這是誠實的陰性結果，不是錯誤 |
 | PDF 產生錯誤（獨立安裝的 macOS/Linux） | 缺少 WeasyPrint 系統函式庫 | macOS：`brew install pango glib cairo`；Linux：安裝 `libpango`/`libcairo` 系列（安裝程式會處理）。Docker 映像檔已內含 |
 | 載入案件後儀表板面板顯示 📭 | 該產物未保存在案件中 | 重新分析原始 PCAP 即可重新產生 |

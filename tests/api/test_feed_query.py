@@ -58,6 +58,22 @@ def test_query_iocs_includes_case_ids_and_first_seen(tmp_path):
         assert r["first_seen"] is not None
 
 
+def test_query_iocs_includes_persisted_mitre_techniques(tmp_path):
+    repo = CaseRepository(db_path=str(tmp_path / "t.db"))
+    repo.create_case(Case(id="mitrecase", title="t"))
+    analysis = Analysis(
+        case_id="mitrecase",
+        pcap_path="x.pcap",
+        attack_mapping={"techniques": [{"technique_id": "T1071.004"}, {"technique_id": "T1568.002"}]},
+        iocs=[IOC(ioc_type=IOCType.DOMAIN, value="dns.example")],
+    )
+    repo.save_analysis(analysis)
+
+    rows = query_iocs(repo, IOCFilter())
+
+    assert rows[0]["mitre_techniques"] == ["T1071.004", "T1568.002"]
+
+
 def test_query_iocs_score_from_severity(tmp_path):
     repo = _seed(tmp_path)
     rows = query_iocs(repo, IOCFilter())

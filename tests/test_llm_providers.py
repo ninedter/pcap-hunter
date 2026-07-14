@@ -287,6 +287,7 @@ class TestProbeProvider(unittest.TestCase):
                 P.PROVIDER_LMSTUDIO, base_url="http://localhost:1234", api_key="lm", model="local"
             )
         tc.assert_called_once()
+        self.assertTrue(tc.call_args.kwargs["local_compatible"])
         self.assertTrue(ok)
 
     def test_probe_openai_blank_url_uses_default_endpoint(self):
@@ -294,6 +295,7 @@ class TestProbeProvider(unittest.TestCase):
             ok, _ = P.probe_provider(P.PROVIDER_OPENAI, base_url="", api_key="sk", model="gpt-4o")
         # Probe still hits the real default endpoint instead of erroring on no URL
         self.assertEqual(tc.call_args.args[0], "https://api.openai.com/v1")
+        self.assertFalse(tc.call_args.kwargs["local_compatible"])
         self.assertTrue(ok)
 
     def test_probe_openai_error_returns_false(self):

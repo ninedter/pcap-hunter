@@ -1,4 +1,4 @@
-"""Capture README screenshots of the PCAP Hunter UI and redact all IPs.
+"""Capture real README screenshots and redact sensitive values.
 
 Drives a headless Chromium via Playwright against a running Streamlit
 instance (default http://localhost:8501), uploads ``data/sample.pcap``
@@ -6,21 +6,24 @@ by entering its path into the "type a container path" text input,
 clicks Extract & Analyze, waits for the pipeline to finish, then
 snapshots each tab at 1440×900.
 
-After capture, every PNG is post-processed with Pillow to redact IPv4
-addresses. We do this at the pixel level using OCR-free regex scanning
-of the DOM rather than image OCR: the script extracts the bounding
-boxes of every text node that matches an IPv4 pattern, converts them
-into pixel coordinates, and draws solid black rectangles in Pillow.
+After capture, every PNG is post-processed with Pillow to redact IPv4/IPv6
+addresses, email addresses, full PCAP Hunter API keys, and user-home paths.
+The primary pass extracts the exact DOM bounding boxes and draws solid pixel
+rectangles. A multi-pass OCR fallback catches IPs rendered into Streamlit's
+canvas-based data tables, and a final OCR audit fails the capture if a
+recognizable sensitive value remains.
 
 Usage:
     python3 scripts/capture_screenshots.py
     python3 scripts/capture_screenshots.py --base-url http://localhost:8501
+    python3 scripts/capture_screenshots.py --seed-docs-key  # isolated data bind only
     python3 scripts/capture_screenshots.py --keep-ips   # skip redaction
 """
 
 from __future__ import annotations
 
 import argparse
+import ipaddress
 import re
 import sys
 import time
@@ -37,6 +40,11 @@ SAMPLE_PCAP = REPO_ROOT / "data" / "sample.pcap"
 # IPv4 pattern — matches anything that looks like a.b.c.d with 0-255 octets.
 # We redact any IP, including RFC1918/loopback — the goal is zero IPs visible.
 IPV4_RE = re.compile(r"\b(?:(?:25[0-5]|2[0-4]\d|[01]?\d{1,2})\.){3}(?:25[0-5]|2[0-4]\d|[01]?\d{1,2})\b")
+# Broad candidate matcher; candidates are validated with ipaddress.ip_address.
+IPV6_CANDIDATE_RE = re.compile(r"(?<![0-9A-Fa-f:])(?:[0-9A-Fa-f]{0,4}:){2,7}[0-9A-Fa-f]{0,4}(?![0-9A-Fa-f:])")
+EMAIL_RE = re.compile(r"\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b", re.IGNORECASE)
+API_KEY_RE = re.compile(r"\bphk_[0-9a-f]{16,}\b", re.IGNORECASE)
+USER_PATH_RE = re.compile(r"(?:/(?:Users|home)/|[A-Z]:\\Users\\)[^\s\"'<>]+", re.IGNORECASE)
 
 
 # ---------------------------------------------------------------------------
@@ -126,6 +134,35 @@ def upload_sample_pcap(page: Page, pcap_path: str) -> None:
         page.get_by_text("Active Source", exact=False).first.wait_for(timeout=15_000)
 
 
+def configure_local_llm(page: Page) -> None:
+    """Select a model exposed by the real LM Studio endpoint, when available."""
+    print("→ configuring LM Studio from the real Config screen")
+    click_tab(page, "Config")
+    try:
+        page.get_by_role("button", name="Fetch Models", exact=True).first.click()
+        wait_for_streamlit_idle(page, timeout_ms=45_000)
+        page.get_by_text(re.compile(r"Found \d+ models?\.", re.IGNORECASE)).first.wait_for(timeout=45_000)
+        selected = page.get_by_label("Model name").input_value()
+        print(f"  model selected: {selected}")
+    except Exception as exc:  # noqa: BLE001 — screenshot setup degrades to configured default
+        print(f"  WARNING: live model discovery failed; using configured default ({exc})")
+    click_tab(page, "Upload")
+
+
+def prepare_documentation_api_key(page: Page) -> None:
+    """Create a disposable example key through the real UI when the database is empty."""
+    click_tab(page, "API Keys")
+    if "README documentation key" not in page.inner_text("body"):
+        page.get_by_label("Key Name").fill("README documentation key")
+        page.get_by_role("button", name="Create Key", exact=True).click()
+        wait_for_streamlit_idle(page)
+    # A newly created secret is intentionally stored in session state and shown
+    # once. Reload to clear that one-time value and refresh the repository list.
+    page.reload(wait_until="networkidle")
+    page.wait_for_timeout(2_000)
+    click_tab(page, "API Keys")
+
+
 def run_extract_analyze(page: Page, wait_for_llm: bool = False, timeout_s: int = 300) -> None:
     """Click the Extract & Analyze button and wait for the pipeline.
 
@@ -141,6 +178,11 @@ def run_extract_analyze(page: Page, wait_for_llm: bool = False, timeout_s: int =
             "the server rejected the pcap path — pass a path the SERVER can see "
             "(container-relative like data/sample.pcap when using Docker)"
         )
+    # Record the real in-flight phase tracker while it is present. Once a run
+    # completes, the Progress tab intentionally returns to its idle guidance.
+    page.get_by_role("tab", name=re.compile("Progress", re.IGNORECASE)).click()
+    page.wait_for_timeout(3_000)
+    capture_and_redact(page, "02-progress.png", redact=True)
     print(f"  waiting for pipeline (up to {timeout_s}s)...")
     deadline = time.time() + timeout_s
     last_status = ""
@@ -159,8 +201,7 @@ def run_extract_analyze(page: Page, wait_for_llm: bool = False, timeout_s: int =
                     // Data-stages complete: Beacon / YARA / OSINT sections appear in UI,
                     // or we see the LLM phase's "Generating AI report" caption, or LLM done.
                     const dataStageDone =
-                        bodyText.match(/Generating AI report/i) ||
-                        bodyText.match(/Generating LLM report/i) ||
+                        bodyText.match(/Generating (?:AI |LLM )?report/i) ||
                         bodyText.match(/OSINT enrichment complete/i) ||
                         bodyText.match(/Completed: LLM report/i) ||
                         bodyText.match(/Beacon candidates/i) ||
@@ -199,8 +240,8 @@ def run_extract_analyze(page: Page, wait_for_llm: bool = False, timeout_s: int =
 # ---------------------------------------------------------------------------
 
 
-def collect_ip_boxes(page: Page) -> list[dict]:
-    """Return [{x,y,w,h}, ...] for every visible IPv4 text on the page.
+def collect_sensitive_boxes(page: Page) -> list[dict]:
+    """Return pixel boxes for visible sensitive text on the page.
 
     We walk text nodes, match IPv4 patterns, then use Range.getClientRects()
     to get exact pixel coordinates in the page (which equal viewport pixels
@@ -208,29 +249,47 @@ def collect_ip_boxes(page: Page) -> list[dict]:
     """
     return page.evaluate(
         r"""() => {
-        const ipRe = /\b(?:(?:25[0-5]|2[0-4]\d|[01]?\d{1,2})\.){3}(?:25[0-5]|2[0-4]\d|[01]?\d{1,2})\b/g;
+        const sensitiveRes = [
+            /\b(?:(?:25[0-5]|2[0-4]\d|[01]?\d{1,2})\.){3}(?:25[0-5]|2[0-4]\d|[01]?\d{1,2})\b/g,
+            /[0-9A-Fa-f:]*:[0-9A-Fa-f:]+/g,
+            /\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/gi,
+            /\bphk_[0-9a-f]{16,}\b/gi,
+            /(?:\/(?:Users|home)\/|[A-Z]:\\Users\\)[^\s\"'<>]+/gi,
+        ];
         const boxes = [];
         const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
         let node;
         while ((node = walker.nextNode())) {
             const text = node.nodeValue;
             if (!text) continue;
-            const matches = [...text.matchAll(ipRe)];
-            if (!matches.length) continue;
-            for (const m of matches) {
-                const range = document.createRange();
-                range.setStart(node, m.index);
-                range.setEnd(node, m.index + m[0].length);
-                const rects = range.getClientRects();
-                for (const r of rects) {
-                    if (r.width > 0 && r.height > 0) {
-                        boxes.push({
-                            x: Math.floor(r.left + window.scrollX),
-                            y: Math.floor(r.top + window.scrollY),
-                            w: Math.ceil(r.width),
-                            h: Math.ceil(r.height),
-                            text: m[0],
-                        });
+            const element = node.parentElement;
+            if (!element || !element.checkVisibility({checkOpacity: true, checkVisibilityCSS: true})) continue;
+            const panel = element.closest('[role="tabpanel"]');
+            if (panel && panel.getAttribute('aria-hidden') === 'true') continue;
+            for (const sensitiveRe of sensitiveRes) {
+                sensitiveRe.lastIndex = 0;
+                const matches = [...text.matchAll(sensitiveRe)];
+                for (const m of matches) {
+                    // The broad IPv6 candidate matcher also sees timestamps.
+                    // Require compressed notation or at least four colons.
+                    if (sensitiveRe === sensitiveRes[1]) {
+                        const colonCount = (m[0].match(/:/g) || []).length;
+                        if (!m[0].includes('::') && colonCount < 4) continue;
+                    }
+                    const range = document.createRange();
+                    range.setStart(node, m.index);
+                    range.setEnd(node, m.index + m[0].length);
+                    const rects = range.getClientRects();
+                    for (const r of rects) {
+                        if (r.width > 0 && r.height > 0) {
+                            boxes.push({
+                                x: Math.floor(r.left + window.scrollX),
+                                y: Math.floor(r.top + window.scrollY),
+                                w: Math.ceil(r.width),
+                                h: Math.ceil(r.height),
+                                text: m[0],
+                            });
+                        }
                     }
                 }
             }
@@ -248,6 +307,19 @@ def _valid_ip_octet(s: str) -> bool:
         return False
 
 
+def _valid_ipv6_values(text: str) -> list[str]:
+    """Return syntactically valid IPv6 values found in OCR text."""
+    values: list[str] = []
+    for match in IPV6_CANDIDATE_RE.finditer(text):
+        candidate = match.group(0)
+        try:
+            if ipaddress.ip_address(candidate).version == 6:
+                values.append(candidate)
+        except ValueError:
+            continue
+    return values
+
+
 def _extract_ip_boxes_from_data(data: dict, scale: float = 1.0) -> list[dict]:
     """Three match strategies on one tesseract image_to_data result."""
     boxes: list[dict] = []
@@ -263,9 +335,9 @@ def _extract_ip_boxes_from_data(data: dict, scale: float = 1.0) -> list[dict]:
             "text": text,
         }
 
-    # Strategy 1: per-token strict IPv4
+    # Strategy 1: per-token strict IPv4/IPv6
     for i, text in enumerate(data["text"]):
-        if text and IPV4_RE.search(text):
+        if text and (IPV4_RE.search(text) or _valid_ipv6_values(text)):
             boxes.append(_box(i, text))
 
     # Strategy 2: 4-token sliding window on the same line
@@ -319,8 +391,10 @@ def ocr_ip_boxes(png_path: Path) -> list[dict]:
     """
     try:
         import pytesseract
-    except ImportError:
-        return []
+    except ImportError as exc:
+        raise RuntimeError(
+            "pytesseract is required for privacy-safe screenshot capture; install requirements-docs.txt"
+        ) from exc
 
     img = Image.open(png_path)
     img_2x = img.resize((img.width * 2, img.height * 2), Image.LANCZOS)
@@ -352,7 +426,7 @@ def redact_png(
     dpr: float = 1.0,
     run_ocr_fallback: bool = True,
 ) -> int:
-    """Overlay each IP box with a solid black rectangle. Returns total redactions.
+    """Overlay each sensitive box with a solid rectangle. Returns total redactions.
 
     First pass: uses the DOM-collected boxes (exact, fast).
     Second pass: OCR the saved PNG to catch IPs in canvas-rendered grids
@@ -398,6 +472,23 @@ def redact_png(
         img.convert("RGB").save(png_path, format="PNG", optimize=True)
 
     return total
+
+
+def audit_redacted_png(png_path: Path) -> list[str]:
+    """Return recognizable sensitive values that remain after redaction."""
+    try:
+        import pytesseract
+    except ImportError as exc:
+        raise RuntimeError(
+            "pytesseract is required for the final screenshot privacy audit; install requirements-docs.txt"
+        ) from exc
+
+    text = pytesseract.image_to_string(Image.open(png_path), config="--psm 11")
+    findings: list[str] = []
+    for pattern in (IPV4_RE, EMAIL_RE, API_KEY_RE, USER_PATH_RE):
+        findings.extend(match.group(0) for match in pattern.finditer(text))
+    findings.extend(_valid_ipv6_values(text))
+    return sorted(set(findings))
 
 
 def crop_trailing_blank(
@@ -447,13 +538,17 @@ def capture_and_redact(
     dpr: float = 1.0,
 ) -> None:
     """Take a screenshot and immediately redact IPs in place."""
-    # Collect IP bounding boxes BEFORE screenshot so the DOM is the same state
-    boxes = collect_ip_boxes(page) if redact else []
+    # Collect sensitive bounding boxes BEFORE screenshot so the DOM is the same state.
+    boxes = collect_sensitive_boxes(page) if redact else []
     path = save_screenshot(page, filename)
     if redact:
         n = redact_png(path, boxes, dpr=dpr, run_ocr_fallback=True)
-        print(f"  ✂  redacted {n} IP region(s) in {filename}")
+        print(f"  ✂  redacted {n} sensitive region(s) in {filename}")
     crop_trailing_blank(path)
+    if redact:
+        findings = audit_redacted_png(path)
+        if findings:
+            raise RuntimeError(f"sensitive text remains in {filename}: {', '.join(findings)}")
 
 
 # ---------------------------------------------------------------------------
@@ -466,6 +561,11 @@ def main() -> int:
     parser.add_argument("--base-url", default="http://localhost:8501")
     parser.add_argument("--keep-ips", action="store_true", help="skip IP redaction")
     parser.add_argument("--skip-analysis", action="store_true", help="don't upload/analyze (just snap empty tabs)")
+    parser.add_argument(
+        "--seed-docs-key",
+        action="store_true",
+        help="create a disposable README API key; use only with an isolated data bind",
+    )
     parser.add_argument(
         "--redact-only",
         action="store_true",
@@ -516,6 +616,12 @@ def main() -> int:
         # Streamlit's first render after networkidle still sometimes paints late
         page.wait_for_timeout(2_000)
 
+        # Discover the model through the actual Config UI. This keeps the LLM
+        # screenshot tied to a functioning local provider instead of a mock or
+        # hard-coded model name.
+        if not args.skip_analysis:
+            configure_local_llm(page)
+
         # 1. Upload tab (pre-analysis)
         print("→ tab: Upload (pre-analysis)")
         click_tab(page, "Upload")
@@ -526,6 +632,7 @@ def main() -> int:
             for label, filename in (
                 ("Config", "08-config.png"),
                 ("Cases", "07-cases.png"),
+                ("API Keys", "11-api-keys.png"),
             ):
                 print(f"→ tab: {label} (empty state)")
                 click_tab(page, label)
@@ -572,8 +679,8 @@ def main() -> int:
 
         # 3. Capture each tab
         for label, filename in (
-            ("Progress", "02-progress.png"),
             ("Dashboard", "03-dashboard.png"),
+            ("MITRE Analysis", "10-mitre-analysis.png"),
             ("LLM Analysis", "04-llm-analysis.png"),
             ("OSINT", "05-osint.png"),
             ("Raw Data", "06-raw-data.png"),
@@ -584,10 +691,20 @@ def main() -> int:
             click_tab(page, label)
             capture_and_redact(page, filename, redact=redact)
 
-        # 4. LLM Integration close-up with the Anthropic provider selected.
+        # 4. Create an example key in the isolated documentation database via
+        # the UI, reload away the one-time secret, then capture management state.
+        print("→ tab: API Keys")
+        if args.seed_docs_key:
+            prepare_documentation_api_key(page)
+        else:
+            click_tab(page, "API Keys")
+        capture_and_redact(page, "11-api-keys.png", redact=redact)
+
+        # 5. LLM Integration close-up with the Anthropic provider selected.
         # No IPs appear in this section, so no redaction pass is needed.
         print("→ provider close-up: 09-llm-providers.png")
         try:
+            click_tab(page, "Config")
             page.get_by_text("Anthropic", exact=True).first.click()
             page.wait_for_timeout(2_000)
             heading = page.get_by_text("LLM Integration", exact=True).first

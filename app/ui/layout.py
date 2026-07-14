@@ -131,11 +131,12 @@ def render_export_buttons(data, prefix: str, key_suffix: str = "", is_dataframe:
 
 
 def make_tabs():
-    """Top tabs: Upload • Progress • Dashboard • LLM Analysis • OSINT • Results • Cases • API Keys • Config."""
+    """Top tabs, including a dedicated MITRE analysis workspace."""
     tab_names = [
         "📤 Upload",
         "📈 Progress",
         "📊 Dashboard",
+        "🧭 MITRE Analysis",
         "🤖 LLM Analysis",
         "🕵️ OSINT",
         "📋 Raw Data",
@@ -144,7 +145,7 @@ def make_tabs():
         "⚙️ Config",
     ]
     tabs = st.tabs(tab_names)
-    return tabs[0], tabs[1], tabs[2], tabs[3], tabs[4], tabs[5], tabs[6], tabs[7], tabs[8]
+    return tuple(tabs)
 
 
 def make_progress_panel(container):
@@ -311,7 +312,14 @@ def render_threat_summary(
 def analysis_has_run() -> bool:
     """True once a pipeline run (or case restore) has populated session state."""
     feats = st.session_state.get("features") or {}
-    return bool(feats.get("flows") or st.session_state.get("zeek_tables"))
+    return bool(
+        feats.get("flows")
+        or st.session_state.get("zeek_tables")
+        or st.session_state.get("__total_pkts") is not None
+        or st.session_state.get("capture_metrics") is not None
+        or st.session_state.get("attack_mapping") is not None
+        or st.session_state.get("correlations") is not None
+    )
 
 
 # Backward-compatible alias for internal call sites that predate the public name.
@@ -1635,15 +1643,99 @@ def render_ja3(result_col, ja3_df, ja3_analysis: dict | None):
                 st.caption("No TLS/JA3 data available. Run analysis with PCAP containing TLS traffic.")
 
 
-def render_report(result_col, report_md):
+def render_report(result_col, report_md, *, status: str | None = None):
     with result_col:
         st.markdown("#### LLM Report")
         if report_md:
             st.markdown(report_md)
+        elif status == "skipped":
+            st.info("⏭️ LLM report generation was skipped. The parsed and analyzed evidence remains available below.")
         elif _analysis_has_run():
             st.info("📝 No LLM report yet — generate one from the LLM Analysis tab.")
         else:
             st.info("📭 Upload a PCAP and run analysis to populate this section.")
+
+
+def render_analysis_snapshot(result_col, state: dict) -> None:
+    """Show deterministic pipeline evidence when no LLM narrative is available.
+
+    The LLM report is an optional presentation layer.  Skipping it must never
+    make the packet parse, protocol analysis, detections, or extracted IOCs
+    appear to have disappeared.  This compact view keeps the most useful
+    evidence visible in the LLM tab while the Dashboard and Raw Data tabs retain
+    their full drill-down views.
+    """
+    with result_col:
+        features = state.get("features") or {}
+        flows = features.get("flows") or []
+        artifacts = features.get("artifacts") or {}
+        correlations = state.get("correlations") or []
+        metrics = state.get("capture_metrics") or {}
+        warnings = state.get("pipeline_warnings") or []
+        stages = state.get("pipeline_stages") or []
+
+        st.markdown("#### Parsed & Analyzed Evidence")
+        st.caption("This evidence is produced by the deterministic pipeline and does not require an AI provider.")
+
+        artifact_total = sum(len(value) for value in artifacts.values() if isinstance(value, list))
+        packet_count = metrics.get("packet_count", state.get("__total_pkts"))
+        parsed_packets = metrics.get("parsed_packet_count")
+        metric_values = [
+            ("Packets", packet_count if packet_count is not None else "—"),
+            ("Parsed flows", len(flows)),
+            ("Extracted IOCs", artifact_total),
+            ("Correlations", len(correlations)),
+        ]
+        cols = st.columns(len(metric_values))
+        for col, (label, value) in zip(cols, metric_values):
+            with col:
+                st.metric(label, value)
+
+        if parsed_packets is not None:
+            st.caption(f"Parser coverage: {parsed_packets:,} packets represented in the stored flow evidence.")
+        if warnings:
+            st.warning("Pipeline warnings: " + "; ".join(str(item) for item in warnings[:8]))
+        if stages:
+            st.caption("Completed stages: " + ", ".join(str(stage) for stage in stages))
+
+        detail_cols = st.columns(2)
+        with detail_cols[0]:
+            with st.expander(f"Artifacts ({artifact_total})", expanded=True):
+                shown = False
+                for kind, values in artifacts.items():
+                    if isinstance(values, list) and values:
+                        shown = True
+                        st.markdown(f"**{kind.title()}** ({len(values)})")
+                        st.code("\n".join(str(value) for value in values[:50]))
+                if not shown:
+                    st.caption("No extracted artifacts were reported.")
+        with detail_cols[1]:
+            with st.expander(f"Correlations ({len(correlations)})", expanded=True):
+                rows = []
+                for item in correlations[:50]:
+                    if hasattr(item, "to_dict"):
+                        item = item.to_dict()
+                    if isinstance(item, dict):
+                        rows.append(
+                            {
+                                "Indicator": item.get("indicator", ""),
+                                "Type": item.get("indicator_type", item.get("type", "")),
+                                "Verdict": item.get("verdict", ""),
+                                "Score": item.get("composite_score", ""),
+                            }
+                        )
+                if rows:
+                    st.dataframe(pd.DataFrame(rows), hide_index=True, width="stretch")
+                else:
+                    st.caption("No cross-indicator correlations were reported.")
+
+        with st.expander(f"Parsed flows ({len(flows)})", expanded=False):
+            if flows:
+                st.dataframe(pd.DataFrame(flows[:100]), hide_index=True, width="stretch")
+                if len(flows) > 100:
+                    st.caption(f"Showing the first 100 of {len(flows)} flows. See Raw Data for the full export.")
+            else:
+                st.caption("No parsed flow rows were reported.")
 
 
 def render_dns_analysis(result_col, dns_analysis: dict | None):

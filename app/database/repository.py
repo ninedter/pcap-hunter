@@ -71,7 +71,9 @@ class CaseRepository:
                     report_md TEXT,
                     yara_json TEXT,
                     dns_json TEXT,
-                    tls_json TEXT
+                    tls_json TEXT,
+                    attack_mapping_json TEXT,
+                    capture_metrics_json TEXT
                 );
 
                 -- IOCs extracted from analyses
@@ -135,6 +137,15 @@ class CaseRepository:
                 CREATE INDEX IF NOT EXISTS idx_jobs_case ON jobs(case_id);
                 """
             )
+            # Existing case databases predate ATT&CK and capture-quality
+            # persistence.  Add the columns in place so upgrades do not erase
+            # prior investigations.
+            for column in ("attack_mapping_json", "capture_metrics_json"):
+                try:
+                    conn.execute(f"ALTER TABLE analyses ADD COLUMN {column} TEXT")  # noqa: S608 — fixed column names
+                except sqlite3.OperationalError as exc:
+                    if "duplicate column name" not in str(exc).lower():
+                        raise
             conn.commit()
 
             # Idempotent column additions (ALTER TABLE ADD COLUMN errors if column exists)
@@ -406,31 +417,52 @@ class CaseRepository:
             yara_json = self._compress_json(analysis.yara_results) if analysis.yara_results else None
             dns_json = self._compress_json(analysis.dns_analysis) if analysis.dns_analysis else None
             tls_json = self._compress_json(analysis.tls_analysis) if analysis.tls_analysis else None
+            attack_mapping_json = self._compress_json(analysis.attack_mapping) if analysis.attack_mapping else None
+            capture_metrics_json = self._compress_json(analysis.capture_metrics) if analysis.capture_metrics else None
 
+            params = (
+                analysis.id,
+                analysis.case_id,
+                analysis.pcap_path,
+                analysis.pcap_hash,
+                analysis.packet_count,
+                analysis.analyzed_at.isoformat(),
+                features_json,
+                osint_json,
+                analysis.report,
+                yara_json,
+                dns_json,
+                tls_json,
+                attack_mapping_json,
+                capture_metrics_json,
+            )
             conn.execute(
                 """
-                INSERT OR REPLACE INTO analyses
+                INSERT INTO analyses
                 (id, case_id, pcap_path, pcap_hash, packet_count, analyzed_at,
-                 features_json, osint_json, report_md, yara_json, dns_json, tls_json)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 features_json, osint_json, report_md, yara_json, dns_json, tls_json,
+                 attack_mapping_json, capture_metrics_json)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(id) DO UPDATE SET
+                    case_id = excluded.case_id,
+                    pcap_path = excluded.pcap_path,
+                    pcap_hash = excluded.pcap_hash,
+                    packet_count = excluded.packet_count,
+                    analyzed_at = excluded.analyzed_at,
+                    features_json = excluded.features_json,
+                    osint_json = excluded.osint_json,
+                    report_md = excluded.report_md,
+                    yara_json = excluded.yara_json,
+                    dns_json = excluded.dns_json,
+                    tls_json = excluded.tls_json,
+                    attack_mapping_json = excluded.attack_mapping_json,
+                    capture_metrics_json = excluded.capture_metrics_json
                 """,
-                (
-                    analysis.id,
-                    analysis.case_id,
-                    analysis.pcap_path,
-                    analysis.pcap_hash,
-                    analysis.packet_count,
-                    analysis.analyzed_at.isoformat(),
-                    features_json,
-                    osint_json,
-                    analysis.report,
-                    yara_json,
-                    dns_json,
-                    tls_json,
-                ),
+                params,
             )
 
-            # Save IOCs
+            # Save IOCs as a replacement set for this analysis ID.
+            conn.execute("DELETE FROM iocs WHERE analysis_id = ?", (analysis.id,))
             for ioc in analysis.iocs:
                 self._save_ioc(conn, analysis.id, ioc)
 
@@ -702,6 +734,8 @@ class CaseRepository:
         yara_results = self._decompress_json(row.get("yara_json"))
         dns_analysis = self._decompress_json(row.get("dns_json"))
         tls_analysis = self._decompress_json(row.get("tls_json"))
+        attack_mapping = self._decompress_json(row.get("attack_mapping_json"))
+        capture_metrics = self._decompress_json(row.get("capture_metrics_json"))
 
         # Load IOCs
         ioc_rows = conn.execute("SELECT * FROM iocs WHERE analysis_id = ?", (row["id"],)).fetchall()
@@ -729,6 +763,8 @@ class CaseRepository:
             yara_results=yara_results,
             dns_analysis=dns_analysis,
             tls_analysis=tls_analysis,
+            attack_mapping=attack_mapping,
+            capture_metrics=capture_metrics,
             iocs=iocs,
         )
 

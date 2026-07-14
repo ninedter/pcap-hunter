@@ -2,6 +2,7 @@
 
 import pytest
 
+from app import config as C
 from app.utils.config_manager import DEFAULT_CONFIG, SENSITIVE_KEYS, ConfigManager
 
 
@@ -18,6 +19,11 @@ def config_manager(temp_config_file):
 
 
 class TestConfigManagerBasic:
+    def test_llm_defaults_match_runtime_configuration(self):
+        """Fresh installs use the same LM Studio endpoint and model as the runtime."""
+        assert DEFAULT_CONFIG["cfg_llm_endpoint"] == C.LM_BASE_URL
+        assert DEFAULT_CONFIG["cfg_llm_model"] == C.LM_MODEL
+
     def test_load_missing_file(self, config_manager):
         """Loading non-existent file returns defaults."""
         config = config_manager.load()

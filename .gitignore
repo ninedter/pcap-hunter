@@ -38,7 +38,9 @@ htmlcov/
 # Project specific
 data/
 *.pcap
+*.pcapng
 !tests/fixtures/*.pcap
+!tests/fixtures/*.pcapng
 *.log
 .DS_Store
 
@@ -50,4 +52,3 @@ CLAUDE.local.md
 
 # Superpowers auto-generated specs and plans (session artifacts, not source)
 docs/superpowers/
-

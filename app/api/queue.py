@@ -27,7 +27,6 @@ WARNING_PERSISTENCE_FAILED = "analysis_persistence_failed"
 WARNING_OSINT_NOT_CONFIGURED = "osint_not_configured"
 WARNING_OSINT_FAILED = "osint_failed"
 WARNING_YARA_FAILED = "yara_failed"
-WARNING_LLM_UNSUPPORTED = "llm_unsupported_on_api_path"
 
 
 def _load_osint_keys() -> dict[str, str]:
@@ -168,9 +167,33 @@ def _persist_analysis(
     """
     # Mirrors app/ui/cases_tab.py:_quick_save_analysis. Persistence failures
     # must not lose the pipeline result -> warn, keep analysis_id None.
+    from app.analysis.visibility import build_capture_metrics
     from app.database.models import Analysis
+    from app.threat_intel.attack_mapping import ATTACKMapper
 
     try:
+        mapping = ATTACKMapper().map_analysis(
+            features=result.features,
+            dns_analysis=result.dns_analysis or {},
+            tls_analysis=result.tls_analysis or {},
+            yara_results=yara_results or {},
+            beacon_results=result.beacon_df_records,
+            osint=osint_data or {},
+        )
+        result.attack_mapping = mapping.to_dict()
+        result.mitre_techniques = [technique.technique_id for technique in mapping.techniques]
+        result.capture_metrics = build_capture_metrics(
+            {
+                "features": result.features,
+                "__total_pkts": result.packet_count,
+                "dns_analysis": result.dns_analysis,
+                "tls_analysis": result.tls_analysis,
+                "zeek_tables": result.zeek_tables,
+                "yara_results": yara_results,
+                "osint": osint_data,
+                "pipeline_warnings": result.warnings,
+            }
+        )
         analysis = Analysis(
             case_id=job.case_id,
             pcap_path=pcap_path,
@@ -181,6 +204,8 @@ def _persist_analysis(
             yara_results=yara_results,
             dns_analysis=result.dns_analysis or None,
             tls_analysis=result.tls_analysis or None,
+            attack_mapping=result.attack_mapping,
+            capture_metrics=result.capture_metrics,
         )
         if result.beacon_df_records:
             analysis.features["beacon_records"] = result.beacon_df_records
@@ -245,10 +270,6 @@ def _worker_run(job_id: str, db_path: str, pcap_path: str, options_dict: dict) -
         opts = options_dict  # raw dict: includes keys PipelineOptions doesn't model (e.g. do_yara)
         yara_results = _run_yara_stage(result, opts, job_id, repo)
         osint_data = _run_osint_stage(result, opts, job_id, repo)
-
-        # --- LLM report: not yet supported headless (needs UI correlation context) ---
-        if opts.get("llm_enabled", True):
-            result.warnings.append(WARNING_LLM_UNSUPPORTED)
 
         _persist_analysis(result, job, pcap_path, osint_data, yara_results, repo)
 

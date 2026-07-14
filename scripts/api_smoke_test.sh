@@ -27,8 +27,7 @@ RESP=$(curl -fsS -X POST "$API/api/v1/pcaps" \
     -H "Authorization: Bearer $KEY" \
     -F "pcap=@$FIXTURE" \
     -F "name=smoke" \
-    -F "osint_enabled=false" \
-    -F "llm_enabled=false")
+    -F "osint_enabled=false")
 echo "$RESP"
 JOB_ID=$(echo "$RESP" | python3 -c "import json,sys; print(json.load(sys.stdin)['job_id'])")
 CASE_ID=$(echo "$RESP" | python3 -c "import json,sys; print(json.load(sys.stdin)['case_id'])")

@@ -53,6 +53,8 @@ def test_pipeline_result_to_dict_is_json_serializable():
     restored = json.loads(serialized)
     assert restored["analysis_id"] == "def67890"
     assert restored["mitre_techniques"] == ["T1071.001", "T1568.002"]
+    assert "attack_mapping" in restored
+    assert "capture_metrics" in restored
     assert restored["summary_narrative"] == "A short narrative."
     assert restored["dns_analysis"]["dga_count"] == 3
     assert restored["tls_analysis"]["certs"][0]["subject"] == "evil.example"

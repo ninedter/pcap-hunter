@@ -1,6 +1,7 @@
 # PCAP Hunter
 
 [![CI](https://github.com/ninedter/pcap-hunter/actions/workflows/ci.yml/badge.svg)](https://github.com/ninedter/pcap-hunter/actions/workflows/ci.yml)
+[![Release: v2.0.0](https://img.shields.io/badge/release-v2.0.0-7c3aed.svg)](https://github.com/ninedter/pcap-hunter/releases/tag/v2.0.0)
 [![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](../../LICENSE)
 
@@ -14,8 +15,20 @@
 
 ---
 
+## 版本 2 新功能
+
+- **獨立的 MITRE ATT&CK 工作區** — 以證據為本的技術假設、ATT&CK v19.1 中繼資料、分析師處置、擷取涵蓋範圍、可視性缺口與 Navigator 匯出。
+- **擷取品質遙測** — 封包/流量規模、解析比率、時間範圍、取樣上限、完成階段與警告會隨 UI/API 結果傳遞，並與案件一同保存。
+- **更安全的 PCAP 攝取** — Streamlit 上傳採有限區塊串流，保留 `.pcap`/`.pcapng`，驗證 Magic Bytes、執行批次限制，拒絕時清除不完整檔案。
+- **更強的整合 API** — 無介面工作會回傳 ATT&CK 對應與擷取指標，IOC 摘要包含相關技術 ID，失敗提交會清除暫存案件與檔案。
+- **不依賴 LLM 的證據檢視** — 即使跳過或無法產生 AI 敘事，確定性的封包、IOC、關聯、階段與警告證據仍然可見。
+- **執行與匯出可靠性** — Docker 會將本地 LM Studio 位址轉至主機橋接、HTTP 提取正確解碼 tshark 位元組、案件重存會取代過期 IOC，PDF 時間戳記統一使用 UTC。
+
+---
+
 ## 目錄
 
+- [版本 2 新功能](#版本-2-新功能)
 - [視覺導覽](#視覺導覽)
 - [主要功能](#主要功能)
 - [整合 API](#整合-api)
@@ -31,6 +44,8 @@
 ---
 
 ## 視覺導覽
+
+以下畫面來自在 Docker 中執行的真實版本 2 Streamlit 應用程式，並以內建範例 PCAP 完成分析。提交前會在圖片像素中遮蔽 IPv4/IPv6 位址、API 機密、電子郵件與本機使用者路徑。
 
 ### 1. Upload — 載入一個或多個 PCAP
 
@@ -50,35 +65,45 @@
 
 ![Dashboard 分頁](../images/03-dashboard.png)
 
-### 4. LLM Analysis — AI 產生的威脅報告
+### 4. MITRE Analysis — 行為、證據與涵蓋範圍
+
+獨立的 ATT&CK 工作區將對應視為分析師假設，而不是既定事實。它會把網路證據連結至技術與適用的偵測情境，讓分析師記錄處置與筆記，明確顯示偵測缺口，並匯出含版本中繼資料的 ATT&CK Navigator 圖層。
+
+![MITRE Analysis 分頁](../images/10-mitre-analysis.png)
+
+### 5. LLM Analysis — AI 產生的威脅報告
 
 九個章節的敘事報告——從執行摘要到建議行動，外加 **IOC 摘要表**與**以真正 Markdown 表格呈現的風險矩陣（Risk Matrix）**——包含信心度修飾語與 MITRE ATT&CK 對應。可透過 LM Studio 在本地逐節產生，或透過 OpenAI / Anthropic 以單次完整上下文呼叫產生。報告支援 9 種語言，包括繁體中文（zh-TW）。
 
 ![LLM Analysis 分頁](../images/04-llm-analysis.png)
 
-### 5. OSINT — 多供應商 IOC 情資豐富化
+即使報告被跳過或無法產生，此分頁仍會顯示解析封包、流量、IOC、關聯、完成階段與管道警告的確定性快照。
+
+### 6. OSINT — 多供應商 IOC 情資豐富化
 
 優先排序的 IOC 表格，將 VirusTotal、AbuseIPDB、GreyNoise、Shodan、OTX 與 VT Domain 的訊號合併為單一檢視。**供應商狀態標籤**誠實回報每個供應商的狀態（正常 / 快取 / 速率受限 / 金鑰遭拒 / 無資料），明確的 **WHOIS 查詢**下拉選單 + 按鈕與點選資料列的對話框相輔相成，IOC 搜尋並提供顯示全部結果的切換開關。子分頁涵蓋網域、詳細資訊卡、地理地圖、基礎設施 ASN 分群、匯出、裝置與筆記。
 
 ![OSINT 分頁](../images/05-osint.png)
 
-### 6. Raw Data — Zeek log、流量、提取酬載、YARA 比對
+### 7. Raw Data — Zeek log、流量、提取酬載、YARA 比對
 
 所有底層資料來源一應俱全：流量表（附明確的 **First/Last Seen (UTC)** 時間戳記欄位）、DNS 與 TLS 分析、NXDOMAIN 分析、JA3/JA3S 指紋、Zeek `conn.log`/`dns.log`/`http.log`/`ssl.log`、提取的 HTTP 酬載與 YARA 掃描結果。任何檢視都能匯出為 CSV 或 JSON，內建 CSV 注入防護。
 
 ![Raw Data 分頁](../images/06-raw-data.png)
 
-### 7. Cases — 持續性的調查追蹤
+### 8. Cases — 持續性的調查追蹤
 
-將任何擷取與其發現升級為案件。案件包含 IOC、嚴重程度、標籤、調查筆記、狀態與搜尋功能——儲存在本地 SQLite 資料庫。
+將任何擷取與其發現升級為案件。案件包含 IOC、嚴重程度、標籤、調查筆記、ATT&CK 對應、擷取品質指標、狀態與搜尋功能——儲存在本地 SQLite 資料庫。
 
 ![Cases 分頁](../images/07-cases.png)
 
-### 8. API Keys — 管理程式化存取
+### 9. API Keys — 管理程式化存取
 
 為整合 API 建立、撤銷與監控 API 金鑰。每把金鑰擁有自己的權限範圍（完整或僅限摘要）、選用的到期時間、逐金鑰速率限制與使用量趨勢圖。環境變數金鑰會顯示為唯讀的初始（bootstrap）項目。
 
-### 9. Config — 集中式設定
+![API Keys 分頁](../images/11-api-keys.png)
+
+### 10. Config — 集中式設定
 
 **LLM Integration** 區塊提供三種供應商（LM Studio、OpenAI、Anthropic），**YARA Rules** 區塊提供可設定的規則目錄，OSINT 供應商金鑰搭配 **Test Providers** 即時檢測按鈕，加上世界地圖的自家位置、執行檔路徑與管道門檻值——全部集中一處，各區塊並有獨立的清除按鈕。API 金鑰以 PBKDF2 加密儲存。
 
@@ -100,8 +125,10 @@
   - **OpenAI**（雲端）— 單次完整上下文呼叫，一次送入全部證據語料產生報告。
   - **Anthropic**（雲端）— 透過官方 `anthropic` SDK 使用 Claude（`claude-opus-4-8`、`claude-sonnet-4-6`、`claude-haiku-4-5`），單次呼叫並支援串流。
 - **以證據為本的報告** — SOC 就緒的報告，包含嚴重程度校準評估、誤報意識、信心度修飾語、以真正 Markdown 表格呈現的風險矩陣，以及 IOC 摘要表。
+- **LLM 選用的證據檢視** — 即使略過或無法使用模型，解析封包、流量、IOC、關聯、階段與警告證據仍然可見。
 - **多語言報告** — 9 種語言與地區術語：英文、繁體中文（台灣）、簡體中文、日文、韓文、義大利文、西班牙文、法文、德文。
-- **MITRE ATT&CK 對應** — 自動將偵測到的行為與 IOC 對應至 ATT&CK 技術與攻擊鏈（Kill Chain）階段。
+- **MITRE ATT&CK 分析** — 獨立的行為與涵蓋範圍工作區，將網路證據對應至版本化 ATT&CK 假設、連結適用的 Detection Strategy/Data Component、保存分析師處置並匯出 Navigator 圖層。
+- **擷取品質遙測** — 封包/流量規模、解析涵蓋率、時間範圍、取樣上限、管道警告與偵測器可視性缺口會與發現一併保存。
 - **攻擊敘事合成** — 將原始事件轉譯為連貫、可執行的資安事件故事。
 
 ### IOC 優先級評分
@@ -125,6 +152,7 @@
 
 ### 多 PCAP 批次處理
 - **多檔案上傳** — 同時上傳並分析多個 PCAP 檔案。
+- **經驗證的串流攝取** — `.pcap` 與 `.pcapng` 以有限區塊寫入，檢查檔案/批次上限與 Magic Bytes，任何失敗都會回復整批暫存檔。
 - **跨檔案關聯** — 偵測跨檔案共用的 IP、網域與 JA3 指紋。
 - **合併儀表板** — 彙整結果，附逐檔案詳細資訊卡與批次摘要。
 - **資源限制** — 可設定的限制：每檔案 1 GB、最多 50 個檔案、總計 5 GB。
@@ -209,7 +237,7 @@
 
 ## 整合 API
 
-PCAP Hunter 隨附以 FastAPI 打造的 REST API，與 Streamlit UI 並行運作，讓 SOAR 平台、SIEM 系統與自訂腳本能以程式方式提交 PCAP、輪詢工作進度、取得案件 / PDF 報告，並拉取 IOC 摘要（JSON / CSV / STIX 2.1）。它重複使用與 UI 相同的 10 階段管道、SQLite 案件資料庫與設定；資料庫支援的 API 金鑰可在 API Keys 分頁管理。
+PCAP Hunter 隨附以 FastAPI 打造的 REST API，與 Streamlit UI 並行運作，讓 SOAR 平台、SIEM 系統與自訂腳本能以程式方式提交 PCAP、輪詢工作進度、取得案件 / PDF 報告，並拉取 IOC 摘要（JSON / CSV / STIX 2.1）。它重複使用與 UI 相同的 10 階段管道、SQLite 案件資料庫與設定；資料庫支援的 API 金鑰可在 API Keys 分頁管理。無介面結果包含擷取品質指標與 ATT&CK 假設，IOC 摘要則包含相關技術 ID；若排程或保存失敗，暫存檔案與案件會一併移除。
 
 ```bash
 make run-api     # http://localhost:8000
@@ -231,7 +259,7 @@ app/
 │   ├── key_auth.py  # 資料庫 + 環境變數認證流程
 │   ├── key_repository.py  # SQLite API 金鑰儲存
 │   ├── rate_limiter.py    # 逐金鑰滑動視窗速率限制
-│   └── worker.py    # 背景管道執行（ProcessPoolExecutor）
+│   └── queue.py     # 背景管道執行（ProcessPoolExecutor）
 ├── database/        # 案件管理（SQLite）
 ├── llm/             # LLM 用戶端 + 多供應商分派（providers.py）
 ├── pipeline/        # 10 階段分析管道
@@ -250,7 +278,7 @@ app/
 ├── reports/         # PDF 報告產生（WeasyPrint + kaleido 圖表）
 ├── security/        # OPSEC 強化與資料清理
 ├── threat_intel/    # MITRE ATT&CK 對應
-├── ui/              # Streamlit 介面（9 個分頁、嚴重程度色彩系統）
+├── ui/              # Streamlit 介面（10 個分頁、上傳驗證、MITRE 工作區）
 ├── utils/           # 匯出、GeoIP、設定、執行檔探索、CEF
 ├── config.py        # 應用程式預設值
 └── main.py          # Streamlit 進入點
@@ -289,7 +317,7 @@ make docker-down      # 停止 compose 服務
 
 Compose 注意事項：
 
-- `./data` 會掛載進容器，因此 PCAP、提取的檔案、Zeek log 與案件資料庫都存放在主機上。YARA 規則請放在 `./data/yara_rules`。
+- `./data` 會掛載進容器，因此 PCAP、提取的檔案、Zeek log 與案件資料庫都存放在主機上。YARA 規則請放在 `./data/yara_rules`；可設定 `PCAP_HUNTER_DATA_BIND` 改用其他主機資料目錄。
 - 在 UI 中儲存的 API 金鑰會保存在 `pcap-hunter-home` volume；compose 檔固定了 `hostname:`，確保設定加密金鑰在容器重建後維持穩定。
 - 主機上執行的 LM Studio 從容器內即可連線——`LM_BASE_URL` 預設為 `http://host.docker.internal:1234/v1`。
 - 第二個 compose 服務（`pcap-hunter-api`）使用同一個映像檔，在 8000 連接埠提供整合 API。
@@ -370,7 +398,7 @@ make run         # 獨立安裝（先執行 python3 scripts/install.py）
 2. **設定** — 在 Config 分頁選擇 LLM 供應商（LM Studio / OpenAI / Anthropic）、設定自家位置（洲 > 國家 > 城市）、OSINT API 金鑰，並可選擇性指定 YARA 規則目錄。
 3. **分析** — 點擊 **Extract & Analyze** 啟動管道。
 4. **監控** — 在 Progress 分頁觀察各階段執行：封包計數 > 解析 + Zeek（平行）> DNS / TLS / 信標偵測 / 酬載提取（同時執行）> YARA > OSINT > LLM 報告。
-5. **審閱** — 在 Dashboard、LLM Analysis、OSINT、Raw Data、Cases 分頁瀏覽結果。
+5. **審閱** — 在 Dashboard、MITRE Analysis、LLM Analysis、OSINT、Raw Data、Cases 分頁瀏覽結果。
 6. **匯出** — 下載 CSV/JSON 資料、PDF 報告、STIX 套件、ATT&CK Navigator 圖層或 CEF syslog 事件。
 
 ### 重新產生報告
@@ -388,7 +416,7 @@ make run         # 獨立安裝（先執行 python3 scripts/install.py）
 - 預設值位於 `app/config.py`（門檻值、路徑、URL）
 - 持久化設定位於 `~/.pcap_hunter_config.json`（由 `ConfigManager` 管理）
 - API 金鑰以機器衍生的 PBKDF2 金鑰加密儲存
-- 環境變數覆寫：`OTT_KEY`、`VT_KEY`、`SHODAN_KEY` 等
+- 環境變數覆寫：`OTX_KEY`、`VT_KEY`、`SHODAN_KEY` 等
 - LLM 預設值：LM Studio 位於 `http://localhost:1234/v1`
 - YARA 規則：目錄留空時，若 `data/yara_rules/` 存在則自動使用
 
@@ -440,7 +468,18 @@ make verify     # 格式檢查 + lint + 完整測試套件
 
 ### 重新產生文件截圖
 
-`scripts/capture_screenshots.py` 使用 Playwright 無介面 Chromium（搭配 tesseract 進行 OCR）重新擷取所有 README / 使用手冊截圖，並在儲存前自動遮蔽 IP 位址。
+`scripts/capture_screenshots.py` 使用 Playwright 無介面 Chromium（搭配 tesseract 進行 OCR）從真實 Docker Streamlit UI 重新擷取所有 README / 使用手冊截圖，並在圖片像素中遮蔽 IPv4/IPv6 位址、API 機密、電子郵件與本機使用者路徑。最終 OCR 稽核若仍辨識出敏感值會使擷取失敗。
+
+```bash
+python3 -m pip install -r requirements-docs.txt
+python3 -m playwright install chromium
+DOCS_DATA="$(mktemp -d)"
+cp data/sample.pcap "$DOCS_DATA/sample.pcap"
+PCAP_HUNTER_DATA_BIND="$DOCS_DATA" make docker-up
+python3 scripts/capture_screenshots.py --seed-docs-key
+```
+
+隔離的資料掛載可避免本機案件、金鑰、快取或先前擷取進入文件。範例 API 金鑰會透過真實 UI 建立，且在截圖前重新載入以清除只顯示一次的完整機密。
 
 ### 測試紀律
 

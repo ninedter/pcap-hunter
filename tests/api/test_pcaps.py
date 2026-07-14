@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import os
 import pathlib
 
 import pytest
@@ -40,7 +41,7 @@ def test_post_pcap_returns_202_and_ids(client):
             "/api/v1/pcaps",
             headers={"Authorization": "Bearer MAIN"},
             files={"pcap": ("tiny.pcap", f, "application/vnd.tcpdump.pcap")},
-            data={"name": "smoke", "osint_enabled": "false", "llm_enabled": "false"},
+            data={"name": "smoke", "osint_enabled": "false"},
         )
     assert r.status_code == 202, r.text
     body = r.json()
@@ -77,6 +78,19 @@ def test_post_with_invalid_magic_returns_415(client):
     assert r.status_code == 415
 
 
+def test_invalid_magic_does_not_initialize_queue(client, monkeypatch):
+    def fail_if_called():
+        raise AssertionError("queue should not be initialized before upload validation")
+
+    monkeypatch.setattr("app.api.routers.pcaps.get_queue", fail_if_called)
+    r = client.post(
+        "/api/v1/pcaps",
+        headers={"Authorization": "Bearer MAIN"},
+        files={"pcap": ("not.pcap", b"PK\x03\x04" + b"\x00" * 200)},
+    )
+    assert r.status_code == 415
+
+
 @pytest.mark.skipif(not FIXTURE.exists(), reason="fixture missing")
 def test_post_returns_503_when_queue_full(client, monkeypatch):
     monkeypatch.setenv("PCAP_HUNTER_API_QUEUE_DEPTH", "1")
@@ -96,7 +110,58 @@ def test_post_returns_503_when_queue_full(client, monkeypatch):
             "/api/v1/pcaps",
             headers={"Authorization": "Bearer MAIN"},
             files={"pcap": ("tiny.pcap", f, "application/vnd.tcpdump.pcap")},
-            data={"osint_enabled": "false", "llm_enabled": "false"},
+            data={"osint_enabled": "false"},
         )
     assert r.status_code == 503
     assert r.headers.get("Retry-After") == "60"
+    assert len(repo.list_cases()) == 1
+    uploads_dir = pathlib.Path(os.environ["PCAP_HUNTER_API_UPLOADS_DIR"])
+    assert not list(uploads_dir.glob("*.pcap"))
+
+
+@pytest.mark.skipif(not FIXTURE.exists(), reason="fixture missing")
+def test_queue_initialization_failure_cleans_upload_and_case(client, monkeypatch):
+    def boom():
+        raise RuntimeError("queue init failed")
+
+    monkeypatch.setattr("app.api.routers.pcaps.get_queue", boom)
+
+    with FIXTURE.open("rb") as f:
+        with pytest.raises(RuntimeError, match="queue init failed"):
+            client.post(
+                "/api/v1/pcaps",
+                headers={"Authorization": "Bearer MAIN"},
+                files={"pcap": ("tiny.pcap", f, "application/vnd.tcpdump.pcap")},
+                data={"osint_enabled": "false"},
+            )
+
+    from app.api.deps import get_repo
+
+    assert get_repo().list_cases() == []
+    uploads_dir = pathlib.Path(os.environ["PCAP_HUNTER_API_UPLOADS_DIR"])
+    assert not list(uploads_dir.glob("*.pcap"))
+
+
+@pytest.mark.skipif(not FIXTURE.exists(), reason="fixture missing")
+def test_case_persistence_failure_cleans_upload(client, monkeypatch):
+    from app.database.repository import CaseRepository
+
+    def boom(self, case):
+        raise RuntimeError("case save failed")
+
+    monkeypatch.setattr(CaseRepository, "create_case", boom)
+
+    with FIXTURE.open("rb") as f:
+        with pytest.raises(RuntimeError, match="case save failed"):
+            client.post(
+                "/api/v1/pcaps",
+                headers={"Authorization": "Bearer MAIN"},
+                files={"pcap": ("tiny.pcap", f, "application/vnd.tcpdump.pcap")},
+                data={"osint_enabled": "false"},
+            )
+
+    from app.api.deps import get_repo
+
+    assert get_repo().list_cases() == []
+    uploads_dir = pathlib.Path(os.environ["PCAP_HUNTER_API_UPLOADS_DIR"])
+    assert not list(uploads_dir.glob("*.pcap"))

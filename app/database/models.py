@@ -156,6 +156,8 @@ class Analysis:
     yara_results: dict | None = None
     dns_analysis: dict | None = None
     tls_analysis: dict | None = None
+    attack_mapping: dict | None = None
+    capture_metrics: dict | None = None
     iocs: list[IOC] = field(default_factory=list)
 
     def to_dict(self) -> dict:
@@ -172,6 +174,8 @@ class Analysis:
             "yara_results": self.yara_results,
             "dns_analysis": self.dns_analysis,
             "tls_analysis": self.tls_analysis,
+            "attack_mapping": self.attack_mapping,
+            "capture_metrics": self.capture_metrics,
             "iocs": [ioc.to_dict() for ioc in self.iocs],
         }
 
@@ -196,6 +200,8 @@ class Analysis:
             yara_results=data.get("yara_results"),
             dns_analysis=data.get("dns_analysis"),
             tls_analysis=data.get("tls_analysis"),
+            attack_mapping=data.get("attack_mapping"),
+            capture_metrics=data.get("capture_metrics"),
             iocs=iocs,
         )
 

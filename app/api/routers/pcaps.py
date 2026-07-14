@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import os
 import pathlib
 import uuid
@@ -17,12 +18,25 @@ from app.database.models import Case, CaseStatus, Severity
 router = APIRouter(prefix="/api/v1/pcaps", tags=["ingress"])
 
 UPLOADS_DIR_DEFAULT = pathlib.Path("data/api_uploads")
+logger = logging.getLogger(__name__)
 
 
 def _uploads_dir() -> pathlib.Path:
     p = pathlib.Path(os.environ.get("PCAP_HUNTER_API_UPLOADS_DIR", str(UPLOADS_DIR_DEFAULT)))
     p.mkdir(parents=True, exist_ok=True)
     return p
+
+
+def _cleanup_failed_submission(repo, case_id: str, out_path: pathlib.Path, *, case_created: bool) -> None:
+    try:
+        out_path.unlink(missing_ok=True)
+    except Exception:
+        logger.warning("Failed to remove rejected API upload %s", out_path, exc_info=True)
+    if case_created:
+        try:
+            repo.delete_case(case_id)
+        except Exception:
+            logger.warning("Failed to remove rejected API case %s", case_id, exc_info=True)
 
 
 @router.post("", status_code=202, response_model=PcapSubmissionResponse)
@@ -32,11 +46,9 @@ async def submit_pcap(
     tags: str | None = Form(default=None),
     severity_hint: str | None = Form(default=None),
     osint_enabled: bool = Form(default=True),
-    llm_enabled: bool = Form(default=True),
     pyshark_packet_limit: int | None = Form(default=None),
     _scope=Depends(require_full_scope),
     repo=Depends(get_repo),
-    queue=Depends(get_queue),
     settings=Depends(get_settings),
 ) -> PcapSubmissionResponse:
     case_id = uuid.uuid4().hex[:8]
@@ -69,7 +81,6 @@ async def submit_pcap(
         tags=tags,
         severity_hint=severity_hint,
         osint_enabled=osint_enabled,
-        llm_enabled=llm_enabled,
         pyshark_packet_limit=pyshark_packet_limit,
     )
     case = Case(
@@ -79,20 +90,8 @@ async def submit_pcap(
         severity=Severity.from_str(form.severity_hint or "medium"),
         tags=form.parsed_tags(),
     )
-    repo.create_case(case)
-
-    # Mark source as 'api'
-    conn = repo._get_conn()
-    try:
-        conn.execute("UPDATE cases SET source='api' WHERE id=?", (case_id,))
-        conn.commit()
-    finally:
-        conn.close()
-
-    # Enqueue
     options = {
         "osint_enabled": osint_enabled,
-        "llm_enabled": llm_enabled,
         "do_yara": True,
         "do_carve": True,
         "do_pyshark": True,
@@ -100,7 +99,21 @@ async def submit_pcap(
         "pre_count": True,
         "pyshark_packet_limit": pyshark_packet_limit,
     }
+    case_created = False
     try:
+        repo.create_case(case)
+        case_created = True
+
+        # Mark source as 'api'
+        conn = repo._get_conn()
+        try:
+            conn.execute("UPDATE cases SET source='api' WHERE id=?", (case_id,))
+            conn.commit()
+        finally:
+            conn.close()
+
+        # Enqueue
+        queue = get_queue()
         job_id = queue.enqueue(
             JobSubmission(
                 case_id=case_id,
@@ -108,8 +121,12 @@ async def submit_pcap(
                 options=options,
             )
         )
-    except QueueFullError:
-        raise HTTPException(status_code=503, detail="queue_full", headers={"Retry-After": "60"})
+    except QueueFullError as exc:
+        _cleanup_failed_submission(repo, case_id, out_path, case_created=case_created)
+        raise HTTPException(status_code=503, detail="queue_full", headers={"Retry-After": "60"}) from exc
+    except Exception:
+        _cleanup_failed_submission(repo, case_id, out_path, case_created=case_created)
+        raise
 
     return PcapSubmissionResponse(
         job_id=job_id,

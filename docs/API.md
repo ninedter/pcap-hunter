@@ -7,7 +7,7 @@ The Integrations API lets external platforms (SOAR, SIEM, log analysis tools, cu
 
 | | |
 |---|---|
-| **API version** | `1.0.0` |
+| **API version** | `2.0.0` |
 | **Base URL** | `http://<host>:8000` — all business endpoints live under `/api/v1`; health probes (`/healthz`, `/readyz`) are at the root |
 | **Interactive docs** | Swagger UI at `/docs`, ReDoc at `/redoc`, OpenAPI 3.1 JSON at `/api/v1/openapi.json` (all unauthenticated) |
 | **Auth scheme** | `Authorization: Bearer <key>` |
@@ -323,7 +323,7 @@ curl http://localhost:8000/readyz
 
 #### `POST /api/v1/pcaps`
 
-Submit a PCAP file for background analysis. The upload is streamed to disk in 1 MiB chunks (under `PCAP_HUNTER_API_UPLOADS_DIR`, default `data/api_uploads/<case_id>.pcap`), size-checked during the stream and magic-checked afterwards — oversized or non-PCAP uploads are deleted immediately and rejected. On acceptance the endpoint **creates a new case** (visible in the Streamlit Cases tab with `source = api`) and **enqueues a job** on the analysis queue, then returns `202 Accepted` with polling links. Requires `full` scope. **Not idempotent** — every successful call creates a fresh case and job, even for a byte-identical file. Note one edge: if the queue is full, the 503 is raised *after* the case row and upload file were created; the orphaned upload ages out via the PCAP TTL, and the empty case remains until deleted.
+Submit a PCAP file for background analysis. The upload is streamed to disk in 1 MiB chunks (under `PCAP_HUNTER_API_UPLOADS_DIR`, default `data/api_uploads/<case_id>.pcap`), size-checked during the stream and magic-checked afterwards — oversized or non-PCAP uploads are deleted immediately and rejected. On acceptance the endpoint **creates a new case** (visible in the Streamlit Cases tab with `source = api`) and **enqueues a job** on the analysis queue, then returns `202 Accepted` with polling links. Requires `full` scope. **Not idempotent** — every successful call creates a fresh case and job, even for a byte-identical file. If the queue is full, the upload file and provisional case are removed before returning `503 queue_full`.
 
 **Auth:** `full` scope required
 
@@ -338,12 +338,9 @@ Submit a PCAP file for background analysis. The upload is streamed to disk in 1 
 | `tags` | string | No | `[]` | JSON array (e.g. `["soar","edr"]`) or comma-separated list (`soar,edr`) |
 | `severity_hint` | string | No | `medium` | `low`, `medium`, `high`, or `critical`; unrecognized values fall back to `medium` |
 | `osint_enabled` | boolean | No | `true` | Run OSINT enrichment after analysis (see below) |
-| `llm_enabled` | boolean | No | `true` | Accepted for forward compatibility — LLM reports are **not yet supported headless** (see below) |
 | `pyshark_packet_limit` | integer | No | server default (200,000) | Cap on packets to deep-parse |
 
 **OSINT enrichment (`osint_enabled`):** when enabled, the worker enriches the top public IPs after analysis using provider keys from the saved Streamlit config (`cfg_*_key` values) or, as a fallback, the environment (`OTX_KEY`, `VT_KEY`, `ABUSEIPDB_KEY`, `GREYNOISE_KEY`, `SHODAN_KEY`). If no provider keys are configured, the job still completes — with the warning code `osint_not_configured` in the result. Note: the API path always queries providers fresh; the OSINT response cache is not used headless.
-
-**LLM reports (`llm_enabled`):** LLM report generation is not yet supported on the API path. The field is accepted so existing clients keep working, but jobs complete with the warning code `llm_unsupported_on_api_path` in the result — including default submissions, since the field defaults to `true`.
 
 **Sample request:**
 
@@ -559,9 +556,19 @@ curl http://localhost:8000/api/v1/jobs/j_7d4e9f21/result \
   "packet_count": 4821,
   "duration_seconds": 12.4,
   "stages_run": ["pcap_count", "pyshark_pass", "zeek", "dns_analysis", "tls_certs", "beacon", "carve", "yara_scan", "osint"],
-  "warnings": ["llm_unsupported_on_api_path"],
+  "warnings": [],
   "summary_narrative": null,
-  "mitre_techniques": [],
+  "mitre_techniques": ["T1071.001", "T1568.002"],
+  "attack_mapping": {
+    "attack_version": "19.1",
+    "techniques": []
+  },
+  "capture_metrics": {
+    "packet_count": 4821,
+    "flow_count": 312,
+    "parse_ratio": 1.0,
+    "visibility_gaps": []
+  },
   "dns_analysis": {},
   "tls_analysis": {},
   "beacon_df_records": []
@@ -578,7 +585,6 @@ curl http://localhost:8000/api/v1/jobs/j_7d4e9f21/result \
 | `osint_not_configured` | `osint_enabled` was true but no OSINT provider keys are configured (saved config or env) |
 | `osint_failed` | OSINT enrichment raised an error; analysis completed without enrichment |
 | `yara_failed` | YARA scan over carved files raised an error |
-| `llm_unsupported_on_api_path` | `llm_enabled` was true; LLM report generation is not yet supported headless |
 
 Stage-level pipeline warnings may also appear (`pcap_count_unavailable`, `pyshark_failed`, `pyshark_no_data`, `zeek_failed`, `zeek_no_logs`, `dns_analysis_failed`, `tls_certs_failed`, `beacon_failed`, `carve_failed`) — each marks a stage that failed or produced no data without aborting the run.
 
@@ -807,7 +813,7 @@ All feed endpoints require `feed` scope (a `full`-scope key also works), are rea
 **Feed semantics:**
 
 - **Scoring:** each indicator's `score` derives from the **worst** severity recorded across its sightings: `low` = 25, `medium` = 50, `high` = 75, `critical` = 100; `severity` is the matching label.
-- **Deduplication:** the same indicator appearing in multiple analyses collapses to a single row carrying that maximum severity/score; `first_seen`/`last_seen` span all sightings and `case_ids` lists every contributing case.
+- **Deduplication:** the same indicator appearing in multiple analyses collapses to a single row carrying that maximum severity/score; `first_seen`/`last_seen` span all sightings and `case_ids` lists every contributing case. `mitre_techniques` contains the distinct persisted ATT&CK technique IDs observed in those contributing analyses.
 - **Filtering:** `min_score` is applied in SQL (not post-filtered), so it composes correctly with `limit`/`cursor` — pages are always full up to `limit` and no matching rows are dropped at page boundaries.
 - **Ordering:** deterministic — `last_seen` descending, then indicator value ascending as a tie-breaker. Stable ordering makes cursor pagination reliable.
 - **Pagination:** `next_cursor` is non-null exactly when the page came back full (`count == limit`); pass it as `cursor` for the next page. (CSV/STIX responses don't carry a cursor — page by incrementing `cursor` by `limit` while pages stay full.)
@@ -841,7 +847,7 @@ curl "http://localhost:8000/api/v1/iocs.json?min_score=50&type=ip,domain&limit=1
       "first_seen": "2026-06-10T08:02:11.402199",
       "last_seen": "2026-06-12T09:15:40.992103",
       "case_ids": ["c4a1b2d9"],
-      "mitre_techniques": []
+      "mitre_techniques": ["T1071.001", "T1571"]
     },
     {
       "type": "domain",
@@ -852,7 +858,7 @@ curl "http://localhost:8000/api/v1/iocs.json?min_score=50&type=ip,domain&limit=1
       "first_seen": "2026-06-11T17:44:03.215587",
       "last_seen": "2026-06-11T17:44:03.215587",
       "case_ids": ["b91e0f2c", "c4a1b2d9"],
-      "mitre_techniques": []
+      "mitre_techniques": ["T1568.002"]
     }
   ],
   "count": 2,

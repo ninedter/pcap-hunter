@@ -7,7 +7,7 @@ import os
 import re
 import sys
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from io import BytesIO
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -348,9 +348,9 @@ class PDFReportGenerator:
 
     def _render_cover_page(self, case_info: dict | None) -> str:
         """Render the cover page."""
-        # Timezone-aware local time — analysts need to know which clock the
-        # report was generated against (e.g. "2026-06-11 09:30 CST").
-        date_str = datetime.now().astimezone().strftime("%Y-%m-%d %H:%M %Z")
+        # Use an explicit UTC abbreviation rather than platform-dependent
+        # numeric offsets such as ``+07`` returned by macOS ``%Z``.
+        date_str = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
 
         case_section = ""
         if case_info:
@@ -1071,7 +1071,7 @@ class PDFReportGenerator:
 
     <h3>Report Generation</h3>
     <ul>
-        <li>Generated: {datetime.now().astimezone().strftime("%Y-%m-%d %H:%M:%S %Z")}</li>
+        <li>Generated: {datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")}</li>
         <li>Classification: {self._escape(self.config.classification)}</li>
         <li>Tool: PCAP Hunter</li>
     </ul>

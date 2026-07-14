@@ -159,6 +159,36 @@ class TestCarveStreaming:
         assert len(results) == 1
         assert results[0]["sha256"] == hashlib.sha256(b"hello").hexdigest()
 
+    def test_carve_decodes_compact_hex_file_data(self, tmp_path):
+        payload = b"\x00\xffABC"
+        line = f"1700000000.0\t3\tapplication/octet-stream\t5\t{payload.hex()}\n"
+        fake = FakePopen([line])
+        with (
+            patch("app.utils.common.find_bin", return_value="/usr/bin/tshark"),
+            patch("subprocess.Popen", return_value=fake),
+        ):
+            results = carve_http_payloads("dummy.pcap", str(tmp_path))
+
+        expected_sha = hashlib.sha256(payload).hexdigest()
+        carved = tmp_path / f"stream3_{expected_sha[:10]}.bin"
+        assert results[0]["sha256"] == expected_sha
+        assert carved.read_bytes() == payload
+
+    def test_carve_decodes_colon_separated_hex_file_data(self, tmp_path):
+        payload = b"hello"
+        line = "1700000000.0\t3\ttext/plain\t5\t68:65:6c:6c:6f\n"
+        fake = FakePopen([line])
+        with (
+            patch("app.utils.common.find_bin", return_value="/usr/bin/tshark"),
+            patch("subprocess.Popen", return_value=fake),
+        ):
+            results = carve_http_payloads("dummy.pcap", str(tmp_path))
+
+        expected_sha = hashlib.sha256(payload).hexdigest()
+        carved = tmp_path / f"stream3_{expected_sha[:10]}.bin"
+        assert results[0]["sha256"] == expected_sha
+        assert carved.read_bytes() == payload
+
     def test_carve_timeout_raises_carve_error(self, tmp_path, monkeypatch):
         monkeypatch.setattr("app.config.CARVE_TIMEOUT_SECONDS", 0.05)
         fake = FakePopen([CARVE_LINE, CARVE_LINE], line_delay=0.2)

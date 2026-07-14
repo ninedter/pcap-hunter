@@ -495,8 +495,6 @@ PCAP Hunter 使用**與生產環境相同形狀的測試資料**，而非簡化�
 - **[整合 API 參考文件](../API.md)** — REST 端點、認證、設定（英文）
 - **[API 整合指南（繁體中文）](api/README.md)** — SIEM / SOAR 整合範例
 - **[English README](../../README.md)** — 英文版說明
-- **[CLAUDE.md](../../CLAUDE.md)** — 貢獻者 / AI 指南：慣例、測試紀律、已知錯誤模式
-- **[docs/FEATURE-ROADMAP.md](../FEATURE-ROADMAP.md)** — 規劃中的工作
 
 ---
 

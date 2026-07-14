@@ -9,7 +9,6 @@ htmlcov/
 __pycache__/
 **/__pycache__/
 *.pyc
-.claude/
 .dockerignore
 Dockerfile
 docker-compose.yml

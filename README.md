@@ -577,8 +577,6 @@ PCAP Hunter uses **production-shape test data**, not simplified inputs. See `tes
 - **[Integrations API Reference](docs/API.md)** — REST endpoints, authentication, configuration
 - **[API Integration Guides](docs/api/README.md)** — SIEM / SOAR integration recipes
 - **[中文說明 (Traditional Chinese README)](docs/zh-TW/README.md)** — 繁體中文版
-- **[CLAUDE.md](CLAUDE.md)** — contributor/AI guide: conventions, testing discipline, known bug patterns
-- **[docs/FEATURE-ROADMAP.md](docs/FEATURE-ROADMAP.md)** — planned work
 
 ---
 

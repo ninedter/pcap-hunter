@@ -165,6 +165,27 @@ class TestAnalysis:
         assert d["packet_count"] == 1000
         assert len(d["iocs"]) == 1
 
+    def test_to_dict_and_repository_round_trip_new_analytic_fields(self, tmp_path):
+        analysis = Analysis(
+            case_id="CASE-001",
+            pcap_path="/tmp/test.pcap",
+            attack_mapping={"attack_version": "19.1", "techniques": [{"technique_id": "T1571"}]},
+            capture_metrics={"flow_count": 4, "visibility_gaps": ["zeek"]},
+        )
+        payload = analysis.to_dict()
+        restored = Analysis.from_dict(payload)
+
+        assert restored.attack_mapping["attack_version"] == "19.1"
+        assert restored.capture_metrics["flow_count"] == 4
+
+        repo = CaseRepository(db_path=str(tmp_path / "cases.db"))
+        analysis_id = repo.save_analysis(analysis)
+        persisted = repo.get_analysis(analysis_id)
+
+        assert persisted is not None
+        assert persisted.attack_mapping["techniques"][0]["technique_id"] == "T1571"
+        assert persisted.capture_metrics["visibility_gaps"] == ["zeek"]
+
     def test_from_dict(self):
         data = {
             "id": "ANL-002",
@@ -419,6 +440,27 @@ class TestCaseRepository:
 
         retrieved = repo.get_analysis(analysis_id)
         assert len(retrieved.iocs) == 2
+
+    def test_save_analysis_replaces_existing_iocs(self, repo):
+        """Saving an existing analysis ID must not leave stale IOC rows."""
+        case_id = repo.create_case(Case(title="Replace IOCs"))
+        analysis = Analysis(
+            id="analysis-1",
+            case_id=case_id,
+            pcap_path="/test.pcap",
+            iocs=[
+                IOC(ioc_type=IOCType.IP, value="1.2.3.4"),
+                IOC(ioc_type=IOCType.DOMAIN, value="old.example"),
+            ],
+        )
+        repo.save_analysis(analysis)
+
+        analysis.iocs = [IOC(ioc_type=IOCType.HASH, value="ab" * 32)]
+        repo.save_analysis(analysis)
+
+        retrieved = repo.get_analysis("analysis-1")
+        assert [ioc.value for ioc in retrieved.iocs] == ["ab" * 32]
+        assert retrieved.iocs[0].ioc_type == IOCType.HASH
 
     def test_search_iocs(self, repo):
         """Test IOC search."""

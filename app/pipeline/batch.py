@@ -86,6 +86,9 @@ class PCAPResult:
     dns_analysis: dict[str, Any] = field(default_factory=dict)
     tls_analysis: dict[str, Any] = field(default_factory=dict)
     packet_count: int = 0
+    duration_seconds: float = 0.0
+    stages_run: list[str] = field(default_factory=list)
+    warnings: list[str] = field(default_factory=list)
     error: str | None = None
 
 

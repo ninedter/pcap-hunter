@@ -410,6 +410,20 @@ class TestNormalizeBaseUrl:
 
         assert _normalize_base_url("http://h:1234/api/v0") == "http://h:1234/api/v0"
 
+    def test_docker_local_compatible_rewrites_host_lan_ip(self):
+        from app.llm.client import _normalize_base_url
+
+        with patch.dict("os.environ", {"PCAP_HUNTER_DOCKER_HOST_FALLBACK": "1"}):
+            assert _normalize_base_url("http://192.168.2.114:1234", local_compatible=True) == (
+                "http://host.docker.internal:1234/v1"
+            )
+
+    def test_cloud_endpoint_is_not_rewritten_by_local_fallback(self):
+        from app.llm.client import _normalize_base_url
+
+        with patch.dict("os.environ", {"PCAP_HUNTER_DOCKER_HOST_FALLBACK": "1"}):
+            assert _normalize_base_url("https://10.0.0.9:9000/v1") == "https://10.0.0.9:9000/v1"
+
     def test_empty_string_passes_through(self):
         from app.llm.client import _normalize_base_url
 

@@ -225,6 +225,11 @@ def _render_llm_integration():
 
     # ---- Provider-specific fields (only the active provider's are shown) ----
     if selected_provider == llm_providers.PROVIDER_LMSTUDIO:
+        st.caption(
+            "Docker note: when LM Studio runs on this computer, "
+            "`host.docker.internal` is the reliable container route. "
+            "LAN/loopback addresses are automatically adapted in the Docker runtime."
+        )
         c1, c2 = st.columns([2, 1])
         with c1:
             st.session_state["cfg_lm_base_url"] = st.text_input(
@@ -250,6 +255,7 @@ def _render_llm_integration():
                 models = fetch_models(
                     st.session_state.get("cfg_lm_base_url"),
                     st.session_state.get("cfg_lm_api_key"),
+                    local_compatible=True,
                 )
                 if models:
                     st.session_state["available_models_lmstudio"] = models

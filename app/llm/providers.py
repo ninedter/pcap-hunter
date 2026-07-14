@@ -473,7 +473,14 @@ def probe_provider(
     else:
         probe_url = base_url
 
-    err = _client.test_connection(probe_url, api_key, model)
+    # LM Studio is local to the Docker host.  The client rewrites loopback/LAN
+    # host addresses to host.docker.internal when the compose runtime opts in.
+    err = _client.test_connection(
+        probe_url,
+        api_key,
+        model,
+        local_compatible=provider == PROVIDER_LMSTUDIO,
+    )
     if err:
         return False, err
     return True, f"{provider_label(provider)} connection OK."

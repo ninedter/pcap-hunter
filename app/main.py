@@ -15,6 +15,7 @@ import streamlit as st
 
 from app import config as C
 from app.analysis.flow_aggregates import compute_flow_aggregates
+from app.analysis.visibility import build_capture_metrics
 from app.llm import providers as llm_providers
 from app.pipeline.batch import BatchProcessor, PCAPResult
 from app.pipeline.geoip import GeoIP
@@ -46,6 +47,7 @@ from app.ui.layout import (
     make_results_panel,
     make_tabs,
     render_active_filters,
+    render_analysis_snapshot,
     render_batch_summary,
     render_carved,
     render_chart_hint,
@@ -71,6 +73,8 @@ from app.ui.layout import (
     render_zeek,
     resolve_logo_path,
 )
+from app.ui.mitre_page import build_attack_mapping, render_mitre_page
+from app.ui.upload import UploadValidationError, save_uploaded_pcaps
 from app.utils.common import ensure_dir, find_bin, is_public_ipv4, make_slug, uniq_sorted
 from app.utils.network_utils import pick_top_public_ips
 
@@ -227,6 +231,9 @@ def _run_single_pcap_pipeline(
         dns_analysis=result.dns_analysis or {},
         tls_analysis=result.tls_analysis or {},
         packet_count=result.packet_count,
+        duration_seconds=result.duration_seconds,
+        stages_run=list(result.stages_run),
+        warnings=list(result.warnings),
     )
 
 
@@ -269,6 +276,7 @@ if st.session_state.get("trigger_llm_rerun"):
     st.session_state[f"done_{llm_slug}"] = False
     st.session_state[f"skip_{llm_slug}"] = False
     st.session_state["report"] = None
+    st.session_state["llm_status"] = None
     # Consume the trigger
     st.session_state["trigger_llm_rerun"] = False
     st.rerun()
@@ -308,15 +316,25 @@ if _missing_bins:
     )
 
 # Tabs
-tab_upload, tab_progress, tab_dashboard, tab_llm, tab_osint, tab_results, tab_cases, tab_api_keys, tab_config = (
-    make_tabs()
-)
+(
+    tab_upload,
+    tab_progress,
+    tab_dashboard,
+    tab_mitre,
+    tab_llm,
+    tab_osint,
+    tab_results,
+    tab_cases,
+    tab_api_keys,
+    tab_config,
+) = make_tabs()
 
 # Defaults
 for k, v in [
     ("features", None),
     ("osint", None),
     ("report", None),
+    ("llm_status", None),
     ("beacon_df", pd.DataFrame()),
     ("zeek_tables", {}),
     ("carved", []),
@@ -325,6 +343,10 @@ for k, v in [
     ("map_reset_counter", 0),
     ("dns_analysis", None),
     ("tls_analysis", None),
+    ("attack_mapping", None),
+    ("capture_metrics", None),
+    ("pipeline_warnings", []),
+    ("pipeline_stages", []),
     ("yara_results", None),
     ("correlations", None),
     ("flow_asymmetry", None),
@@ -375,20 +397,22 @@ with tab_upload:
     pcap_path = None
     pcap_paths: list[str] = []
     if uploaded_files:
-        ts = int(time.time())
-        for i, uploaded in enumerate(uploaded_files):
-            save_path = str((C.DATA_DIR / f"upload_{ts}_{i}.pcap").resolve())
-            pathlib.Path(save_path).write_bytes(uploaded.read())
-            pcap_paths.append(save_path)
-        pcap_path = pcap_paths[0]
-        st.session_state["__pcap_path"] = pcap_path
-        st.session_state["__pcap_paths"] = pcap_paths
-        st.session_state["__batch_mode"] = len(pcap_paths) > 1
-        if len(pcap_paths) > 1:
-            names = ", ".join(u.name for u in uploaded_files)
-            source_msg = f"Uploaded {len(pcap_paths)} files: {names}"
+        try:
+            saved_uploads = save_uploaded_pcaps(uploaded_files, C.DATA_DIR, timestamp=int(time.time()))
+        except UploadValidationError as exc:
+            st.error(str(exc))
+            pcap_path = None
         else:
-            source_msg = f"Uploaded: {uploaded_files[0].name}"
+            pcap_paths = [item.path for item in saved_uploads]
+            pcap_path = pcap_paths[0]
+            st.session_state["__pcap_path"] = pcap_path
+            st.session_state["__pcap_paths"] = pcap_paths
+            st.session_state["__batch_mode"] = len(pcap_paths) > 1
+            if len(pcap_paths) > 1:
+                names = ", ".join(item.original_name for item in saved_uploads)
+                source_msg = f"Uploaded {len(pcap_paths)} files: {names}"
+            else:
+                source_msg = f"Uploaded: {saved_uploads[0].original_name}"
     elif pcap_path_text.strip():
         validated = validate_pcap_path(pcap_path_text.strip())
         if validated:
@@ -455,6 +479,7 @@ with tab_upload:
                 "features": None,
                 "osint": None,
                 "report": None,
+                "llm_status": None,
                 "beacon_df": pd.DataFrame(),
                 "zeek_tables": {},
                 "carved": [],
@@ -463,6 +488,10 @@ with tab_upload:
                 "__pcap_paths": pcap_paths or [pcap_path],
                 "dns_analysis": None,
                 "tls_analysis": None,
+                "attack_mapping": None,
+                "capture_metrics": None,
+                "pipeline_warnings": [],
+                "pipeline_stages": [],
                 "yara_results": None,
                 "correlations": None,
                 "flow_asymmetry": None,
@@ -616,6 +645,13 @@ with tab_progress:
             st.session_state["beacon_df"] = batch_result.merged_beacons
             st.session_state["dns_analysis"] = batch_result.aggregated_dns
             st.session_state["tls_analysis"] = batch_result.aggregated_tls
+            st.session_state["__total_pkts"] = batch_result.correlation.total_packets
+            st.session_state["pipeline_warnings"] = sorted(
+                {warning for item in batch_result.pcap_results for warning in item.warnings}
+            )
+            st.session_state["pipeline_stages"] = sorted(
+                {stage for item in batch_result.pcap_results for stage in item.stages_run}
+            )
             # Carved payloads concatenated across all successful files
             st.session_state["carved"] = [
                 item for r in batch_result.pcap_results if not r.error for item in r.carved_items
@@ -702,8 +738,11 @@ with tab_progress:
             st.session_state["beacon_df"] = beacon_df
             st.session_state["osint"] = osint_data
             st.session_state["carved"] = result.carved_items
+            st.session_state["__total_pkts"] = result.packet_count
             st.session_state["dns_analysis"] = result.dns_analysis or None
             st.session_state["tls_analysis"] = result.tls_analysis or None
+            st.session_state["pipeline_warnings"] = list(result.warnings)
+            st.session_state["pipeline_stages"] = list(result.stages_run)
 
             _precompute_dash_aggregates(features.get("flows"))
             # a fresh run supersedes any restored case
@@ -740,6 +779,17 @@ with tab_progress:
                     st.session_state["port_anomalies"] = detect_port_anomalies(features["flows"])
             except Exception as e:
                 logger.warning("Post-analysis failed: %s", e)
+
+        # Build the ATT&CK view only after all available UI stages have joined.
+        # Keeping this here prevents the dedicated MITRE page from showing a
+        # partial mapping that predates YARA, OSINT, or correlation results.
+        try:
+            st.session_state["attack_mapping"] = build_attack_mapping(st.session_state)
+            st.session_state["capture_metrics"] = build_capture_metrics(st.session_state)
+        except Exception as exc:
+            logger.warning("MITRE mapping failed: %s", exc)
+            st.session_state["attack_mapping"] = None
+            st.session_state["capture_metrics"] = build_capture_metrics(st.session_state)
 
         # ---- LLM REPORT (shared for single & batch) ----
         features = st.session_state.get("features") or {}
@@ -786,6 +836,8 @@ with tab_progress:
                         "flow_asymmetry": st.session_state.get("flow_asymmetry"),
                         "port_anomalies": st.session_state.get("port_anomalies"),
                         "ja3_analysis": st.session_state.get("ja3_analysis"),
+                        "attack_mapping": st.session_state.get("attack_mapping"),
+                        "capture_metrics": st.session_state.get("capture_metrics"),
                         "rdns_map": st.session_state.get("rdns_map"),
                         "config": {
                             "limit_packets": limit_packets,
@@ -820,7 +872,12 @@ with tab_progress:
                         st.error(f"LLM call failed: {e}")
                         report_md = "_LLM generation failed. Check server/model settings._"
             else:
-                report_md = "_Report skipped by user._"
+                # Skipping the optional narrative must not replace the
+                # deterministic evidence with a placeholder report.
+                report_md = None
+                st.session_state["llm_status"] = "skipped"
+            if not llm_skip and report_md:
+                st.session_state["llm_status"] = "generated"
             p.done(
                 "LLM report generated."
                 if not st.session_state.get(f"skip_{make_slug('LLM report')}", False)
@@ -1376,10 +1433,20 @@ with tab_dashboard:
 
     st.markdown("---")
 
-# 4) LLM Analysis ----------------------
+# 4) MITRE ATT&CK Analysis ----------------------
+with tab_mitre:
+    render_mitre_page(st.session_state)
+
+# 5) LLM Analysis ----------------------
 with tab_llm:
     st.markdown("### LLM Analysis & Report")
-    render_report(st.container(), st.session_state.get("report"))
+    render_report(
+        st.container(),
+        st.session_state.get("report"),
+        status=st.session_state.get("llm_status"),
+    )
+    if not st.session_state.get("report") and analysis_has_run():
+        render_analysis_snapshot(st.container(), st.session_state)
 
     # PDF Export Section
     st.markdown("---")
@@ -1467,7 +1534,7 @@ with tab_llm:
                 key="download_pdf",
             )
 
-# 5) OSINT ----------------------
+# 6) OSINT ----------------------
 with tab_osint:
     st.markdown("### OSINT Investigation")
     render_osint(
@@ -1478,7 +1545,7 @@ with tab_osint:
         beacon_df=st.session_state.get("beacon_df"),
     )
 
-# 5) Raw Data ----------------------
+# 7) Raw Data ----------------------
 with tab_results:
     results_panel = make_results_panel(st.container())
     with results_panel:
@@ -1500,26 +1567,27 @@ with tab_results:
         render_flow_asymmetry(results_panel, st.session_state.get("flow_asymmetry"))
         render_port_anomalies(results_panel, st.session_state.get("port_anomalies"))
 
-# 6) Cases ----------------------
+# 8) Cases ----------------------
 with tab_cases:
     from app.ui.cases_tab import render_cases_tab
 
     render_cases_tab()
 
-# 7) API Keys --------------------
+# 9) API Keys --------------------
 with tab_api_keys:
     from app.ui.api_keys_tab import render_api_keys_tab
 
     render_api_keys_tab()
 
-# 8) Config ----------------------
+# 10) Config ----------------------
 with tab_config:
     render_config_tab()
 
 st.markdown("---")
 with st.expander("Notes & OPSEC"):
     st.markdown("""
-- **Tabs**: Upload → Progress → Results → Config.
+- **Tabs**: Upload → Progress → Dashboard → MITRE Analysis → LLM Analysis → OSINT → Raw Data → Cases →
+  API Keys → Config.
 - **Skip** is non-blocking; pipeline continues to next phase.
 - **OSINT limit**: configurable Top-N IPs by traffic; 0 = enrich all.
 - Zeek JSON-first with ASCII fallback; OSINT calls have safe timeouts.

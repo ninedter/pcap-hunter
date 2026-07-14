@@ -1,7 +1,10 @@
+import ipaddress
 import json
 import logging
+import os
 import re
 from typing import Any
+from urllib.parse import urlparse, urlunparse
 
 from openai import OpenAI
 
@@ -10,7 +13,7 @@ from app import config as C
 logger = logging.getLogger(__name__)
 
 
-def _normalize_base_url(base_url: str) -> str:
+def _normalize_base_url(base_url: str, *, local_compatible: bool = False) -> str:
     """Ensure OpenAI-compatible base URLs carry an API version path.
 
     The OpenAI SDK appends ``/chat/completions`` to ``base_url`` verbatim, so
@@ -18,11 +21,38 @@ def _normalize_base_url(base_url: str) -> str:
     which it logs as "Unexpected endpoint". Bare host:port URLs get ``/v1``
     appended; URLs that already carry any path are respected as-is.
     """
-    from urllib.parse import urlparse
-
     url = (base_url or "").strip().rstrip("/")
     if not url:
         return url
+    parsed = urlparse(url)
+
+    # Docker Desktop containers cannot reliably route to the host's LAN IP
+    # (for example 192.168.2.114), while host.docker.internal is explicitly
+    # provided for host services.  The compose runtime opts into this rewrite
+    # for LM Studio only; cloud OpenAI-compatible endpoints are never changed.
+    if local_compatible and os.getenv("PCAP_HUNTER_DOCKER_HOST_FALLBACK", "").lower() in {"1", "true", "yes"}:
+        hostname = parsed.hostname or ""
+        is_local = hostname.lower() in {"localhost", "host.docker.internal"}
+        if not is_local:
+            try:
+                is_local = ipaddress.ip_address(hostname).is_private
+            except ValueError:
+                pass
+        if is_local and hostname.lower() != "host.docker.internal":
+            # Preserve credentials, port, path, and query while replacing only
+            # the host component. IPv6 literals need brackets in netloc.
+            replacement_host = "host.docker.internal"
+            if parsed.port:
+                replacement_host += f":{parsed.port}"
+            netloc = replacement_host
+            if parsed.username:
+                auth = parsed.username
+                if parsed.password:
+                    auth += f":{parsed.password}"
+                netloc = f"{auth}@{netloc}"
+            parsed = parsed._replace(netloc=netloc)
+            url = urlunparse(parsed)
+
     if not urlparse(url).path:
         return f"{url}/v1"
     return url
@@ -1024,7 +1054,7 @@ def generate_report(
     if lang_instruction:
         msg_system += f"\n\n{lang_instruction}"
 
-    client = OpenAI(base_url=_normalize_base_url(base_url), api_key=api_key, timeout=120.0)
+    client = OpenAI(base_url=_normalize_base_url(base_url, local_compatible=True), api_key=api_key, timeout=120.0)
 
     # --- Generate each section ---
     full_report_parts = []
@@ -1431,7 +1461,7 @@ def _get_translations() -> dict:
     }
 
 
-def test_connection(base_url: str, api_key: str, model: str) -> str:
+def test_connection(base_url: str, api_key: str, model: str, *, local_compatible: bool = False) -> str:
     """
     Test connectivity to the LLM endpoint by performing a minimal API call.
     Returns an empty string on success, or an error message on failure.
@@ -1441,7 +1471,9 @@ def test_connection(base_url: str, api_key: str, model: str) -> str:
 
     try:
         client = OpenAI(
-            base_url=_normalize_base_url(base_url), api_key=api_key or "lm-studio", timeout=C.LLM_PROBE_TIMEOUT_SECONDS
+            base_url=_normalize_base_url(base_url, local_compatible=local_compatible),
+            api_key=api_key or "lm-studio",
+            timeout=C.LLM_PROBE_TIMEOUT_SECONDS,
         )
         client.chat.completions.create(
             model=model,
@@ -1453,7 +1485,7 @@ def test_connection(base_url: str, api_key: str, model: str) -> str:
         return str(e)
 
 
-def fetch_models(base_url: str, api_key: str) -> list[str]:
+def fetch_models(base_url: str, api_key: str, *, local_compatible: bool = False) -> list[str]:
     """
     Fetch available models from the LLM endpoint.
     Returns a list of model IDs. Returns an empty list on failure.
@@ -1463,7 +1495,9 @@ def fetch_models(base_url: str, api_key: str) -> list[str]:
 
     try:
         client = OpenAI(
-            base_url=_normalize_base_url(base_url), api_key=api_key or "lm-studio", timeout=C.LLM_PROBE_TIMEOUT_SECONDS
+            base_url=_normalize_base_url(base_url, local_compatible=local_compatible),
+            api_key=api_key or "lm-studio",
+            timeout=C.LLM_PROBE_TIMEOUT_SECONDS,
         )
         models = client.models.list()
         return [m.id for m in models]

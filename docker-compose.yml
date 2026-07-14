@@ -13,10 +13,13 @@ services:
     environment:
       # LM Studio runs on the HOST — localhost inside the container is the container.
       LM_BASE_URL: "${LM_BASE_URL:-http://host.docker.internal:1234/v1}"
+      # Allow the UI/API to translate a host LAN or loopback address to the
+      # Docker Desktop host bridge when LM Studio is running on this computer.
+      PCAP_HUNTER_DOCKER_HOST_FALLBACK: "1"
     extra_hosts:
       - "host.docker.internal:host-gateway"
     volumes:
-      - ./data:/app/data
+      - ${PCAP_HUNTER_DATA_BIND:-./data}:/app/data
       - pcap-hunter-home:/home/runner
     restart: unless-stopped
 
@@ -36,10 +39,11 @@ services:
       PYTHONPATH: "."
       # LM Studio runs on the HOST — localhost inside the container is the container.
       LM_BASE_URL: "${LM_BASE_URL:-http://host.docker.internal:1234/v1}"
+      PCAP_HUNTER_DOCKER_HOST_FALLBACK: "1"
     extra_hosts:
       - "host.docker.internal:host-gateway"
     volumes:
-      - ./data:/app/data
+      - ${PCAP_HUNTER_DATA_BIND:-./data}:/app/data
       - pcap-hunter-home:/home/runner
     depends_on:
       - pcap-hunter-ui

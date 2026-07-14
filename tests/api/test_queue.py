@@ -12,7 +12,6 @@ import pytest
 
 import app.api.queue as queue_mod
 from app.api.queue import (
-    WARNING_LLM_UNSUPPORTED,
     WARNING_OSINT_NOT_CONFIGURED,
     WARNING_PERSISTENCE_FAILED,
     WARNING_YARA_FAILED,
@@ -60,7 +59,6 @@ def test_inprocess_queue_runs_a_job(tmp_path):
                 pcap_path=str(FIXTURE_PCAP),
                 options={
                     "osint_enabled": False,
-                    "llm_enabled": False,
                     "do_yara": False,
                     "do_carve": False,
                     "pyshark_packet_limit": 50,
@@ -164,7 +162,7 @@ def test_worker_persists_analysis_and_iocs(tmp_path):
     repo.create_case(Case(id="cafe0001", title="persist-test", status=CaseStatus.IN_PROGRESS, severity=Severity.LOW))
     job_id = repo.create_job(Job(case_id="cafe0001", pcap_path=str(FIXTURE_PCAP), options_json="{}"))
 
-    _worker_run(job_id, db, str(FIXTURE_PCAP), {"osint_enabled": False, "llm_enabled": False})
+    _worker_run(job_id, db, str(FIXTURE_PCAP), {"osint_enabled": False})
 
     job = repo.get_job(job_id)
     assert job.status.value == "done"
@@ -203,7 +201,7 @@ def test_worker_runs_osint_when_enabled(tmp_path, monkeypatch):
     repo.create_case(Case(id="cafe0002", title="osint-test", status=CaseStatus.IN_PROGRESS, severity=Severity.LOW))
     job_id = repo.create_job(Job(case_id="cafe0002", pcap_path=str(FIXTURE_PCAP), options_json="{}"))
 
-    _worker_run(job_id, db, str(FIXTURE_PCAP), {"osint_enabled": True, "llm_enabled": False})
+    _worker_run(job_id, db, str(FIXTURE_PCAP), {"osint_enabled": True})
 
     job = repo.get_job(job_id)
     result = json.loads(job.result_json)
@@ -222,24 +220,10 @@ def test_worker_warns_when_osint_enabled_but_unconfigured(tmp_path, monkeypatch)
     repo.create_case(Case(id="cafe0003", title="t", status=CaseStatus.IN_PROGRESS, severity=Severity.LOW))
     job_id = repo.create_job(Job(case_id="cafe0003", pcap_path=str(FIXTURE_PCAP), options_json="{}"))
 
-    _worker_run(job_id, db, str(FIXTURE_PCAP), {"osint_enabled": True, "llm_enabled": False})
+    _worker_run(job_id, db, str(FIXTURE_PCAP), {"osint_enabled": True})
 
     result = json.loads(repo.get_job(job_id).result_json)
     assert WARNING_OSINT_NOT_CONFIGURED in result["warnings"]
-
-
-@pytest.mark.skipif(not FIXTURE_PCAP.exists(), reason="tiny.pcap fixture missing")
-def test_worker_flags_llm_as_unsupported(tmp_path):
-    db = str(tmp_path / "t.db")
-    repo = CaseRepository(db_path=db)
-    repo.create_case(Case(id="cafe0004", title="t", status=CaseStatus.IN_PROGRESS, severity=Severity.LOW))
-    job_id = repo.create_job(Job(case_id="cafe0004", pcap_path=str(FIXTURE_PCAP), options_json="{}"))
-
-    _worker_run(job_id, db, str(FIXTURE_PCAP), {"osint_enabled": False, "llm_enabled": True})
-
-    result = json.loads(repo.get_job(job_id).result_json)
-    assert WARNING_LLM_UNSUPPORTED in result["warnings"]
-    assert result["summary_narrative"] is None
 
 
 @pytest.mark.skipif(not FIXTURE_PCAP.exists(), reason="tiny.pcap fixture missing")
@@ -256,7 +240,7 @@ def test_worker_keeps_job_done_when_persistence_fails(tmp_path, monkeypatch):
     repo.create_case(Case(id="cafe0005", title="t", status=CaseStatus.IN_PROGRESS, severity=Severity.LOW))
     job_id = repo.create_job(Job(case_id="cafe0005", pcap_path=str(FIXTURE_PCAP), options_json="{}"))
 
-    _worker_run(job_id, db, str(FIXTURE_PCAP), {"osint_enabled": False, "llm_enabled": False})
+    _worker_run(job_id, db, str(FIXTURE_PCAP), {"osint_enabled": False})
 
     job = repo.get_job(job_id)
     assert job.status == JobStatus.DONE
@@ -281,6 +265,7 @@ def test_worker_beacon_records_round_trip(tmp_path, monkeypatch):
                 "artifacts": {"ips": ["10.0.0.1", "8.8.8.8"], "domains": [], "urls": [], "hashes": [], "ja3": []},
             },
             beacon_df_records=list(records),
+            zeek_tables={"conn": [{"uid": "x"}]},
         )
 
     # _worker_run imports run_pipeline from app.pipeline.runner at call time,
@@ -295,10 +280,11 @@ def test_worker_beacon_records_round_trip(tmp_path, monkeypatch):
     repo.create_case(Case(id="cafe0006", title="t", status=CaseStatus.IN_PROGRESS, severity=Severity.LOW))
     job_id = repo.create_job(Job(case_id="cafe0006", pcap_path=str(fake_pcap), options_json="{}"))
 
-    _worker_run(job_id, db, str(fake_pcap), {"osint_enabled": False, "llm_enabled": False})
+    _worker_run(job_id, db, str(fake_pcap), {"osint_enabled": False})
 
     result = json.loads(repo.get_job(job_id).result_json)
     assert result["analysis_id"], "persistence must succeed with the faked pipeline result"
+    assert result["capture_metrics"]["detectors"]["zeek"] == "available"
     persisted = repo.get_analysis(result["analysis_id"])
     assert persisted.features["beacon_records"] == records
 
@@ -315,7 +301,7 @@ def test_done_job_reports_complete_progress(tmp_path):
     repo.create_case(Case(id="cafe0005", title="t", status=CaseStatus.IN_PROGRESS, severity=Severity.LOW))
     job_id = repo.create_job(Job(case_id="cafe0005", pcap_path=str(FIXTURE_PCAP), options_json="{}"))
 
-    _worker_run(job_id, db, str(FIXTURE_PCAP), {"osint_enabled": False, "llm_enabled": False})
+    _worker_run(job_id, db, str(FIXTURE_PCAP), {"osint_enabled": False})
 
     job = repo.get_job(job_id)
     assert job.status.value == "done"
@@ -362,7 +348,7 @@ def test_worker_runs_yara_when_carved_items_exist(tmp_path, monkeypatch):
     repo.create_case(Case(id="cafe0010", title="t", status=CaseStatus.IN_PROGRESS, severity=Severity.LOW))
     job_id = repo.create_job(Job(case_id="cafe0010", pcap_path=str(fake_pcap), options_json="{}"))
 
-    _worker_run(job_id, db, str(fake_pcap), {"osint_enabled": False, "llm_enabled": False, "do_yara": True})
+    _worker_run(job_id, db, str(fake_pcap), {"osint_enabled": False, "do_yara": True})
 
     result = json.loads(repo.get_job(job_id).result_json)
     assert "yara_scan" in result["stages_run"], "yara_scan must be recorded in stages_run"
@@ -403,7 +389,7 @@ def test_worker_yara_failure_degrades_to_warning(tmp_path, monkeypatch):
     repo.create_case(Case(id="cafe0011", title="t", status=CaseStatus.IN_PROGRESS, severity=Severity.LOW))
     job_id = repo.create_job(Job(case_id="cafe0011", pcap_path=str(fake_pcap), options_json="{}"))
 
-    _worker_run(job_id, db, str(fake_pcap), {"osint_enabled": False, "llm_enabled": False, "do_yara": True})
+    _worker_run(job_id, db, str(fake_pcap), {"osint_enabled": False, "do_yara": True})
 
     job = repo.get_job(job_id)
     assert job.status.value == "done", "job must remain done despite YARA failure"
@@ -452,7 +438,7 @@ def test_worker_skips_cancelled_job(tmp_path, monkeypatch):
     job_id = repo.create_job(Job(case_id="cafe0020", pcap_path=str(fake_pcap), options_json="{}"))
     assert cancel_queued_job(repo, job_id) is True
 
-    _worker_run(job_id, db, str(fake_pcap), {"osint_enabled": False, "llm_enabled": False})
+    _worker_run(job_id, db, str(fake_pcap), {"osint_enabled": False})
 
     job = repo.get_job(job_id)
     assert job.status == JobStatus.CANCELLED, f"cancelled job must stay cancelled, got {job.status.value}"
@@ -477,7 +463,7 @@ def test_worker_skips_deleted_job(tmp_path, monkeypatch):
     job_id = repo.create_job(Job(case_id="cafe0021", pcap_path=str(fake_pcap), options_json="{}"))
     assert repo.delete_case("cafe0021") is True
 
-    _worker_run(job_id, db, str(fake_pcap), {"osint_enabled": False, "llm_enabled": False})
+    _worker_run(job_id, db, str(fake_pcap), {"osint_enabled": False})
 
     assert repo.get_job(job_id) is None, "the explicitly-deleted job row must stay gone"
     assert "ran" not in calls, "pipeline must not run for a deleted job"

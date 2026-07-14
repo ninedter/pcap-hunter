@@ -6,7 +6,7 @@ import shutil
 
 from fastapi import APIRouter, Depends, HTTPException
 
-from app.api.deps import get_queue, get_repo
+from app.api.deps import get_repo
 
 router = APIRouter()
 
@@ -17,7 +17,7 @@ def healthz() -> dict:
 
 
 @router.get("/readyz")
-def readyz(repo=Depends(get_repo), queue=Depends(get_queue)) -> dict:
+def readyz(repo=Depends(get_repo)) -> dict:
     failures: list[str] = []
 
     # DB check

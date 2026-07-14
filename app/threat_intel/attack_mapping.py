@@ -6,6 +6,8 @@ import json
 import logging
 from dataclasses import dataclass, field
 
+from app import config as C
+
 logger = logging.getLogger(__name__)
 
 # Valid IOC types for validation
@@ -17,6 +19,9 @@ MAX_YARA_RESULTS = 20
 MAX_TLS_ALERTS = 20
 MAX_JA3_FINGERPRINTS = 50
 MAX_FLOWS = 1000
+ATTACK_VERSION = "19.1"
+MAPPING_SCHEMA_VERSION = 2
+VALID_DISPOSITIONS = {"unreviewed", "confirmed", "dismissed"}
 
 # Average packet size estimate (bytes) when only packet count is available
 AVG_PACKET_SIZE_ESTIMATE = 800
@@ -31,6 +36,12 @@ class TechniqueMatch:
     tactic: str  # e.g., command-and-control
     confidence: float  # 0.0 - 1.0
     evidence: list[str] = field(default_factory=list)  # What triggered this detection
+    analytic_id: str | None = None
+    data_components: list[str] = field(default_factory=list)
+    limitations: list[str] = field(default_factory=list)
+    references: list[str] = field(default_factory=list)
+    disposition: str = "unreviewed"
+    analyst_note: str = ""
 
     def to_dict(self) -> dict:
         """Convert to dictionary."""
@@ -40,6 +51,12 @@ class TechniqueMatch:
             "tactic": self.tactic,
             "confidence": self.confidence,
             "evidence": self.evidence,
+            "analytic_id": self.analytic_id,
+            "data_components": self.data_components,
+            "limitations": self.limitations,
+            "references": self.references,
+            "disposition": self.disposition,
+            "analyst_note": self.analyst_note,
         }
 
 
@@ -51,15 +68,50 @@ class AttackMapping:
     tactics_summary: dict[str, int] = field(default_factory=dict)  # tactic -> count
     kill_chain_phase: str = "unknown"  # Most advanced phase detected
     overall_severity: str = "low"  # low, medium, high, critical
+    attack_version: str = ATTACK_VERSION
+    mapping_schema_version: int = MAPPING_SCHEMA_VERSION
 
     def to_dict(self) -> dict:
         """Convert to dictionary."""
         return {
+            "attack_version": self.attack_version,
+            "mapping_schema_version": self.mapping_schema_version,
             "techniques": [t.to_dict() for t in self.techniques],
             "tactics_summary": self.tactics_summary,
             "kill_chain_phase": self.kill_chain_phase,
             "overall_severity": self.overall_severity,
         }
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "AttackMapping":
+        """Restore a mapping from a session or persisted JSON payload."""
+        techniques = [
+            TechniqueMatch(
+                technique_id=str(item.get("technique_id", "")),
+                technique_name=str(item.get("technique_name", "")),
+                tactic=str(item.get("tactic", "")),
+                confidence=float(item.get("confidence", 0.0)),
+                evidence=[str(value) for value in item.get("evidence", [])],
+                analytic_id=item.get("analytic_id") or None,
+                data_components=[str(value) for value in item.get("data_components", [])],
+                limitations=[str(value) for value in item.get("limitations", [])],
+                references=[str(value) for value in item.get("references", [])],
+                disposition=item.get("disposition", "unreviewed")
+                if item.get("disposition", "unreviewed") in VALID_DISPOSITIONS
+                else "unreviewed",
+                analyst_note=str(item.get("analyst_note", "")),
+            )
+            for item in data.get("techniques", [])
+            if isinstance(item, dict)
+        ]
+        return cls(
+            techniques=techniques,
+            tactics_summary={str(key): int(value) for key, value in (data.get("tactics_summary") or {}).items()},
+            kill_chain_phase=str(data.get("kill_chain_phase", "unknown")),
+            overall_severity=str(data.get("overall_severity", "low")),
+            attack_version=str(data.get("attack_version", ATTACK_VERSION)),
+            mapping_schema_version=int(data.get("mapping_schema_version", MAPPING_SCHEMA_VERSION)),
+        )
 
 
 # Kill chain phases in order of advancement
@@ -142,11 +194,6 @@ DETECTION_RULES = {
     # TLS/Certificate anomalies
     "self_signed_cert": {
         "techniques": [
-            {
-                "id": "T1587.003",
-                "name": "Develop Capabilities: Digital Certificates",
-                "tactic": "resource-development",
-            },
             {
                 "id": "T1573.002",
                 "name": "Encrypted Channel: Asymmetric Cryptography",
@@ -240,9 +287,80 @@ DETECTION_RULES = {
     },
 }
 
+# ATT&CK context is kept separate from the detector rules so the UI can show
+# what an analytic actually supports without pretending that every heuristic
+# is a complete ATT&CK detection.  IDs are only populated where the current
+# ATT&CK site has a relevant network analytic; otherwise the match remains an
+# unlinked technique hypothesis.
+TECHNIQUE_METADATA = {
+    "T1071.001": {
+        "data_components": ["Network Traffic: Web Protocols"],
+        "analytic_id": "DET0027",
+        "references": ["https://attack.mitre.org/detectionstrategies/DET0027/"],
+        "limitations": ["Beacon periodicity alone does not prove HTTP or web-protocol C2."],
+    },
+    "T1573": {
+        "data_components": ["Network Traffic Flow"],
+        "limitations": ["Beacon periodicity alone does not prove an encrypted channel."],
+    },
+    "T1071.004": {
+        "data_components": ["Network Traffic: DNS"],
+        "limitations": ["DNS anomaly scoring does not establish operator intent or exfiltration."],
+    },
+    "T1568.001": {
+        "data_components": ["Network Traffic: DNS"],
+        "limitations": ["Fast-flux indicators require infrastructure corroboration to distinguish benign CDNs."],
+    },
+    "T1568.002": {
+        "data_components": ["Network Traffic: DNS"],
+        "limitations": ["DGA scoring is probabilistic and should be confirmed with domain-age or endpoint evidence."],
+    },
+    "T1571": {
+        "analytic_id": "DET0227",
+        "data_components": ["Network Traffic Flow"],
+        "references": ["https://attack.mitre.org/detectionstrategies/DET0227/"],
+        "limitations": ["A non-standard port is not malicious without protocol and asset context."],
+    },
+    "T1573.002": {
+        "data_components": ["Network Traffic: SSL/TLS"],
+        "limitations": ["Certificate anomalies do not prove encrypted C2 or attacker-controlled keys."],
+    },
+    "T1041": {
+        "data_components": ["Network Traffic Flow"],
+        "limitations": ["High outbound volume alone does not establish exfiltration or C2 use."],
+    },
+    "T1048": {
+        "data_components": ["Network Traffic Flow"],
+        "limitations": ["High outbound volume alone does not identify an alternative exfiltration protocol."],
+    },
+    "T1027": {
+        "limitations": [
+            "YARA severity alone does not identify obfuscation; rule semantics and file context are required."
+        ],
+    },
+    "T1059": {
+        "limitations": ["A carved-file YARA severity does not prove command or scripting execution."],
+    },
+    "T1055": {
+        "limitations": ["A carved-file YARA severity does not prove process injection."],
+    },
+    "T1105": {
+        "limitations": ["A YARA match does not prove tool transfer without transfer lineage and endpoint evidence."],
+    },
+    "T1095": {
+        "limitations": ["JA3 reputation alone does not prove a non-application-layer protocol."],
+    },
+}
+
 
 class ATTACKMapper:
-    """Maps analysis results to MITRE ATT&CK techniques."""
+    """Maps analysis results to ATT&CK v19.1 technique hypotheses.
+
+    The mapper deliberately distinguishes a technique hypothesis from direct
+    analytic coverage.  Network-only evidence cannot prove endpoint execution,
+    identity, or intent, so each match carries limitations and may omit an
+    analytic ID when the required protocol context is missing.
+    """
 
     def __init__(self):
         """Initialize the mapper."""
@@ -301,9 +419,11 @@ class ATTACKMapper:
         # Check for large data transfers
         if features:
             techniques.extend(self._check_data_transfer(features))
+            techniques.extend(self._check_suspicious_ports(features))
 
         # Deduplicate techniques
         techniques = self._deduplicate_techniques(techniques)
+        self._annotate_techniques(techniques)
 
         # Calculate tactics summary
         tactics_summary = self._calculate_tactics_summary(techniques)
@@ -331,7 +451,11 @@ class ATTACKMapper:
             score = beacon.get("score", 0) if isinstance(beacon, dict) else 0
             if score >= threshold:
                 for tech in rule["techniques"]:
-                    evidence = f"Beaconing detected with score {score:.2f} to {beacon.get('dst', 'unknown')}"
+                    proto = beacon.get("proto") or beacon.get("protocol")
+                    protocol_note = f" over {proto}" if proto else ""
+                    evidence = (
+                        f"Beaconing detected with score {score:.2f} to {beacon.get('dst', 'unknown')}{protocol_note}"
+                    )
                     techniques.append(
                         TechniqueMatch(
                             technique_id=tech["id"],
@@ -401,8 +525,15 @@ class ATTACKMapper:
         """Check TLS certificate analysis for anomalies."""
         techniques = []
         alerts = tls_analysis.get("alerts", [])
+        # The TLS stage uses ``alerts`` for aggregate counters while older
+        # callers may provide a list of detailed alert objects.  Only the
+        # latter can support a certificate-level ATT&CK hypothesis.
+        if isinstance(alerts, dict):
+            alerts = tls_analysis.get("certificate_alerts", [])
 
         for alert in alerts:
+            if not isinstance(alert, dict):
+                continue
             alert_type = alert.get("type", "")
 
             if alert_type == "self_signed":
@@ -557,6 +688,33 @@ class ATTACKMapper:
 
         return techniques
 
+    def _check_suspicious_ports(self, features: dict) -> list[TechniqueMatch]:
+        """Map configured C2-suspect ports without treating every high port as C2."""
+        matches: list[TechniqueMatch] = []
+        seen: set[tuple[str, int]] = set()
+        rule = self.detection_rules["non_standard_port"]
+        for flow in (features.get("flows") or [])[:MAX_FLOWS]:
+            try:
+                port = int(flow.get("dport"))
+            except (TypeError, ValueError):
+                continue
+            dst = str(flow.get("dst") or "unknown")
+            key = (dst, port)
+            if port not in C.C2_SUSPECT_PORTS or key in seen:
+                continue
+            seen.add(key)
+            for tech in rule["techniques"]:
+                matches.append(
+                    TechniqueMatch(
+                        technique_id=tech["id"],
+                        technique_name=tech["name"],
+                        tactic=tech["tactic"],
+                        confidence=0.7,
+                        evidence=[f"C2-suspect destination port {port} observed to {dst}"],
+                    )
+                )
+        return matches
+
     def _deduplicate_techniques(self, techniques: list[TechniqueMatch]) -> list[TechniqueMatch]:
         """Deduplicate techniques, keeping highest confidence and merging evidence."""
         seen: dict[str, TechniqueMatch] = {}
@@ -568,6 +726,9 @@ class ATTACKMapper:
                 existing = seen[key]
                 existing.confidence = max(existing.confidence, tech.confidence)
                 existing.evidence.extend(tech.evidence)
+                existing.data_components.extend(tech.data_components)
+                existing.limitations.extend(tech.limitations)
+                existing.references.extend(tech.references)
             else:
                 seen[key] = TechniqueMatch(
                     technique_id=tech.technique_id,
@@ -575,9 +736,40 @@ class ATTACKMapper:
                     tactic=tech.tactic,
                     confidence=tech.confidence,
                     evidence=list(tech.evidence),
+                    analytic_id=tech.analytic_id,
+                    data_components=list(tech.data_components),
+                    limitations=list(tech.limitations),
+                    references=list(tech.references),
+                    disposition=tech.disposition,
+                    analyst_note=tech.analyst_note,
                 )
 
         return list(seen.values())
+
+    def _annotate_techniques(self, techniques: list[TechniqueMatch]) -> None:
+        """Attach ATT&CK analytic context and de-duplicate evidence metadata."""
+        for technique in techniques:
+            metadata = TECHNIQUE_METADATA.get(technique.technique_id, {})
+            analytic_id = metadata.get("analytic_id")
+            evidence_text = " ".join(technique.evidence).lower()
+            # DET0027 is specifically a web-protocol analytic. A generic
+            # periodic flow may still be a T1071.001 hypothesis, but it must
+            # not be presented as coverage of that analytic without HTTP/S
+            # evidence.
+            if technique.technique_id == "T1071.001" and not any(
+                token in evidence_text for token in ("http", "https", "web protocol")
+            ):
+                analytic_id = None
+            technique.analytic_id = technique.analytic_id or analytic_id
+            metadata_components = metadata.get("data_components", [])
+            if technique.technique_id == "T1071.001" and analytic_id is None:
+                metadata_components = ["Network Traffic Flow"]
+            technique.data_components = list(dict.fromkeys(technique.data_components + metadata_components))
+            technique.limitations = list(dict.fromkeys(technique.limitations + metadata.get("limitations", [])))
+            technique.references = list(dict.fromkeys(technique.references + metadata.get("references", [])))
+            technique.disposition = (
+                technique.disposition if technique.disposition in VALID_DISPOSITIONS else "unreviewed"
+            )
 
     def _calculate_tactics_summary(self, techniques: list[TechniqueMatch]) -> dict[str, int]:
         """Calculate tactics summary from techniques."""

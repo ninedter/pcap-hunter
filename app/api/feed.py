@@ -48,6 +48,7 @@ def query_iocs(repo: CaseRepository, filt: IOCFilter) -> list[dict[str, Any]]:
                MIN(a.analyzed_at) AS first_seen,
                MAX(a.analyzed_at) AS last_seen,
                GROUP_CONCAT(DISTINCT a.case_id) AS case_ids,
+               GROUP_CONCAT(DISTINCT i.analysis_id) AS analysis_ids,
                GROUP_CONCAT(DISTINCT t.name) AS tag_names
         FROM iocs i
         JOIN analyses a ON i.analysis_id = a.id
@@ -85,6 +86,20 @@ def query_iocs(repo: CaseRepository, filt: IOCFilter) -> list[dict[str, Any]]:
     conn = repo._get_conn()
     try:
         rows = conn.execute(sql, params).fetchall()
+        analysis_ids = {
+            analysis_id for row in rows for analysis_id in (row["analysis_ids"] or "").split(",") if analysis_id
+        }
+        mapping_by_analysis: dict[str, dict] = {}
+        if analysis_ids:
+            placeholders = ",".join("?" * len(analysis_ids))
+            mapping_rows = conn.execute(
+                f"SELECT id, attack_mapping_json FROM analyses WHERE id IN ({placeholders})",
+                tuple(analysis_ids),
+            ).fetchall()
+            for mapping_row in mapping_rows:
+                mapping = repo._decompress_json(mapping_row["attack_mapping_json"])
+                if isinstance(mapping, dict):
+                    mapping_by_analysis[mapping_row["id"]] = mapping
     finally:
         conn.close()
 
@@ -92,6 +107,14 @@ def query_iocs(repo: CaseRepository, filt: IOCFilter) -> list[dict[str, Any]]:
     for row in rows:
         d = dict(row)
         score = int(d["score"] or 50)
+        techniques = sorted(
+            {
+                str(technique.get("technique_id"))
+                for analysis_id in (d.get("analysis_ids") or "").split(",")
+                for technique in (mapping_by_analysis.get(analysis_id, {}).get("techniques") or [])
+                if isinstance(technique, dict) and technique.get("technique_id")
+            }
+        )
         out.append(
             {
                 "type": d["ioc_type"],
@@ -102,7 +125,7 @@ def query_iocs(repo: CaseRepository, filt: IOCFilter) -> list[dict[str, Any]]:
                 "first_seen": d["first_seen"],
                 "last_seen": d["last_seen"],
                 "case_ids": [c for c in (d.get("case_ids") or "").split(",") if c],
-                "mitre_techniques": [],  # Future: derive from analysis features
+                "mitre_techniques": techniques,
             }
         )
     return out

@@ -80,7 +80,6 @@ class PcapSubmissionForm(BaseModel):
     tags: str | None = None  # JSON-encoded array
     severity_hint: str | None = None
     osint_enabled: bool = True
-    llm_enabled: bool = True
     pyshark_packet_limit: int | None = None
 
     def parsed_tags(self) -> list[str]:

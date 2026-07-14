@@ -2,6 +2,43 @@
 
 All notable changes to this project will be documented in this file.
 
+## [2.0.0] - 2026-07-14
+
+Version 2 turns PCAP Hunter into a more evidence-aware investigation workbench and strengthens both interactive and headless analysis paths.
+
+### Added
+
+- **Dedicated MITRE ATT&CK Analysis workspace** with versioned technique hypotheses, supporting evidence, applicable Detection Strategy context, analyst dispositions, coverage gaps, and ATT&CK Navigator export.
+- **Capture-quality telemetry** covering packet and flow scale, parse ratio, capture time window, sampling limits, pipeline warnings, completed stages, and detector availability.
+- **Persistent ATT&CK and capture context** in saved analyses and API results; IOC feeds now include related technique IDs across contributing analyses.
+- **Validated Streamlit uploads** that stream `.pcap` and `.pcapng` files in bounded chunks, enforce file and batch limits, validate magic bytes, and roll back partial batches.
+- **LLM-optional evidence snapshot** so parsed flows, artifacts, correlations, stage status, and warnings remain visible when the narrative is skipped or unavailable.
+- **Two additional real-app screenshots** for MITRE Analysis and API Key Management, with isolated capture data, IPv4/IPv6 pixel redaction, and a final OCR audit.
+
+### Changed
+
+- **Integrations API submission lifecycle** now initializes the worker queue only for accepted submissions and removes provisional uploads and cases if queueing or persistence fails.
+- **Readiness checks** no longer initialize the background job queue as a side effect.
+- **Docker LM Studio routing** adapts loopback and private host addresses to `host.docker.internal` for local-compatible providers.
+- **Case analysis updates** use an upsert that replaces stale IOC rows without deleting the parent analysis record.
+- **PDF timestamps** are emitted consistently in UTC.
+- **Navigator exports** now declare the current Navigator 5.3.2 application version while retaining layer schema 4.5.
+- **Version metadata** is unified at `2.0.0` for the package, FastAPI schema, documentation, tag, and GitHub release.
+
+### Fixed
+
+- HTTP payload carving now decodes compact and colon-separated tshark byte-array output before hashing and writing files.
+- Capture metrics tolerate flows with missing or malformed timestamps instead of failing the MITRE workspace.
+- ATT&CK mappings restored from SQLite remain normalized in session state, so analyst dispositions and notes survive Streamlit reruns.
+- The LLM evidence snapshot now reads the canonical `parsed_packet_count` capture metric.
+- Rejected API uploads no longer leave orphaned files or empty cases when the queue is full or cannot initialize.
+
+### Docs
+
+- Rewritten README visual tour covering all ten primary tabs with actual Docker UI captures.
+- Updated English and Traditional Chinese manuals for MITRE analysis, capture coverage, and Docker-hosted LM Studio routing.
+- Updated Integrations API examples for capture metrics, ATT&CK mappings, IOC technique IDs, and cleanup semantics.
+
 ## [1.0.0] - 2026-04-22
 
 First stable release. Production-ready installer, hardened pipeline, polished UX, and brand identity.

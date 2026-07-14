@@ -1,6 +1,7 @@
 # PCAP Hunter
 
 [![CI](https://github.com/ninedter/pcap-hunter/actions/workflows/ci.yml/badge.svg)](https://github.com/ninedter/pcap-hunter/actions/workflows/ci.yml)
+[![Release: v2.0.0](https://img.shields.io/badge/release-v2.0.0-7c3aed.svg)](https://github.com/ninedter/pcap-hunter/releases/tag/v2.0.0)
 [![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 
@@ -14,8 +15,20 @@ By combining industry-standard network analysis tools (**Zeek**, **Tshark**, **P
 
 ---
 
+## What's new in version 2
+
+- **Dedicated MITRE ATT&CK workspace** — evidence-backed technique hypotheses, ATT&CK v19.1 metadata, analyst dispositions, capture coverage, visibility gaps, and Navigator export.
+- **Capture-quality telemetry** — packet/flow scale, parse ratio, time window, sampling limits, completed stages, and warnings now travel with UI and API results and persist with cases.
+- **Safer PCAP intake** — Streamlit uploads are streamed in bounded chunks, preserve `.pcap`/`.pcapng`, validate magic bytes, enforce batch limits, and remove partial files after rejection.
+- **Stronger Integrations API** — headless jobs return ATT&CK mappings and capture metrics, IOC feeds carry related technique IDs, readiness checks avoid starting the worker queue, and failed submissions clean up provisional cases and files.
+- **Evidence without an LLM** — skipping or losing the optional AI narrative no longer hides deterministic packet, IOC, correlation, stage, and warning evidence.
+- **Runtime and export reliability** — Docker adapts local LM Studio addresses to the host bridge, HTTP carving decodes tshark byte arrays correctly, case re-saves replace stale IOCs, and PDF timestamps are consistently UTC.
+
+---
+
 ## Table of Contents
 
+- [What's new in version 2](#whats-new-in-version-2)
 - [Visual Tour](#visual-tour)
 - [Key Features](#key-features)
 - [Integrations API](#integrations-api)
@@ -31,6 +44,10 @@ By combining industry-standard network analysis tools (**Zeek**, **Tshark**, **P
 ---
 
 ## Visual Tour
+
+These are captures of the real version-2 Streamlit app running in Docker against
+the bundled sample PCAP. IP addresses, API secrets, email addresses, and local
+user paths are masked in the image pixels before the files are committed.
 
 ### 1. Upload — load one or many PCAPs
 
@@ -59,7 +76,16 @@ timeline put the capture in visual context.
 
 ![Dashboard tab](docs/images/03-dashboard.png)
 
-### 4. LLM Analysis — AI-generated threat report
+### 4. MITRE Analysis — behaviors, evidence, and coverage
+
+The dedicated ATT&CK workspace treats mappings as analyst hypotheses rather than
+proof. It links network evidence to techniques and applicable detection context,
+lets analysts record a disposition and note, makes detector gaps explicit, and
+exports an ATT&CK Navigator layer with versioned metadata.
+
+![MITRE Analysis tab](docs/images/10-mitre-analysis.png)
+
+### 5. LLM Analysis — AI-generated threat report
 
 A nine-section narrative — Executive Summary through Recommended Actions, plus an
 **IOC Summary table** and a **Risk Matrix rendered as a real Markdown table** — with
@@ -69,7 +95,11 @@ Reports in 9 languages, including Traditional Chinese (zh-TW).
 
 ![LLM Analysis tab](docs/images/04-llm-analysis.png)
 
-### 5. OSINT — multi-provider IOC enrichment
+When a report is skipped or unavailable, this tab still shows a deterministic
+snapshot of parsed packets, flows, IOCs, correlations, completed stages, and
+pipeline warnings.
+
+### 6. OSINT — multi-provider IOC enrichment
 
 Prioritized IOC table with VirusTotal, AbuseIPDB, GreyNoise, Shodan, OTX, and
 VT Domain signals merged into one view. **Provider-status pills** report each
@@ -80,7 +110,7 @@ Infrastructure ASN clustering, Export, Devices, and Notes.
 
 ![OSINT tab](docs/images/05-osint.png)
 
-### 6. Raw Data — Zeek logs, flows, carved payloads, YARA matches
+### 7. Raw Data — Zeek logs, flows, carved payloads, YARA matches
 
 Every underlying data source is available: the flow table (with explicit
 **First/Last Seen (UTC)** timestamp columns), DNS and TLS analyses, NXDOMAIN
@@ -90,20 +120,23 @@ CSV-injection protection.
 
 ![Raw Data tab](docs/images/06-raw-data.png)
 
-### 7. Cases — persistent investigation tracking
+### 8. Cases — persistent investigation tracking
 
-Promote any capture and its findings into a case. Cases carry IOCs, severity, tags,
-investigation notes, status, and search — stored in a local SQLite database.
+Promote any capture and its findings into a case. Cases carry IOCs, severity,
+tags, investigation notes, ATT&CK mappings, capture-quality metrics, status, and
+search — stored in a local SQLite database.
 
 ![Cases tab](docs/images/07-cases.png)
 
-### 8. API Keys — manage programmatic access
+### 9. API Keys — manage programmatic access
 
 Create, revoke, and monitor API keys for the Integrations API. Each key has its own
 scope (full or feed-only), optional expiration, per-key rate limits, and a usage
 sparkline. Environment-variable keys are shown as read-only bootstrap entries.
 
-### 9. Config — centralized settings
+![API Keys tab](docs/images/11-api-keys.png)
+
+### 10. Config — centralized settings
 
 An **LLM Integration** section with three providers (LM Studio, OpenAI, Anthropic),
 a **YARA Rules** section with a configurable rules directory, OSINT provider keys
@@ -132,8 +165,10 @@ and model picker.
   - **OpenAI** (cloud) — single-shot report with the entire evidence corpus in one full-context call.
   - **Anthropic** (cloud) — Claude via the official `anthropic` SDK (`claude-opus-4-8`, `claude-sonnet-4-6`, `claude-haiku-4-5`), single-shot with streaming.
 - **Evidence-Grounded Reporting** — SOC-ready reports with severity-calibrated assessments, false-positive awareness, confidence qualifiers, a Risk Matrix rendered as a real Markdown table, and an IOC Summary table.
+- **LLM-Optional Evidence View** — parsed packet, flow, IOC, correlation, stage, and warning evidence remains visible when generation is skipped or the provider is unavailable.
 - **Multi-Language Reports** — 9 languages with region-specific terminology: English, Traditional Chinese (Taiwan), Simplified Chinese, Japanese, Korean, Italian, Spanish, French, German.
-- **MITRE ATT&CK Mapping** — Automated mapping of detected behaviors and IOCs to ATT&CK techniques and Kill Chain phases.
+- **MITRE ATT&CK Analysis** — A separate Behaviors & Coverage workspace that maps network evidence to versioned ATT&CK hypotheses, links applicable Detection Strategies/Data Components, records analyst dispositions, and exports Navigator layers.
+- **Capture-quality telemetry** — Packet/flow scale, parse coverage, time window, sampling limits, pipeline warnings, and detector visibility gaps are recorded alongside findings.
 - **Attack Narrative Synthesis** — Translates raw events into a coherent, actionable security story.
 
 ### IOC Priority Scoring
@@ -157,6 +192,7 @@ and model picker.
 
 ### Multi-PCAP Batch Processing
 - **Multi-File Upload** — Upload and analyze multiple PCAP files simultaneously.
+- **Validated Streaming Intake** — `.pcap` and `.pcapng` uploads are written in bounded chunks, checked for file and batch limits, validated by magic bytes, and rolled back as a set after any failure.
 - **Cross-File Correlation** — Detects shared IPs, domains, and JA3 fingerprints across files.
 - **Merged Dashboard** — Aggregated results with per-file detail cards and batch summary.
 - **Resource Limits** — Configurable limits: 1 GB per file, 50 files max, 5 GB total.
@@ -222,6 +258,8 @@ Integrates with leading threat intelligence providers:
 ### Case Management System
 - Create, track, and close investigation cases.
 - Store IOCs (IP, Domain, Hash, JA3, URL) with severity and context.
+- Persist ATT&CK hypotheses and capture-quality metrics with each analysis.
+- Replace stale IOC rows cleanly when an existing analysis is re-saved.
 - Investigation notes, tag-based organization, and search.
 
 ### Professional PDF Export
@@ -246,6 +284,10 @@ platforms, SIEM systems, and custom scripts can submit PCAPs, poll job progress,
 retrieve cases/PDF reports, and pull IOC feeds (JSON / CSV / STIX 2.1)
 programmatically. It reuses the same 10-stage pipeline, SQLite case database, and
 configuration as the UI; DB-backed API keys are managed from the API Keys tab.
+Headless results include capture-quality metrics and ATT&CK hypotheses, while IOC
+feeds include the technique IDs associated with contributing analyses. Uploads are
+streamed and validated before queueing; queue or persistence failures remove the
+provisional file and case instead of leaving orphans.
 
 ```bash
 make run-api     # http://localhost:8000
@@ -261,13 +303,13 @@ make smoke-api   # end-to-end smoke test against the local API
 
 ```
 app/
-├── analysis/        # Correlation engine, flow analysis, IOC scorer, narrator
+├── analysis/        # Correlation, flow/IOC scoring, narration, capture visibility
 ├── api/             # FastAPI integrations API (REST endpoints, auth, key mgmt)
 │   ├── routers/     # health, pcaps, jobs, cases, iocs, admin
 │   ├── key_auth.py  # DB + env-var authentication pipeline
 │   ├── key_repository.py  # SQLite API key store
 │   ├── rate_limiter.py    # Sliding-window per-key rate limiter
-│   └── worker.py    # Background pipeline execution (ProcessPoolExecutor)
+│   └── queue.py     # Background pipeline execution (ProcessPoolExecutor)
 ├── database/        # Case management (SQLite)
 ├── llm/             # LLM client + multi-provider dispatch (providers.py)
 ├── pipeline/        # 10-stage analysis pipeline
@@ -286,7 +328,7 @@ app/
 ├── reports/         # PDF report generation (WeasyPrint + kaleido charts)
 ├── security/        # OPSEC hardening & data sanitization
 ├── threat_intel/    # MITRE ATT&CK mapping
-├── ui/              # Streamlit interface (9 tabs, severity color system)
+├── ui/              # Streamlit interface (10 tabs, upload validation, MITRE workspace)
 ├── utils/           # Export, GeoIP, config, binary discovery, CEF
 ├── config.py        # Application defaults
 └── main.py          # Streamlit entry point
@@ -332,6 +374,7 @@ Compose notes:
 
 - `./data` is mounted into the container, so PCAPs, carved files, Zeek logs, and
   the case database live on the host. Put YARA rules under `./data/yara_rules`.
+  Set `PCAP_HUNTER_DATA_BIND` to use a different host data directory.
 - API keys saved in the UI persist in the `pcap-hunter-home` volume; the compose
   file pins `hostname:` so the config encryption key stays stable across
   container recreation.
@@ -428,7 +471,7 @@ Open `http://localhost:8501` in your browser.
 2. **Configure** — Pick an LLM provider (LM Studio / OpenAI / Anthropic), set your home location (Continent > Country > City), OSINT API keys, and optionally a YARA rules directory in the Config tab.
 3. **Analyze** — Click **Extract & Analyze** to start the pipeline.
 4. **Monitor** — Watch the Progress tab as stages execute: Packet Counting > Parsing + Zeek (parallel) > DNS / TLS / Beaconing / Carving (concurrent) > YARA > OSINT > LLM Report.
-5. **Review** — Explore results across Dashboard, LLM Analysis, OSINT, Raw Data, and Cases tabs.
+5. **Review** — Explore results across Dashboard, MITRE Analysis, LLM Analysis, OSINT, Raw Data, and Cases tabs.
 6. **Export** — Download CSV/JSON data, PDF reports, STIX bundles, ATT&CK Navigator layers, or CEF syslog events.
 
 ### Re-run Reports
@@ -446,7 +489,7 @@ Use the granular **Clear** buttons in Config to independently wipe PCAP data, OS
 - Defaults in `app/config.py` (thresholds, paths, URLs)
 - Persistent config in `~/.pcap_hunter_config.json` (managed by `ConfigManager`)
 - API keys encrypted at rest with machine-derived PBKDF2 key
-- Environment-variable overrides: `OTT_KEY`, `VT_KEY`, `SHODAN_KEY`, etc.
+- Environment-variable overrides: `OTX_KEY`, `VT_KEY`, `SHODAN_KEY`, etc.
 - LLM defaults: LM Studio at `http://localhost:1234/v1`
 - YARA rules: leave the directory blank to use `data/yara_rules/` when present
 
@@ -502,8 +545,22 @@ identical gate inside the runtime image, independent of the host Python setup.
 ### Regenerating doc screenshots
 
 `scripts/capture_screenshots.py` re-captures every README/manual screenshot with
-Playwright headless Chromium (plus tesseract for OCR) and auto-redacts IP
-addresses before saving.
+the real Docker-hosted Streamlit UI in headless Chromium. It masks IP addresses,
+API secrets, email addresses, and local user paths at the pixel level; tesseract
+provides a fallback for canvas-rendered tables and a final privacy audit.
+
+```bash
+python3 -m pip install -r requirements-docs.txt
+python3 -m playwright install chromium
+DOCS_DATA="$(mktemp -d)"
+cp data/sample.pcap "$DOCS_DATA/sample.pcap"
+PCAP_HUNTER_DATA_BIND="$DOCS_DATA" make docker-up
+python3 scripts/capture_screenshots.py --seed-docs-key
+```
+
+The isolated bind prevents local cases, keys, cache entries, or prior captures
+from appearing in the documentation. The script creates its example API key
+through the real UI, then reloads away the one-time secret before capture.
 
 ### Testing discipline
 

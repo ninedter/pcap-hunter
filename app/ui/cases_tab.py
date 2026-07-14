@@ -52,24 +52,33 @@ def _restore_analysis_to_session(analysis: Analysis) -> None:
     Mirrors the session keys the pipeline populates after a live run. Keys that
     are not persisted on Analysis (beacon_df, zeek_tables, carved files, JA3,
     correlation/anomaly results) are reset instead of leaving stale data from a
-    previously analyzed capture. Dashboard filters are cleared because they
-    reference IPs/time ranges from the prior capture and would otherwise filter
-    the restored flows down to nothing.
+    previously analyzed capture. ATT&CK mapping and capture-quality metrics are
+    persisted when the analysis was saved. Dashboard filters are cleared because
+    they reference IPs/time ranges from the prior capture and would otherwise
+    filter the restored flows down to nothing.
 
     Args:
         analysis: The saved analysis to load into the current session.
     """
     features = analysis.features or {}
     st.session_state["features"] = features
+    st.session_state["__total_pkts"] = analysis.packet_count
     # Must match the dashboard fast path: top_n=10, weight="flows"
     # (see _precompute_dash_aggregates in app.main).
     st.session_state["dash_aggregates"] = compute_flow_aggregates(features.get("flows"), top_n=10, weight="flows")
     st.session_state["osint"] = analysis.osint or {}
     st.session_state["dns_analysis"] = analysis.dns_analysis
     st.session_state["tls_analysis"] = analysis.tls_analysis
+    # Restore the evidence-backed mapping when available. Older cases without
+    # the new column are handled by the dedicated page's lazy recomputation.
+    st.session_state["attack_mapping"] = analysis.attack_mapping
+    st.session_state["capture_metrics"] = analysis.capture_metrics
+    st.session_state["pipeline_warnings"] = []
+    st.session_state["pipeline_stages"] = []
     st.session_state["yara_results"] = analysis.yara_results
     # Model default for report is "" but the app's no-report sentinel is None.
     st.session_state["report"] = analysis.report or None
+    st.session_state["llm_status"] = "generated" if analysis.report else None
     # Everything below isn't persisted on Analysis — reset it all, otherwise the
     # dashboard mixes this case's data with leftovers from the previous live run.
     st.session_state["beacon_df"] = pd.DataFrame()
@@ -583,6 +592,9 @@ def _quick_save_analysis():
         return
 
     repo = _get_repo()
+    attack_mapping = st.session_state.get("attack_mapping")
+    if hasattr(attack_mapping, "to_dict"):
+        attack_mapping = attack_mapping.to_dict()
 
     # Create case
     timestamp = datetime.now().strftime("%Y%m%d_%H%M")
@@ -603,6 +615,8 @@ def _quick_save_analysis():
         yara_results=st.session_state.get("yara_results"),
         dns_analysis=st.session_state.get("dns_analysis"),
         tls_analysis=st.session_state.get("tls_analysis"),
+        attack_mapping=attack_mapping,
+        capture_metrics=st.session_state.get("capture_metrics"),
     )
 
     # Extract IOCs
@@ -625,6 +639,9 @@ def _add_current_analysis_to_case(case: Case):
         return
 
     repo = _get_repo()
+    attack_mapping = st.session_state.get("attack_mapping")
+    if hasattr(attack_mapping, "to_dict"):
+        attack_mapping = attack_mapping.to_dict()
 
     analysis = Analysis(
         case_id=case.id,
@@ -636,6 +653,8 @@ def _add_current_analysis_to_case(case: Case):
         yara_results=st.session_state.get("yara_results"),
         dns_analysis=st.session_state.get("dns_analysis"),
         tls_analysis=st.session_state.get("tls_analysis"),
+        attack_mapping=attack_mapping,
+        capture_metrics=st.session_state.get("capture_metrics"),
     )
 
     analysis.iocs = repo.extract_iocs(analysis)

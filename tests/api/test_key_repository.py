@@ -100,11 +100,12 @@ def test_increment_usage_upsert(tmp_path):
     repo = _repo(tmp_path)
     _, key = _make_key()
     kid = repo.create_key(key)
-    repo.increment_usage(kid, "2026-05-23", 5)
-    repo.increment_usage(kid, "2026-05-23", 3)
+    usage_date = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
+    repo.increment_usage(kid, usage_date, 5)
+    repo.increment_usage(kid, usage_date, 3)
     usage = repo.get_usage(kid, days=30)
     # Should have one entry with 8 total
-    day_data = [u for u in usage if u["date"] == "2026-05-23"]
+    day_data = [u for u in usage if u["date"] == usage_date]
     assert len(day_data) == 1
     assert day_data[0]["requests"] == 8
     # total_requests on key should also be 8
@@ -116,13 +117,15 @@ def test_get_usage_returns_daily_data(tmp_path):
     repo = _repo(tmp_path)
     _, key = _make_key()
     kid = repo.create_key(key)
-    repo.increment_usage(kid, "2026-05-22", 10)
-    repo.increment_usage(kid, "2026-05-23", 20)
+    yesterday = (datetime.now() - timedelta(days=2)).strftime("%Y-%m-%d")
+    recent = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
+    repo.increment_usage(kid, yesterday, 10)
+    repo.increment_usage(kid, recent, 20)
     usage = repo.get_usage(kid, days=30)
     assert len(usage) == 2
     dates = [u["date"] for u in usage]
-    assert "2026-05-22" in dates
-    assert "2026-05-23" in dates
+    assert yesterday in dates
+    assert recent in dates
 
 
 def test_get_usage_summary(tmp_path):
@@ -131,10 +134,11 @@ def test_get_usage_summary(tmp_path):
     _, k2 = _make_key(name="k2")
     id1 = repo.create_key(k1)
     id2 = repo.create_key(k2)
-    repo.increment_usage(id1, "2026-05-23", 10)
-    repo.increment_usage(id2, "2026-05-23", 5)
+    usage_date = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
+    repo.increment_usage(id1, usage_date, 10)
+    repo.increment_usage(id2, usage_date, 5)
     summary = repo.get_usage_summary(days=30)
-    day_data = [s for s in summary if s["date"] == "2026-05-23"]
+    day_data = [s for s in summary if s["date"] == usage_date]
     assert len(day_data) == 1
     assert day_data[0]["requests"] == 15
 

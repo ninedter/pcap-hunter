@@ -74,6 +74,26 @@ class TestTechniqueMatch:
         assert d["confidence"] == 0.7
         assert len(d["evidence"]) == 2
 
+    def test_to_dict_preserves_analytic_context_and_disposition(self):
+        tech = TechniqueMatch(
+            "T1571",
+            "Non-Standard Port",
+            "command-and-control",
+            0.6,
+            ["port 31337"],
+            analytic_id="DET0227",
+            data_components=["Network Traffic Flow"],
+            limitations=["Needs protocol context"],
+            disposition="confirmed",
+            analyst_note="Validated against the flow table.",
+        )
+
+        payload = tech.to_dict()
+
+        assert payload["analytic_id"] == "DET0227"
+        assert payload["disposition"] == "confirmed"
+        assert payload["analyst_note"] == "Validated against the flow table."
+
 
 class TestAttackMapping:
     """Test AttackMapping dataclass."""
@@ -150,6 +170,35 @@ class TestATTACKMapper:
         mapping = mapper.map_analysis(tls_analysis=tls_analysis)
         technique_ids = [t.technique_id for t in mapping.techniques]
         assert "T1573.002" in technique_ids
+        assert "T1587.003" not in technique_ids
+
+    def test_mapping_attaches_detection_context(self):
+        mapping = ATTACKMapper().map_analysis(
+            dns_analysis={"alerts": {"dga_count": 1}, "dga_detections": [{"domain": "x.test"}]},
+            beacon_results=[{"dst": "203.0.113.5", "score": 0.9, "proto": "https"}],
+        )
+
+        web = next(tech for tech in mapping.techniques if tech.technique_id == "T1071.001")
+        dga = next(tech for tech in mapping.techniques if tech.technique_id == "T1568.002")
+        assert web.analytic_id == "DET0027"
+        assert "Network Traffic: Web Protocols" in web.data_components
+        assert dga.limitations
+
+    def test_generic_beacon_does_not_claim_web_analytic_coverage(self):
+        mapping = ATTACKMapper().map_analysis(beacon_results=[{"dst": "203.0.113.5", "score": 0.9}])
+
+        web = next(tech for tech in mapping.techniques if tech.technique_id == "T1071.001")
+
+        assert web.analytic_id is None
+
+    def test_configured_c2_suspect_port_is_mapped_with_flow_evidence(self):
+        mapping = ATTACKMapper().map_analysis(
+            features={"flows": [{"dst": "203.0.113.5", "dport": "31337", "count": 5, "bytes": 5000}]}
+        )
+
+        port_match = next(tech for tech in mapping.techniques if tech.technique_id == "T1571")
+        assert "31337" in port_match.evidence[0]
+        assert port_match.analytic_id == "DET0227"
 
     def test_yara_match_detection(self):
         mapper = ATTACKMapper()
@@ -493,6 +542,8 @@ class TestNavigatorExport:
         layer = export_navigator_layer(sample_mapping)
         assert layer["name"] == "PCAP Analysis"
         assert layer["domain"] == "enterprise-attack"
+        assert layer["versions"]["attack"] == "19.1"
+        assert layer["versions"]["navigator"] == "5.3.2"
         assert len(layer["techniques"]) == 2
 
     def test_export_layer_technique_format(self, sample_mapping):

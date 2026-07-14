@@ -167,8 +167,8 @@ def iocs_csv(
 # ── STIX 2.1 feed ──────────────────────────────────────────────────────────
 
 
-@router.get("/iocs.stix")
-@router.get("/iocs/stix")
+@router.get("/iocs.stix", operation_id="iocs_stix_dot")
+@router.get("/iocs/stix", operation_id="iocs_stix_path")
 def iocs_stix(
     request: Request,
     since: str | None = Query(default=None),

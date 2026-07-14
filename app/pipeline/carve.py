@@ -2,6 +2,26 @@ class CarveError(Exception):
     """Raised when HTTP payload carving fails."""
 
 
+def _decode_tshark_file_data(value: str | bytes) -> bytes:
+    """Decode tshark field output for http.file_data into payload bytes.
+
+    Tshark byte-array fields are commonly rendered as hexadecimal, sometimes
+    colon-separated. Tests also feed plain text for readability, so fall back to
+    UTF-8 bytes when the field is not valid hex.
+    """
+    if isinstance(value, bytes):
+        return value
+
+    text = value.strip()
+    compact = text.replace(":", "").replace(" ", "")
+    if compact and len(compact) % 2 == 0 and all(c in "0123456789abcdefABCDEF" for c in compact):
+        try:
+            return bytes.fromhex(compact)
+        except ValueError:
+            pass
+    return value.encode("utf-8", "surrogateescape")
+
+
 def carve_http_payloads(pcap_path: str, out_dir: str, phase=None) -> list[dict]:
     import hashlib
     import logging
@@ -84,10 +104,7 @@ def carve_http_payloads(pcap_path: str, out_dir: str, phase=None) -> list[dict]:
             if len(parts) < 5:
                 continue
             ts, stream_id, ctype, clen, body = parts[:5]
-            if isinstance(body, str):
-                data_bytes = body.encode("utf-8", "surrogateescape")
-            else:
-                data_bytes = body
+            data_bytes = _decode_tshark_file_data(body)
             h = hashlib.sha256(data_bytes).hexdigest()
             fname = f"stream{stream_id}_{h[:10]}.bin"
             fpath = pathlib.Path(out_dir) / fname

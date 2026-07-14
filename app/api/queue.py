@@ -10,6 +10,8 @@ from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
+import pandas as pd
+
 from app import config as C
 from app.database.models import Job, JobStatus
 from app.database.repository import CaseRepository
@@ -27,6 +29,8 @@ WARNING_PERSISTENCE_FAILED = "analysis_persistence_failed"
 WARNING_OSINT_NOT_CONFIGURED = "osint_not_configured"
 WARNING_OSINT_FAILED = "osint_failed"
 WARNING_YARA_FAILED = "yara_failed"
+WARNING_LLM_NOT_CONFIGURED = "llm_not_configured"
+WARNING_LLM_FAILED = "llm_failed"
 
 
 def _load_osint_keys() -> dict[str, str]:
@@ -93,6 +97,25 @@ def _sha256_file(path: str) -> str:
     return h.hexdigest()
 
 
+def _update_manual_stage(repo: CaseRepository, job_id: str, stage: str, *, completed: bool = False) -> None:
+    """Publish progress for worker-owned stages that run after ``run_pipeline``."""
+    job = repo.get_job(job_id)
+    if job is None:
+        return
+    done = job.progress_done + (1 if completed else 0)
+    repo.update_job_progress(job_id, stage, min(done, job.progress_total), job.progress_total)
+
+
+def _json_safe_records(value: Any) -> list[dict]:
+    """Convert a bounded table-like value to JSON-safe records."""
+    if isinstance(value, pd.DataFrame):
+        # ``to_json`` normalizes pandas/numpy scalars, timestamps, and NaN.
+        return json.loads(value.to_json(orient="records", date_format="iso"))
+    if isinstance(value, list):
+        return json.loads(json.dumps(value, default=str))
+    return []
+
+
 def _run_yara_stage(result: PipelineResult, opts: dict, job_id: str, repo: CaseRepository) -> dict | None:
     """Stage 8: YARA over carved files (mirrors app/main.py); returns results, or None when skipped or failed.
 
@@ -100,6 +123,7 @@ def _run_yara_stage(result: PipelineResult, opts: dict, job_id: str, repo: CaseR
     """
     yara_results = None
     if opts.get("do_yara", True) and result.carved_items:
+        _update_manual_stage(repo, job_id, "YARA Scanning")
         try:
             from app.pipeline.yara_scan import scan_carved_files
 
@@ -115,7 +139,7 @@ def _run_yara_stage(result: PipelineResult, opts: dict, job_id: str, repo: CaseR
         except Exception:
             logger.exception("Job %s: yara stage failed", job_id)
             result.warnings.append(WARNING_YARA_FAILED)
-        repo.touch_job_heartbeat(job_id)
+        _update_manual_stage(repo, job_id, "YARA Scanning", completed=True)
     return yara_results
 
 
@@ -126,6 +150,7 @@ def _run_osint_stage(result: PipelineResult, opts: dict, job_id: str, repo: Case
     """
     osint_data: dict = {}
     if opts.get("osint_enabled", True):
+        _update_manual_stage(repo, job_id, "OSINT enrichment")
         keys = _load_osint_keys()
         if not keys:
             result.warnings.append(WARNING_OSINT_NOT_CONFIGURED)
@@ -149,8 +174,106 @@ def _run_osint_stage(result: PipelineResult, opts: dict, job_id: str, repo: Case
             except Exception:
                 logger.exception("Job %s: osint stage failed", job_id)
                 result.warnings.append(WARNING_OSINT_FAILED)
-        repo.touch_job_heartbeat(job_id)
+        _update_manual_stage(repo, job_id, "OSINT enrichment", completed=True)
     return osint_data
+
+
+def _load_llm_settings() -> tuple[str, str, str, str, str]:
+    """Load the active provider settings without putting credentials in a job row."""
+    from app.llm import providers as llm_providers
+
+    saved: dict = {}
+    try:
+        from app.utils.config_manager import get_config_manager
+
+        saved = get_config_manager().load() or {}
+    except Exception:
+        logger.info("ConfigManager unavailable; falling back to LLM env settings")
+
+    provider = saved.get("cfg_llm_provider") or os.getenv("LLM_PROVIDER", C.LLM_PROVIDER_DEFAULT)
+    if provider not in llm_providers.PROVIDERS:
+        provider = C.LLM_PROVIDER_DEFAULT
+
+    if provider == llm_providers.PROVIDER_OPENAI:
+        base_url = saved.get("cfg_openai_base_url") or os.getenv("OPENAI_BASE_URL", "")
+        api_key = saved.get("cfg_openai_cloud_key") or os.getenv("OPENAI_API_KEY", "")
+        model = saved.get("cfg_openai_model") or os.getenv("OPENAI_MODEL", C.OPENAI_MODEL_DEFAULT)
+    elif provider == llm_providers.PROVIDER_ANTHROPIC:
+        base_url = ""
+        api_key = saved.get("cfg_anthropic_key") or os.getenv("ANTHROPIC_API_KEY", "")
+        model = saved.get("cfg_anthropic_model") or os.getenv("ANTHROPIC_MODEL", C.ANTHROPIC_MODEL_DEFAULT)
+    else:
+        base_url = saved.get("cfg_llm_endpoint") or os.getenv("LMSTUDIO_BASE_URL", C.LM_BASE_URL)
+        api_key = saved.get("cfg_openai_key") or os.getenv("LMSTUDIO_API_KEY", C.LM_API_KEY)
+        model = saved.get("cfg_llm_model") or os.getenv("LMSTUDIO_MODEL", C.LM_MODEL)
+
+    language = saved.get("cfg_llm_language") or os.getenv("LMSTUDIO_LANGUAGE", C.LM_LANGUAGE)
+    return provider, base_url, api_key, model, language
+
+
+def _run_llm_stage(
+    result: PipelineResult,
+    opts: dict,
+    job_id: str,
+    repo: CaseRepository,
+    osint_data: dict,
+    yara_results: dict | None,
+) -> None:
+    """Stage 10: generate the narrative in the worker so browser stops cannot discard it."""
+    # API submissions historically did not run an LLM stage; keep that contract
+    # unless the caller explicitly opts in (the Streamlit durable-run path does).
+    if not opts.get("llm_enabled", False):
+        return
+
+    from app.llm import providers as llm_providers
+
+    _update_manual_stage(repo, job_id, "LLM report")
+    provider, base_url, api_key, model, language = _load_llm_settings()
+    if provider in (llm_providers.PROVIDER_OPENAI, llm_providers.PROVIDER_ANTHROPIC) and not api_key:
+        result.warnings.append(WARNING_LLM_NOT_CONFIGURED)
+        _update_manual_stage(repo, job_id, "LLM report", completed=True)
+        return
+    if not model or (provider == llm_providers.PROVIDER_LMSTUDIO and not base_url):
+        result.warnings.append(WARNING_LLM_NOT_CONFIGURED)
+        _update_manual_stage(repo, job_id, "LLM report", completed=True)
+        return
+
+    context = {
+        "features": result.features,
+        "osint": osint_data,
+        "zeek": {name: _json_safe_records(table) for name, table in result.zeek_tables.items()},
+        "beaconing": result.beacon_df_records,
+        "carved": result.carved_items,
+        "packet_count": result.packet_count,
+        "dns_analysis": result.dns_analysis,
+        "tls_analysis": result.tls_analysis,
+        "yara_results": yara_results,
+        "attack_mapping": result.attack_mapping,
+        "capture_metrics": result.capture_metrics,
+        "config": {
+            "limit_packets": opts.get("pyshark_packet_limit"),
+            "do_pyshark": opts.get("do_pyshark", True),
+            "do_zeek": opts.get("do_zeek", True),
+            "do_carve": opts.get("do_carve", True),
+            "pre_count": opts.get("pre_count", True),
+            "osint_top_n": opts.get("osint_top_n", C.OSINT_TOP_IPS_DEFAULT),
+        },
+    }
+    try:
+        result.summary_narrative = llm_providers.synthesize_report(
+            provider,
+            base_url=base_url,
+            api_key=api_key,
+            model=model,
+            context=context,
+            language=language,
+        )
+        if result.summary_narrative:
+            result.stages_run.append("llm")
+    except Exception:
+        logger.exception("Job %s: LLM stage failed", job_id)
+        result.warnings.append(WARNING_LLM_FAILED)
+    _update_manual_stage(repo, job_id, "LLM report", completed=True)
 
 
 def _persist_analysis(
@@ -201,11 +324,26 @@ def _persist_analysis(
             packet_count=result.packet_count,
             features=result.features,
             osint=osint_data or {},
+            report=result.summary_narrative or "",
             yara_results=yara_results,
             dns_analysis=result.dns_analysis or None,
             tls_analysis=result.tls_analysis or None,
             attack_mapping=result.attack_mapping,
             capture_metrics=result.capture_metrics,
+            session_artifacts={
+                "zeek_tables": {name: _json_safe_records(table) for name, table in (result.zeek_tables or {}).items()},
+                "zeek_log_paths": dict(result.zeek_log_paths or {}),
+                "carved": list(result.carved_items or []),
+                "beacon_records": list(result.beacon_df_records or []),
+                "pipeline_warnings": list(result.warnings),
+                "pipeline_stages": list(result.stages_run),
+                "duration_seconds": result.duration_seconds,
+                "rdns_map": {
+                    ip: data["ptr"]
+                    for ip, data in (osint_data or {}).get("ips", {}).items()
+                    if isinstance(data, dict) and data.get("ptr")
+                },
+            },
         )
         if result.beacon_df_records:
             analysis.features["beacon_records"] = result.beacon_df_records
@@ -214,6 +352,46 @@ def _persist_analysis(
     except Exception:
         logger.exception("Job %s: analysis persistence failed", job.id)
         result.warnings.append(WARNING_PERSISTENCE_FAILED)
+
+
+def _run_llm_report_job(job: Job, options_dict: dict, repo: CaseRepository) -> None:
+    """Regenerate only a persisted analysis report without rerunning packet stages."""
+    from app.pipeline.runner import PipelineResult
+
+    analysis_id = options_dict.get("_analysis_id")
+    analysis = repo.get_analysis(analysis_id) if analysis_id else None
+    if analysis is None:
+        raise RuntimeError("The persisted analysis for this report job could not be found.")
+
+    artifacts = analysis.session_artifacts or {}
+    result = PipelineResult(
+        case_id=analysis.case_id,
+        analysis_id=analysis.id,
+        packet_count=analysis.packet_count,
+        stages_run=list(artifacts.get("pipeline_stages") or []),
+        warnings=list(artifacts.get("pipeline_warnings") or []),
+        dns_analysis=analysis.dns_analysis or {},
+        tls_analysis=analysis.tls_analysis or {},
+        beacon_df_records=list(artifacts.get("beacon_records") or []),
+        features=analysis.features or {},
+        zeek_tables={
+            name: pd.DataFrame.from_records(records)
+            for name, records in (artifacts.get("zeek_tables") or {}).items()
+            if isinstance(records, list)
+        },
+        zeek_log_paths=dict(artifacts.get("zeek_log_paths") or {}),
+        carved_items=list(artifacts.get("carved") or []),
+        attack_mapping=analysis.attack_mapping,
+        capture_metrics=analysis.capture_metrics,
+    )
+    _run_llm_stage(result, options_dict, job.id, repo, analysis.osint or {}, analysis.yara_results)
+    if result.summary_narrative:
+        analysis.report = result.summary_narrative
+    artifacts["pipeline_stages"] = list(result.stages_run)
+    artifacts["pipeline_warnings"] = list(result.warnings)
+    analysis.session_artifacts = artifacts
+    repo.save_analysis(analysis)
+    repo.complete_job(job.id, json.dumps(result.to_dict()).encode("utf-8"))
 
 
 def _worker_run(job_id: str, db_path: str, pcap_path: str, options_dict: dict) -> None:
@@ -259,6 +437,10 @@ def _worker_run(job_id: str, db_path: str, pcap_path: str, options_dict: dict) -
     options = PipelineOptions(**{k: v for k, v in options_dict.items() if k in PipelineOptions.__dataclass_fields__})
 
     try:
+        if options_dict.get("_job_type") == "llm_report":
+            _run_llm_report_job(job, options_dict, repo)
+            return
+
         result = run_pipeline(
             pcap_path=pcap_path,
             case_id=job.case_id,
@@ -270,6 +452,7 @@ def _worker_run(job_id: str, db_path: str, pcap_path: str, options_dict: dict) -
         opts = options_dict  # raw dict: includes keys PipelineOptions doesn't model (e.g. do_yara)
         yara_results = _run_yara_stage(result, opts, job_id, repo)
         osint_data = _run_osint_stage(result, opts, job_id, repo)
+        _run_llm_stage(result, opts, job_id, repo, osint_data, yara_results)
 
         _persist_analysis(result, job, pcap_path, osint_data, yara_results, repo)
 

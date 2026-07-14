@@ -171,12 +171,14 @@ class TestAnalysis:
             pcap_path="/tmp/test.pcap",
             attack_mapping={"attack_version": "19.1", "techniques": [{"technique_id": "T1571"}]},
             capture_metrics={"flow_count": 4, "visibility_gaps": ["zeek"]},
+            session_artifacts={"pipeline_stages": ["zeek"], "carved": [{"sha256": "abc"}]},
         )
         payload = analysis.to_dict()
         restored = Analysis.from_dict(payload)
 
         assert restored.attack_mapping["attack_version"] == "19.1"
         assert restored.capture_metrics["flow_count"] == 4
+        assert restored.session_artifacts["pipeline_stages"] == ["zeek"]
 
         repo = CaseRepository(db_path=str(tmp_path / "cases.db"))
         analysis_id = repo.save_analysis(analysis)
@@ -185,6 +187,7 @@ class TestAnalysis:
         assert persisted is not None
         assert persisted.attack_mapping["techniques"][0]["technique_id"] == "T1571"
         assert persisted.capture_metrics["visibility_gaps"] == ["zeek"]
+        assert persisted.session_artifacts["carved"] == [{"sha256": "abc"}]
 
     def test_from_dict(self):
         data = {

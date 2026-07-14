@@ -78,6 +78,11 @@ Open the **Upload** tab.
 
 Click **Extract & Analyze** to start.
 
+The run is immediately queued as an autosaved Case. Analysis continues in a
+separate worker process if you press Streamlit's upper-right **Stop** control or
+reload the browser. Reopening the app within seven days reattaches the most
+recent UI job; completed evidence can always be reopened from **Cases**.
+
 ---
 
 ## The Analysis Pipeline & Progress Tab
@@ -97,13 +102,14 @@ PCAP Hunter runs a 10-stage pipeline:
 | 9 | OSINT Enrichment | Multi-provider reputation lookups |
 | 10 | LLM Report Generation | AI threat synthesis |
 
-**Execution shape:** stages 2–3 (PyShark, Zeek) run **in parallel**; once both finish, stages 4–7 (DNS, TLS, beaconing, carving) fan out **concurrently**. The Progress tab shows this live:
+**Execution shape:** stages 2–3 (PyShark, Zeek) run **in parallel**; once both finish, stages 4–7 (DNS, TLS, beaconing, carving) fan out **concurrently**. The Progress tab monitors the durable job:
 
-- Each phase has its own progress bar and a **caption** describing what is currently happening.
-- Every phase has a **Skip** button — long Zeek run on a huge capture? Skip it and the pipeline continues. Panels that depended on the skipped stage will say so explicitly (see [Dashboard](#dashboard) empty states) instead of rendering blank.
-- The final phase, **LLM Report Analysis**, generates the AI report; its progress is tracked like any other stage.
+- The overall progress bar and per-file rows identify the active stage and job status.
+- Streamlit's upper-right **Stop** control pauses only the page display; it does not cancel the worker or erase completed stages.
+- Pipeline components can be enabled or disabled in **Config** before submission, and LLM report generation has its own checkbox on **Upload**.
+- The final phase, **LLM Report Analysis**, runs in the worker and its report is persisted with the analysis.
 
-You can switch to the Dashboard as soon as the pipeline finishes; partial results appear per-stage.
+When the pipeline finishes, the saved results are restored into Dashboard, MITRE Analysis, LLM Analysis, OSINT, and Raw Data.
 
 ---
 

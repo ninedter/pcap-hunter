@@ -23,7 +23,7 @@ from app.api.queue import (
     cancel_queued_job,
     recover_stale_running_jobs,
 )
-from app.database.models import Case, CaseStatus, Job, JobStatus, Severity
+from app.database.models import Analysis, Case, CaseStatus, Job, JobStatus, Severity
 from app.database.repository import CaseRepository
 
 
@@ -287,6 +287,93 @@ def test_worker_beacon_records_round_trip(tmp_path, monkeypatch):
     assert result["capture_metrics"]["detectors"]["zeek"] == "available"
     persisted = repo.get_analysis(result["analysis_id"])
     assert persisted.features["beacon_records"] == records
+    assert persisted.session_artifacts["beacon_records"] == records
+    assert persisted.session_artifacts["zeek_tables"] == {"conn": [{"uid": "x"}]}
+
+
+def test_worker_llm_opt_in_persists_report(tmp_path, monkeypatch):
+    """Streamlit background jobs keep the LLM result outside Session State."""
+    import app.llm.providers as provider_mod
+    import app.pipeline.runner as runner_mod
+    from app.pipeline.runner import PipelineResult
+
+    def fake_run_pipeline(pcap_path, case_id, options, progress, heartbeat=None):
+        return PipelineResult(
+            case_id=case_id,
+            packet_count=1,
+            features={
+                "flows": [],
+                "artifacts": {"ips": [], "domains": [], "urls": [], "hashes": [], "ja3": []},
+            },
+        )
+
+    monkeypatch.setattr(runner_mod, "run_pipeline", fake_run_pipeline)
+    monkeypatch.setattr(
+        queue_mod,
+        "_load_llm_settings",
+        lambda: ("lmstudio", "http://localhost:1234/v1", "", "test-model", "US English"),
+    )
+    monkeypatch.setattr(provider_mod, "synthesize_report", lambda *args, **kwargs: "# Durable report")
+
+    fake_pcap = tmp_path / "fake.pcap"
+    fake_pcap.write_bytes(b"\xd4\xc3\xb2\xa1" + b"\x00" * 20)
+    db = str(tmp_path / "t.db")
+    repo = CaseRepository(db_path=db)
+    repo.create_case(Case(id="cafe0007", title="t", status=CaseStatus.IN_PROGRESS, severity=Severity.LOW))
+    job_id = repo.create_job(Job(case_id="cafe0007", pcap_path=str(fake_pcap), options_json="{}"))
+
+    _worker_run(
+        job_id,
+        db,
+        str(fake_pcap),
+        {"osint_enabled": False, "llm_enabled": True, "do_yara": False},
+    )
+
+    result = json.loads(repo.get_job(job_id).result_json)
+    persisted = repo.get_analysis(result["analysis_id"])
+    assert result["summary_narrative"] == "# Durable report"
+    assert persisted.report == "# Durable report"
+    assert "llm" in persisted.session_artifacts["pipeline_stages"]
+
+
+def test_report_only_job_updates_existing_analysis(tmp_path, monkeypatch):
+    import app.llm.providers as provider_mod
+
+    monkeypatch.setattr(
+        queue_mod,
+        "_load_llm_settings",
+        lambda: ("lmstudio", "http://localhost:1234/v1", "", "test-model", "US English"),
+    )
+    monkeypatch.setattr(provider_mod, "synthesize_report", lambda *args, **kwargs: "# Updated report")
+
+    fake_pcap = tmp_path / "fake.pcap"
+    fake_pcap.write_bytes(b"\xd4\xc3\xb2\xa1" + b"\x00" * 20)
+    db = str(tmp_path / "t.db")
+    repo = CaseRepository(db_path=db)
+    case_id = repo.create_case(Case(title="report-only", status=CaseStatus.IN_PROGRESS))
+    analysis = Analysis(
+        case_id=case_id,
+        pcap_path=str(fake_pcap),
+        features={"flows": [], "artifacts": {"ips": []}},
+        report="# Old report",
+        session_artifacts={"pipeline_stages": ["pyshark_pass"]},
+    )
+    analysis_id = repo.save_analysis(analysis)
+    options = {
+        "_job_type": "llm_report",
+        "_analysis_id": analysis_id,
+        "llm_enabled": True,
+    }
+    job_id = repo.create_job(Job(case_id=case_id, pcap_path=str(fake_pcap), options_json=json.dumps(options)))
+
+    _worker_run(job_id, db, str(fake_pcap), options)
+
+    result = json.loads(repo.get_job(job_id).result_json)
+    persisted = repo.get_analysis(analysis_id)
+    assert result["analysis_id"] == analysis_id
+    assert persisted.report == "# Updated report"
+    assert persisted.features == {"flows": [], "artifacts": {"ips": []}}
+    assert repo.get_case(case_id).analysis_count == 1
 
 
 # ---------------------------------------------------------------------------

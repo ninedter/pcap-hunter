@@ -120,3 +120,17 @@ def test_count_active_jobs(tmp_path):
         conn.close()
     repo.update_job_status(row["id"], JobStatus.DONE)
     assert repo.count_active_jobs() == 1
+
+
+def test_list_jobs_filters_by_case_and_status(tmp_path):
+    repo = _setup_repo(tmp_path)
+    case_a = repo.create_case(Case(title="A"))
+    case_b = repo.create_case(Case(title="B"))
+    queued_a = repo.create_job(Job(case_id=case_a, pcap_path="/tmp/a.pcap"))
+    done_a = repo.create_job(Job(case_id=case_a, pcap_path="/tmp/b.pcap"))
+    repo.create_job(Job(case_id=case_b, pcap_path="/tmp/c.pcap"))
+    repo.update_job_status(done_a, JobStatus.DONE)
+
+    jobs = repo.list_jobs(case_id=case_a, statuses=[JobStatus.QUEUED])
+
+    assert [job.id for job in jobs] == [queued_a]

@@ -52,3 +52,13 @@ def test_jobs_table_columns(tmp_path):
         "result_json",
     }
     assert expected.issubset(cols), f"Missing columns: {expected - cols}"
+
+
+def test_analyses_has_session_artifacts_column(tmp_path):
+    repo = CaseRepository(db_path=str(tmp_path / "test.db"))
+    conn = repo._get_conn()
+    try:
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(analyses)").fetchall()}
+    finally:
+        conn.close()
+    assert "session_artifacts_json" in cols

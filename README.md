@@ -19,6 +19,7 @@ By combining industry-standard network analysis tools (**Zeek**, **Tshark**, **P
 
 - **Dedicated MITRE ATT&CK workspace** — evidence-backed technique hypotheses, ATT&CK v19.1 metadata, analyst dispositions, capture coverage, visibility gaps, and Navigator export.
 - **Capture-quality telemetry** — packet/flow scale, parse ratio, time window, sampling limits, completed stages, and warnings now travel with UI and API results and persist with cases.
+- **Durable UI analysis** — Streamlit now submits PCAP work to a process-backed queue, autosaves full evidence to SQLite, and restores recent jobs after a page stop or browser reload.
 - **Safer PCAP intake** — Streamlit uploads are streamed in bounded chunks, preserve `.pcap`/`.pcapng`, validate magic bytes, enforce batch limits, and remove partial files after rejection.
 - **Stronger Integrations API** — headless jobs return ATT&CK mappings and capture metrics, IOC feeds carry related technique IDs, readiness checks avoid starting the worker queue, and failed submissions clean up provisional cases and files.
 - **Evidence without an LLM** — skipping or losing the optional AI narrative no longer hides deterministic packet, IOC, correlation, stage, and warning evidence.
@@ -59,9 +60,10 @@ panel walks first-time users through the workflow.
 
 ### 2. Progress — transparent 10-stage pipeline
 
-Every stage reports live progress with a skippable per-stage control. PyShark and
-Zeek run in parallel, then DNS, TLS, beaconing, and carving fan out concurrently —
-you always know what's running and how far it has to go.
+Every stage reports durable job progress. PyShark and Zeek run in parallel, then
+DNS, TLS, beaconing, and carving fan out concurrently. The work runs outside the
+Streamlit page thread, so the upper-right Stop control or a browser reload does
+not discard the job; completed evidence is autosaved to Cases and restored.
 
 ![Progress tab](docs/images/02-progress.png)
 
@@ -470,7 +472,7 @@ Open `http://localhost:8501` in your browser.
 1. **Upload** — Drag and drop one or more `.pcap` files in the Upload tab. Multiple files trigger batch mode with cross-file correlation.
 2. **Configure** — Pick an LLM provider (LM Studio / OpenAI / Anthropic), set your home location (Continent > Country > City), OSINT API keys, and optionally a YARA rules directory in the Config tab.
 3. **Analyze** — Click **Extract & Analyze** to start the pipeline.
-4. **Monitor** — Watch the Progress tab as stages execute: Packet Counting > Parsing + Zeek (parallel) > DNS / TLS / Beaconing / Carving (concurrent) > YARA > OSINT > LLM Report.
+4. **Monitor** — Watch the Progress tab as stages execute in a durable background process: Packet Counting > Parsing + Zeek (parallel) > DNS / TLS / Beaconing / Carving (concurrent) > YARA > OSINT > LLM Report. Stopping or reloading the Streamlit page does not discard the job.
 5. **Review** — Explore results across Dashboard, MITRE Analysis, LLM Analysis, OSINT, Raw Data, and Cases tabs.
 6. **Export** — Download CSV/JSON data, PDF reports, STIX bundles, ATT&CK Navigator layers, or CEF syslog events.
 
@@ -575,8 +577,6 @@ PCAP Hunter uses **production-shape test data**, not simplified inputs. See `tes
 - **[Integrations API Reference](docs/API.md)** — REST endpoints, authentication, configuration
 - **[API Integration Guides](docs/api/README.md)** — SIEM / SOAR integration recipes
 - **[中文說明 (Traditional Chinese README)](docs/zh-TW/README.md)** — 繁體中文版
-- **[CLAUDE.md](CLAUDE.md)** — contributor/AI guide: conventions, testing discipline, known bug patterns
-- **[docs/FEATURE-ROADMAP.md](docs/FEATURE-ROADMAP.md)** — planned work
 
 ---
 

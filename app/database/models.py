@@ -158,6 +158,11 @@ class Analysis:
     tls_analysis: dict | None = None
     attack_mapping: dict | None = None
     capture_metrics: dict | None = None
+    # UI-only evidence that is expensive to regenerate (bounded Zeek tables,
+    # carved-file metadata, beacon rows, stage warnings, and run log paths).
+    # Keeping it separate from ``features`` avoids leaking persistence details
+    # into the analysis/scoring contracts.
+    session_artifacts: dict | None = None
     iocs: list[IOC] = field(default_factory=list)
 
     def to_dict(self) -> dict:
@@ -176,6 +181,7 @@ class Analysis:
             "tls_analysis": self.tls_analysis,
             "attack_mapping": self.attack_mapping,
             "capture_metrics": self.capture_metrics,
+            "session_artifacts": self.session_artifacts,
             "iocs": [ioc.to_dict() for ioc in self.iocs],
         }
 
@@ -202,6 +208,7 @@ class Analysis:
             tls_analysis=data.get("tls_analysis"),
             attack_mapping=data.get("attack_mapping"),
             capture_metrics=data.get("capture_metrics"),
+            session_artifacts=data.get("session_artifacts"),
             iocs=iocs,
         )
 

@@ -2,14 +2,19 @@
 
 from __future__ import annotations
 
+import json
 from datetime import datetime
 
 import pandas as pd
 import streamlit as st
 
 from app.analysis.flow_aggregates import compute_flow_aggregates
+from app.analysis.visibility import build_capture_metrics
 from app.database import Analysis, Case, CaseRepository, CaseStatus, IOCType, Severity
+from app.pipeline.batch import BatchProcessor, PCAPResult
 from app.ui.colors import severity_color
+from app.ui.mitre_page import build_attack_mapping
+from app.utils.common import uniq_sorted
 from app.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -73,30 +78,227 @@ def _restore_analysis_to_session(analysis: Analysis) -> None:
     # the new column are handled by the dedicated page's lazy recomputation.
     st.session_state["attack_mapping"] = analysis.attack_mapping
     st.session_state["capture_metrics"] = analysis.capture_metrics
-    st.session_state["pipeline_warnings"] = []
-    st.session_state["pipeline_stages"] = []
+    session_artifacts = analysis.session_artifacts or {}
+    st.session_state["pipeline_warnings"] = list(session_artifacts.get("pipeline_warnings") or [])
+    st.session_state["pipeline_stages"] = list(session_artifacts.get("pipeline_stages") or [])
     st.session_state["yara_results"] = analysis.yara_results
     # Model default for report is "" but the app's no-report sentinel is None.
     st.session_state["report"] = analysis.report or None
     st.session_state["llm_status"] = "generated" if analysis.report else None
-    # Everything below isn't persisted on Analysis — reset it all, otherwise the
-    # dashboard mixes this case's data with leftovers from the previous live run.
-    st.session_state["beacon_df"] = pd.DataFrame()
+    # New durable background analyses persist the bounded UI evidence below.
+    # Legacy cases have no session_artifacts column value and still take the
+    # safe empty-state path instead of mixing in data from a previous capture.
+    beacon_records = session_artifacts.get("beacon_records") or features.get("beacon_records") or []
+    st.session_state["beacon_df"] = pd.DataFrame.from_records(beacon_records)
     st.session_state["ja3_df"] = pd.DataFrame()
     st.session_state["ja3_analysis"] = {}
-    st.session_state["zeek_tables"] = {}
-    st.session_state["carved"] = []
+    st.session_state["zeek_tables"] = {
+        name: pd.DataFrame.from_records(records)
+        for name, records in (session_artifacts.get("zeek_tables") or {}).items()
+        if isinstance(records, list)
+    }
+    st.session_state["carved"] = list(session_artifacts.get("carved") or [])
     # None (not []) so empty-state rendering says "not available — re-run", rather
     # than a false "ran clean" for results that simply weren't persisted.
     st.session_state["correlations"] = None
     st.session_state["flow_asymmetry"] = None
     st.session_state["port_anomalies"] = None
-    st.session_state["rdns_map"] = {}
+    st.session_state["rdns_map"] = dict(session_artifacts.get("rdns_map") or {})
+    st.session_state["__pcap_path"] = analysis.pcap_path
+    st.session_state["__pcap_paths"] = [analysis.pcap_path] if analysis.pcap_path else []
+    st.session_state["__batch_mode"] = False
+    st.session_state["__batch_result"] = None
     st.session_state["filter_ips"] = set()
     st.session_state["filter_protos"] = set()
     st.session_state["filter_time"] = None
     st.session_state["restored_analysis_id"] = analysis.id
+    st.session_state["restored_analysis_ids"] = [analysis.id]
+    if session_artifacts:
+        _restore_expensive_derived_state([analysis])
     logger.info("Restored analysis %s into session state", analysis.id)
+
+
+def _analysis_to_pcap_result(analysis: Analysis) -> PCAPResult:
+    """Convert a persisted analysis back to the production-shape batch result."""
+    artifacts = analysis.session_artifacts or {}
+    zeek_tables = {
+        name: pd.DataFrame.from_records(records)
+        for name, records in (artifacts.get("zeek_tables") or {}).items()
+        if isinstance(records, list)
+    }
+    beacon_records = artifacts.get("beacon_records") or (analysis.features or {}).get("beacon_records") or []
+    return PCAPResult(
+        path=analysis.pcap_path,
+        filename=analysis.pcap_path.rsplit("/", 1)[-1] or analysis.id,
+        features=analysis.features or {},
+        zeek_tables=zeek_tables,
+        zeek_log_paths=dict(artifacts.get("zeek_log_paths") or {}),
+        rdns_map=dict(artifacts.get("rdns_map") or {}),
+        carved_items=list(artifacts.get("carved") or []),
+        osint=analysis.osint or {},
+        beacon_df=pd.DataFrame.from_records(beacon_records),
+        dns_analysis=analysis.dns_analysis or {},
+        tls_analysis=analysis.tls_analysis or {},
+        packet_count=analysis.packet_count,
+        duration_seconds=float(artifacts.get("duration_seconds") or 0),
+        stages_run=list(artifacts.get("pipeline_stages") or []),
+        warnings=list(artifacts.get("pipeline_warnings") or []),
+    )
+
+
+def _merge_yara_results(analyses: list[Analysis]) -> dict | None:
+    per_file = []
+    matches = []
+    for analysis in analyses:
+        if not analysis.yara_results:
+            continue
+        per_file.append({"pcap_path": analysis.pcap_path, "result": analysis.yara_results})
+        if isinstance(analysis.yara_results, dict):
+            matches.extend(analysis.yara_results.get("matches") or [])
+    if not per_file:
+        return None
+    return {"matches": matches, "per_file": per_file}
+
+
+def _current_session_artifacts() -> dict:
+    """Capture the bounded evidence needed to reopen the current UI result."""
+    zeek_tables = {}
+    for name, table in (st.session_state.get("zeek_tables") or {}).items():
+        if isinstance(table, pd.DataFrame):
+            zeek_tables[name] = json.loads(table.to_json(orient="records", date_format="iso"))
+    beacon_df = st.session_state.get("beacon_df")
+    beacon_records = (
+        json.loads(beacon_df.to_json(orient="records", date_format="iso"))
+        if isinstance(beacon_df, pd.DataFrame)
+        else []
+    )
+    return {
+        "zeek_tables": zeek_tables,
+        "zeek_log_paths": dict(st.session_state.get("zeek_log_paths") or {}),
+        "carved": list(st.session_state.get("carved") or []),
+        "beacon_records": beacon_records,
+        "pipeline_warnings": list(st.session_state.get("pipeline_warnings") or []),
+        "pipeline_stages": list(st.session_state.get("pipeline_stages") or []),
+        "rdns_map": dict(st.session_state.get("rdns_map") or {}),
+    }
+
+
+def _restore_expensive_derived_state(analyses: list[Analysis]) -> None:
+    """Rebuild inexpensive cross-links after durable evidence is restored."""
+    features = st.session_state.get("features") or {}
+    beacon_df = st.session_state.get("beacon_df")
+    try:
+        from app.analysis.correlation import correlate_indicators
+        from app.analysis.flow_analysis import detect_flow_asymmetry, detect_port_anomalies
+
+        st.session_state["correlations"] = correlate_indicators(
+            features=features,
+            osint=st.session_state.get("osint") or {},
+            beacon_df=beacon_df if isinstance(beacon_df, pd.DataFrame) else pd.DataFrame(),
+            dns_analysis=st.session_state.get("dns_analysis"),
+            tls_analysis=st.session_state.get("tls_analysis"),
+            yara_results=st.session_state.get("yara_results"),
+        )
+        flows = features.get("flows") or []
+        if flows:
+            st.session_state["flow_asymmetry"] = detect_flow_asymmetry(flows)
+            st.session_state["port_anomalies"] = detect_port_anomalies(flows)
+    except Exception as exc:
+        logger.warning("Could not rebuild restored correlations: %s", exc)
+
+    log_paths = [
+        dict((analysis.session_artifacts or {}).get("zeek_log_paths") or {})
+        for analysis in analyses
+        if (analysis.session_artifacts or {}).get("zeek_log_paths")
+    ]
+    try:
+        if len(log_paths) > 1:
+            from app.pipeline.ja3 import extract_ja3_from_multiple_runs
+
+            ja3_df, ja3_analysis = extract_ja3_from_multiple_runs(log_paths)
+        elif log_paths:
+            from app.pipeline.zeek import extract_ja3_from_zeek_tables
+
+            ja3_df, ja3_analysis = extract_ja3_from_zeek_tables(log_paths[0])
+        else:
+            ja3_df, ja3_analysis = pd.DataFrame(), {}
+        st.session_state["ja3_df"] = ja3_df
+        st.session_state["ja3_analysis"] = ja3_analysis
+    except Exception as exc:
+        logger.warning("Could not rebuild restored JA3 state: %s", exc)
+
+
+def restore_analyses_to_session(analyses: list[Analysis]) -> None:
+    """Restore one or more completed background analyses into the workbench."""
+    analyses = [analysis for analysis in analyses if analysis is not None]
+    if not analyses:
+        raise ValueError("No persisted analyses were available to restore.")
+    if len(analyses) == 1:
+        _restore_analysis_to_session(analyses[0])
+        return
+
+    processor = BatchProcessor([])
+    for analysis in analyses:
+        processor.add_result(_analysis_to_pcap_result(analysis))
+    batch_result = processor.merge_all()
+
+    artifact_values: dict[str, set] = {}
+    all_flows: list[dict] = []
+    for result in batch_result.pcap_results:
+        all_flows.extend((result.features or {}).get("flows") or [])
+        for key, values in ((result.features or {}).get("artifacts") or {}).items():
+            if isinstance(values, list):
+                artifact_values.setdefault(key, set()).update(values)
+
+    st.session_state["features"] = {
+        "flows": all_flows,
+        "artifacts": {key: uniq_sorted(values) for key, values in artifact_values.items()},
+    }
+    st.session_state["dash_aggregates"] = compute_flow_aggregates(all_flows, top_n=10, weight="flows")
+    st.session_state["zeek_tables"] = batch_result.merged_zeek
+    st.session_state["osint"] = batch_result.merged_osint
+    st.session_state["beacon_df"] = batch_result.merged_beacons
+    st.session_state["dns_analysis"] = batch_result.aggregated_dns
+    st.session_state["tls_analysis"] = batch_result.aggregated_tls
+    st.session_state["yara_results"] = _merge_yara_results(analyses)
+    st.session_state["carved"] = [item for result in batch_result.pcap_results for item in result.carved_items]
+    st.session_state["__total_pkts"] = batch_result.correlation.total_packets
+    st.session_state["pipeline_warnings"] = sorted(
+        {warning for result in batch_result.pcap_results for warning in result.warnings}
+    )
+    st.session_state["pipeline_stages"] = sorted(
+        {stage for result in batch_result.pcap_results for stage in result.stages_run}
+    )
+    st.session_state["rdns_map"] = {
+        ip: hostname for result in batch_result.pcap_results for ip, hostname in result.rdns_map.items()
+    }
+    reports = [
+        f"# {result.filename}\n\n{analysis.report}"
+        for result, analysis in zip(batch_result.pcap_results, analyses)
+        if analysis.report
+    ]
+    st.session_state["report"] = "\n\n---\n\n".join(reports) or None
+    st.session_state["llm_status"] = "generated" if reports else None
+    st.session_state["__pcap_path"] = analyses[0].pcap_path
+    st.session_state["__pcap_paths"] = [analysis.pcap_path for analysis in analyses]
+    st.session_state["__batch_mode"] = True
+    st.session_state["__batch_result"] = batch_result
+    st.session_state["filter_ips"] = set()
+    st.session_state["filter_protos"] = set()
+    st.session_state["filter_time"] = None
+
+    _restore_expensive_derived_state(analyses)
+    try:
+        st.session_state["attack_mapping"] = build_attack_mapping(st.session_state)
+        st.session_state["capture_metrics"] = build_capture_metrics(st.session_state)
+    except Exception as exc:
+        logger.warning("Could not rebuild restored ATT&CK state: %s", exc)
+        st.session_state["attack_mapping"] = None
+        st.session_state["capture_metrics"] = build_capture_metrics(st.session_state)
+    st.session_state["restored_analysis_id"] = max(
+        analyses, key=lambda analysis: analysis.analyzed_at or datetime.min
+    ).id
+    st.session_state["restored_analysis_ids"] = [analysis.id for analysis in analyses]
 
 
 def render_cases_tab():
@@ -617,6 +819,7 @@ def _quick_save_analysis():
         tls_analysis=st.session_state.get("tls_analysis"),
         attack_mapping=attack_mapping,
         capture_metrics=st.session_state.get("capture_metrics"),
+        session_artifacts=_current_session_artifacts(),
     )
 
     # Extract IOCs
@@ -655,6 +858,7 @@ def _add_current_analysis_to_case(case: Case):
         tls_analysis=st.session_state.get("tls_analysis"),
         attack_mapping=attack_mapping,
         capture_metrics=st.session_state.get("capture_metrics"),
+        session_artifacts=_current_session_artifacts(),
     )
 
     analysis.iocs = repo.extract_iocs(analysis)

@@ -117,6 +117,31 @@ class TestRestoreAnalysisToSession:
         assert st.session_state["port_anomalies"] is None
         assert st.session_state["rdns_map"] == {}
 
+    def test_durable_background_artifacts_restored(self):
+        analysis = _make_analysis(
+            features={
+                "flows": [],
+                "artifacts": {"ips": [], "domains": [], "urls": [], "hashes": [], "ja3": []},
+            },
+            session_artifacts={
+                "beacon_records": [{"src": "10.0.0.1", "dst": "8.8.8.8", "score": 0.9}],
+                "zeek_tables": {"dns.log": [{"query": "durable.example"}]},
+                "carved": [{"sha256": "abc123", "path": "/tmp/carved.bin"}],
+                "pipeline_warnings": ["zeek_no_logs"],
+                "pipeline_stages": ["pyshark_pass", "carve"],
+                "rdns_map": {"8.8.8.8": "dns.google"},
+            },
+        )
+
+        _restore_analysis_to_session(analysis)
+
+        assert st.session_state["beacon_df"].iloc[0]["score"] == 0.9
+        assert st.session_state["zeek_tables"]["dns.log"].iloc[0]["query"] == "durable.example"
+        assert st.session_state["carved"][0]["sha256"] == "abc123"
+        assert st.session_state["pipeline_warnings"] == ["zeek_no_logs"]
+        assert st.session_state["pipeline_stages"] == ["pyshark_pass", "carve"]
+        assert st.session_state["rdns_map"] == {"8.8.8.8": "dns.google"}
+
     def test_stale_dashboard_filters_cleared(self):
         """Filters reference IPs/time ranges from the prior capture; leaving them
         active would keep filtered_flows empty — the exact symptom being fixed."""

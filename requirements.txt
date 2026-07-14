@@ -1,5 +1,5 @@
 # Core app dependencies
-streamlit>=1.36,<2.0
+streamlit>=1.37,<2.0
 pandas>=2.2,<3.0
 numpy>=1.26,<3.0
 matplotlib>=3.9,<4.0

@@ -73,7 +73,8 @@ class CaseRepository:
                     dns_json TEXT,
                     tls_json TEXT,
                     attack_mapping_json TEXT,
-                    capture_metrics_json TEXT
+                    capture_metrics_json TEXT,
+                    session_artifacts_json TEXT
                 );
 
                 -- IOCs extracted from analyses
@@ -140,7 +141,7 @@ class CaseRepository:
             # Existing case databases predate ATT&CK and capture-quality
             # persistence.  Add the columns in place so upgrades do not erase
             # prior investigations.
-            for column in ("attack_mapping_json", "capture_metrics_json"):
+            for column in ("attack_mapping_json", "capture_metrics_json", "session_artifacts_json"):
                 try:
                     conn.execute(f"ALTER TABLE analyses ADD COLUMN {column} TEXT")  # noqa: S608 — fixed column names
                 except sqlite3.OperationalError as exc:
@@ -419,6 +420,9 @@ class CaseRepository:
             tls_json = self._compress_json(analysis.tls_analysis) if analysis.tls_analysis else None
             attack_mapping_json = self._compress_json(analysis.attack_mapping) if analysis.attack_mapping else None
             capture_metrics_json = self._compress_json(analysis.capture_metrics) if analysis.capture_metrics else None
+            session_artifacts_json = (
+                self._compress_json(analysis.session_artifacts) if analysis.session_artifacts else None
+            )
 
             params = (
                 analysis.id,
@@ -435,14 +439,15 @@ class CaseRepository:
                 tls_json,
                 attack_mapping_json,
                 capture_metrics_json,
+                session_artifacts_json,
             )
             conn.execute(
                 """
                 INSERT INTO analyses
                 (id, case_id, pcap_path, pcap_hash, packet_count, analyzed_at,
                  features_json, osint_json, report_md, yara_json, dns_json, tls_json,
-                 attack_mapping_json, capture_metrics_json)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 attack_mapping_json, capture_metrics_json, session_artifacts_json)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(id) DO UPDATE SET
                     case_id = excluded.case_id,
                     pcap_path = excluded.pcap_path,
@@ -456,7 +461,8 @@ class CaseRepository:
                     dns_json = excluded.dns_json,
                     tls_json = excluded.tls_json,
                     attack_mapping_json = excluded.attack_mapping_json,
-                    capture_metrics_json = excluded.capture_metrics_json
+                    capture_metrics_json = excluded.capture_metrics_json,
+                    session_artifacts_json = excluded.session_artifacts_json
                 """,
                 params,
             )
@@ -736,6 +742,7 @@ class CaseRepository:
         tls_analysis = self._decompress_json(row.get("tls_json"))
         attack_mapping = self._decompress_json(row.get("attack_mapping_json"))
         capture_metrics = self._decompress_json(row.get("capture_metrics_json"))
+        session_artifacts = self._decompress_json(row.get("session_artifacts_json"))
 
         # Load IOCs
         ioc_rows = conn.execute("SELECT * FROM iocs WHERE analysis_id = ?", (row["id"],)).fetchall()
@@ -765,6 +772,7 @@ class CaseRepository:
             tls_analysis=tls_analysis,
             attack_mapping=attack_mapping,
             capture_metrics=capture_metrics,
+            session_artifacts=session_artifacts,
             iocs=iocs,
         )
 
@@ -868,6 +876,36 @@ class CaseRepository:
             if not row:
                 return None
             return Job.from_dict(dict(row))
+        finally:
+            conn.close()
+
+    def list_jobs(
+        self,
+        *,
+        case_id: str | None = None,
+        statuses: list[JobStatus] | None = None,
+        limit: int = 100,
+    ) -> list[Job]:
+        """List recent jobs, optionally scoped to a case and lifecycle states."""
+        clauses: list[str] = []
+        params: list[Any] = []
+        if case_id:
+            clauses.append("case_id = ?")
+            params.append(case_id)
+        if statuses:
+            placeholders = ", ".join("?" for _ in statuses)
+            clauses.append(f"status IN ({placeholders})")  # noqa: S608 - placeholders only
+            params.extend(status.value for status in statuses)
+
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        params.append(max(1, min(int(limit), 1000)))
+        conn = self._get_conn()
+        try:
+            rows = conn.execute(
+                f"SELECT * FROM jobs {where} ORDER BY submitted_at DESC LIMIT ?",  # noqa: S608 - fixed clauses
+                params,
+            ).fetchall()
+            return [Job.from_dict(dict(row)) for row in rows]
         finally:
             conn.close()
 

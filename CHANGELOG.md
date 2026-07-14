@@ -57,7 +57,7 @@ First stable release. Production-ready installer, hardened pipeline, polished UX
 ### Changed
 - **PDF cover page redesign** — logo + tagline above the title, with classification banner and metadata block.
 - **Kaleido upgraded to 1.x** — 0.x reaches end-of-life September 2025; 1.x is the active branch.
-- **Testing discipline overhauled** — production-shape test data (real `CorrelationSignal` dataclasses, real DataFrames, nested dicts the pipeline actually produces) instead of simplified inputs. Documented in `CLAUDE.md` with bug-pattern history. New integration tests for every PDF section and chart.
+- **Testing discipline overhauled** — production-shape test data (real `CorrelationSignal` dataclasses, real DataFrames, nested dicts the pipeline actually produces) instead of simplified inputs. New integration tests cover every PDF section and chart.
 - **Version bumped to 1.0.0** with consolidated release notes.
 
 ### Fixed

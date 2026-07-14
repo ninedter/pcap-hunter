@@ -19,6 +19,7 @@
 
 - **獨立的 MITRE ATT&CK 工作區** — 以證據為本的技術假設、ATT&CK v19.1 中繼資料、分析師處置、擷取涵蓋範圍、可視性缺口與 Navigator 匯出。
 - **擷取品質遙測** — 封包/流量規模、解析比率、時間範圍、取樣上限、完成階段與警告會隨 UI/API 結果傳遞，並與案件一同保存。
+- **可復原的 UI 分析** — Streamlit 會把 PCAP 工作提交至獨立行程佇列，將完整證據自動保存至 SQLite，並在停止頁面或重新載入瀏覽器後復原近期工作。
 - **更安全的 PCAP 攝取** — Streamlit 上傳採有限區塊串流，保留 `.pcap`/`.pcapng`，驗證 Magic Bytes、執行批次限制，拒絕時清除不完整檔案。
 - **更強的整合 API** — 無介面工作會回傳 ATT&CK 對應與擷取指標，IOC 摘要包含相關技術 ID，失敗提交會清除暫存案件與檔案。
 - **不依賴 LLM 的證據檢視** — 即使跳過或無法產生 AI 敘事，確定性的封包、IOC、關聯、階段與警告證據仍然可見。
@@ -55,7 +56,7 @@
 
 ### 2. Progress — 透明的 10 階段管道
 
-每個階段都即時回報進度，並提供逐階段的跳過控制。PyShark 與 Zeek 平行執行，接著 DNS、TLS、信標偵測與酬載提取同時展開——你永遠知道目前正在執行什麼、還剩多少進度。
+每個階段都會回報可持久化的工作進度。PyShark 與 Zeek 平行執行，接著 DNS、TLS、信標偵測與酬載提取同時展開。分析在 Streamlit 頁面執行緒之外運行，因此右上角的 Stop 控制或瀏覽器重新載入都不會丟失工作；完成的證據會自動保存至 Cases 並復原。
 
 ![Progress 分頁](../images/02-progress.png)
 
@@ -397,7 +398,7 @@ make run         # 獨立安裝（先執行 python3 scripts/install.py）
 1. **上傳** — 在 Upload 分頁拖放一個或多個 `.pcap` 檔案。多個檔案會啟動批次模式並進行跨檔案關聯分析。
 2. **設定** — 在 Config 分頁選擇 LLM 供應商（LM Studio / OpenAI / Anthropic）、設定自家位置（洲 > 國家 > 城市）、OSINT API 金鑰，並可選擇性指定 YARA 規則目錄。
 3. **分析** — 點擊 **Extract & Analyze** 啟動管道。
-4. **監控** — 在 Progress 分頁觀察各階段執行：封包計數 > 解析 + Zeek（平行）> DNS / TLS / 信標偵測 / 酬載提取（同時執行）> YARA > OSINT > LLM 報告。
+4. **監控** — 在 Progress 分頁觀察獨立背景行程中的各階段：封包計數 > 解析 + Zeek（平行）> DNS / TLS / 信標偵測 / 酬載提取（同時執行）> YARA > OSINT > LLM 報告。停止或重新載入 Streamlit 頁面不會丟失工作。
 5. **審閱** — 在 Dashboard、MITRE Analysis、LLM Analysis、OSINT、Raw Data、Cases 分頁瀏覽結果。
 6. **匯出** — 下載 CSV/JSON 資料、PDF 報告、STIX 套件、ATT&CK Navigator 圖層或 CEF syslog 事件。
 
@@ -494,8 +495,6 @@ PCAP Hunter 使用**與生產環境相同形狀的測試資料**，而非簡化�
 - **[整合 API 參考文件](../API.md)** — REST 端點、認證、設定（英文）
 - **[API 整合指南（繁體中文）](api/README.md)** — SIEM / SOAR 整合範例
 - **[English README](../../README.md)** — 英文版說明
-- **[CLAUDE.md](../../CLAUDE.md)** — 貢獻者 / AI 指南：慣例、測試紀律、已知錯誤模式
-- **[docs/FEATURE-ROADMAP.md](../FEATURE-ROADMAP.md)** — 規劃中的工作
 
 ---
 

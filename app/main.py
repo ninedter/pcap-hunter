@@ -25,7 +25,13 @@ from app.pipeline.state import (
     PhaseTracker,
     end_run,
     is_run_active,
-    reset_run_state,
+)
+from app.ui.background_analysis import (
+    BACKGROUND_RUN_KEY,
+    find_recoverable_background_run,
+    render_background_progress,
+    submit_background_analysis,
+    submit_background_report,
 )
 from app.ui.charts import (
     build_sankey_html,
@@ -39,7 +45,7 @@ from app.ui.charts import (
     plot_traffic_timeline_heatmap,
     plot_world_map,
 )
-from app.ui.config_ui import init_config_defaults, render_config_tab
+from app.ui.config_ui import init_config_defaults, render_config_tab, save_config
 from app.ui.layout import (
     analysis_has_run,
     inject_css,
@@ -270,16 +276,29 @@ with _hdr_title:
 
 # --- RE-RUN TRIGGER LOGIC ---
 if st.session_state.get("trigger_llm_rerun"):
-    # Clear and reset LLM phase
-    st.session_state["run_active"] = True
-    llm_slug = make_slug("LLM report")
-    st.session_state[f"done_{llm_slug}"] = False
-    st.session_state[f"skip_{llm_slug}"] = False
-    st.session_state["report"] = None
-    st.session_state["llm_status"] = None
-    # Consume the trigger
-    st.session_state["trigger_llm_rerun"] = False
-    st.rerun()
+    restored_ids = st.session_state.get("restored_analysis_ids") or []
+    if restored_ids:
+        save_config()
+        try:
+            st.session_state[BACKGROUND_RUN_KEY] = submit_background_report(restored_ids)
+        except Exception as exc:
+            st.error(f"Could not queue report regeneration: {exc}")
+        else:
+            st.session_state["report"] = None
+            st.session_state["llm_status"] = None
+        st.session_state["trigger_llm_rerun"] = False
+        st.rerun()
+    else:
+        # Legacy in-memory runs have no persisted analysis to hand to the
+        # report-only worker, so retain the original fallback behavior.
+        st.session_state["run_active"] = True
+        llm_slug = make_slug("LLM report")
+        st.session_state[f"done_{llm_slug}"] = False
+        st.session_state[f"skip_{llm_slug}"] = False
+        st.session_state["report"] = None
+        st.session_state["llm_status"] = None
+        st.session_state["trigger_llm_rerun"] = False
+        st.rerun()
 init_config_defaults()
 
 # ---------------------- Dependency pre-flight check ----------------------
@@ -357,6 +376,13 @@ for k, v in [
 ]:
     if k not in st.session_state:
         st.session_state[k] = v
+
+# Browser reloads create a new Streamlit session, but durable job rows remain.
+# Reattach the latest recent UI-owned run when there is no live analysis yet.
+if BACKGROUND_RUN_KEY not in st.session_state and not analysis_has_run():
+    recovered_run = find_recoverable_background_run()
+    if recovered_run:
+        st.session_state[BACKGROUND_RUN_KEY] = recovered_run
 
 # ---------------------- 1) Upload ----------------------
 with tab_upload:
@@ -468,45 +494,72 @@ with tab_upload:
         ("LLM report", True),
     ]
 
+    run_llm = st.checkbox(
+        "Generate LLM report in the background",
+        value=bool(st.session_state.get("cfg_run_llm", True)),
+        key="cfg_run_llm",
+        help="Disable this when you only need deterministic packet, Zeek, YARA, and OSINT results.",
+    )
     start = st.button("Extract & Analyze", type="primary", width="stretch")
     if start:
         if not pcap_path or not pathlib.Path(pcap_path).exists():
             st.error("Please upload a PCAP or provide a valid path.")
             st.stop()
-        reset_run_state([t for (t, enabled) in phases if enabled])
-        st.session_state.update(
-            {
-                "features": None,
-                "osint": None,
-                "report": None,
-                "llm_status": None,
-                "beacon_df": pd.DataFrame(),
-                "zeek_tables": {},
-                "carved": [],
-                "__total_pkts": None,
-                "__pcap_path": pcap_path,
-                "__pcap_paths": pcap_paths or [pcap_path],
-                "dns_analysis": None,
-                "tls_analysis": None,
-                "attack_mapping": None,
-                "capture_metrics": None,
-                "pipeline_warnings": [],
-                "pipeline_stages": [],
-                "yara_results": None,
-                "correlations": None,
-                "flow_asymmetry": None,
-                "port_anomalies": None,
-                "__batch_result": None,
-            }
-        )
-        st.toast("Analysis started — follow progress in the Progress tab", icon="🚀")
-        st.success("Analysis started. Switch to the **Progress** tab to monitor.")
+        try:
+            limit_packets = int(st.session_state.get("cfg_limit_packets", C.DEFAULT_PYSHARK_LIMIT)) or None
+        except (ValueError, TypeError):
+            limit_packets = C.DEFAULT_PYSHARK_LIMIT
+        try:
+            osint_top_n = int(st.session_state.get("cfg_osint_top_ips", C.OSINT_TOP_IPS_DEFAULT) or 0)
+        except (ValueError, TypeError):
+            osint_top_n = C.OSINT_TOP_IPS_DEFAULT
+
+        # Persist encrypted provider settings before the worker process loads
+        # them. Job rows contain only non-sensitive execution options.
+        if not save_config():
+            st.warning(
+                "Settings could not be saved; the background job will use environment/default provider settings."
+            )
+        try:
+            background_run = submit_background_analysis(
+                pcap_paths or [pcap_path],
+                {
+                    "osint_enabled": True,
+                    "llm_enabled": run_llm,
+                    "do_pyshark": do_pyshark,
+                    "do_zeek": do_zeek,
+                    "do_carve": do_carve,
+                    "do_yara": do_yara,
+                    "pre_count": pre_count,
+                    "pyshark_packet_limit": limit_packets,
+                    "osint_top_n": osint_top_n,
+                },
+            )
+        except Exception as exc:
+            st.error(f"Could not start the background analysis: {exc}")
+            st.stop()
+        end_run()
+        st.session_state[BACKGROUND_RUN_KEY] = background_run
+        st.session_state["__pcap_path"] = pcap_path
+        st.session_state["__pcap_paths"] = pcap_paths or [pcap_path]
+        st.session_state["__batch_mode"] = len(st.session_state["__pcap_paths"]) > 1
+        st.toast("Analysis safely queued in the background", icon="🚀")
+        st.success("Analysis started. It will continue even if this Streamlit page is stopped or reloaded.")
         st.rerun()
 
 # ---------------------- 2) Progress ----------------------
 with tab_progress:
     progress_panel = make_progress_panel(st.container())
-    if is_run_active():
+    background_run = st.session_state.get(BACKGROUND_RUN_KEY)
+    if background_run:
+
+        @st.fragment(run_every="2s")
+        def _background_progress_fragment():
+            if render_background_progress(st.session_state[BACKGROUND_RUN_KEY]):
+                st.rerun()
+
+        _background_progress_fragment()
+    elif is_run_active():
         pcap_path = st.session_state.get("__pcap_path")
         pcap_paths = st.session_state.get("__pcap_paths") or ([pcap_path] if pcap_path else [])
         batch_mode = st.session_state.get("__batch_mode", False) and len(pcap_paths) > 1

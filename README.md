@@ -1,7 +1,7 @@
 # PCAP Hunter
 
 [![CI](https://github.com/ninedter/pcap-hunter/actions/workflows/ci.yml/badge.svg)](https://github.com/ninedter/pcap-hunter/actions/workflows/ci.yml)
-[![Release: v2.1.0](https://img.shields.io/badge/release-v2.1.0-7c3aed.svg)](https://github.com/ninedter/pcap-hunter/releases/tag/v2.1.0)
+[![Version: v2.1.0](https://img.shields.io/badge/version-v2.1.0-7c3aed.svg)](CHANGELOG.md#210---2026-07-17)
 [![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 

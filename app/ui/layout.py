@@ -1123,7 +1123,7 @@ def _render_geo_map(osint_data: dict):
             geo=dict(showframe=False, showcoastlines=True, projection_type="natural earth"),
             coloraxis_colorbar=dict(title="IPs"),
         )
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, width="stretch")
     except ImportError:
         st.warning("Plotly required for geo map. Install with: pip install plotly")
 
@@ -2053,7 +2053,7 @@ def render_cross_file_correlation(result_col, correlation):
             )
         if rows:
             df = pd.DataFrame(rows)
-            st.dataframe(df, hide_index=True, use_container_width=True)
+            st.dataframe(df, hide_index=True, width="stretch")
 
 
 def render_per_file_summary(result_col, pcap_results: list):

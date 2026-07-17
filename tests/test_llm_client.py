@@ -312,6 +312,86 @@ class TestEvidenceGrounding(unittest.TestCase):
         self.assertNotIn("Port anomalies", beacon)
         self.assertNotIn("JA3 TLS client fingerprints", prompts["DNS & TLS Analysis"])
 
+    def test_network_only_limits_are_explicit_in_every_section(self):
+        from app.llm.client import SYSTEM_INSTRUCTIONS
+
+        self.assertIn("A PCAP can show network behavior", SYSTEM_INSTRUCTIONS)
+        self.assertIn("Flow asymmetry is not confirmed exfiltration", SYSTEM_INSTRUCTIONS)
+        self.assertIn("beacon periodicity is not confirmed C2", SYSTEM_INSTRUCTIONS)
+        _, prompts, _ = _capture_section_prompts(_production_context())
+        self.assertIn("never call beaconing confirmed C2", prompts["Executive Summary"])
+        self.assertIn("confirmed exfiltration", prompts["Beaconing / C2 Analysis"])
+
+    def test_missing_coverage_is_unknown_not_clean(self):
+        from app.llm.client import _extract_analysis_scope
+
+        scope = _extract_analysis_scope({"config": {"do_zeek": True}})
+        self.assertFalse(scope["coverage_metadata_available"])
+        self.assertIn("cannot establish clean traffic", scope["limitations"][0])
+
+    def test_osint_provider_failure_is_preserved(self):
+        from app.llm.client import _extract_osint_coverage
+
+        coverage = _extract_osint_coverage(
+            {"ips": {"203.0.113.10": {"vt": {"_error": "auth failed (HTTP 401)"}}}, "domains": {}}
+        )
+        self.assertEqual(coverage["provider_status"]["virustotal"], "auth_failed")
+        self.assertEqual(coverage["provider_status"]["greynoise"], "none")
+
+    def test_detector_error_is_not_reported_as_successful_zero(self):
+        from app.llm.client import _extract_dns_summary, _extract_tls_summary
+
+        dns = _extract_dns_summary({"error": "No DNS log data", "records": 0})
+        tls = _extract_tls_summary({"error": "tshark timed out", "total_certificates": 0})
+        self.assertEqual(dns, {"available": False, "status": "error", "error": "No DNS log data"})
+        self.assertEqual(tls, {"available": False, "status": "error", "error": "tshark timed out"})
+
+    def test_full_correlation_set_drives_risk_even_when_details_are_bounded(self):
+        from app.llm.client import _summarize_correlations
+
+        rows = [
+            {
+                "indicator": f"192.0.2.{index}",
+                "type": "ip",
+                "verdict": "low",
+                "composite_score": 0.1,
+                "signals": [],
+            }
+            for index in range(12)
+        ]
+        rows.append(
+            {
+                "indicator": "198.51.100.250",
+                "type": "ip",
+                "verdict": "critical",
+                "composite_score": 0.91,
+                "signals": [{"name": "vt_detections", "value": "20/70", "source": "virustotal"}],
+            }
+        )
+
+        summary = _summarize_correlations(rows, max_details=10)
+
+        self.assertEqual(summary["pre_computed_risk"], "CRITICAL")
+        self.assertEqual(summary["verdict_distribution"], {"critical": 1, "high": 0, "medium": 0, "low": 12})
+        self.assertEqual(summary["correlation_count"], 13)
+        self.assertEqual(summary["detail_rows_omitted"], 3)
+
+    def test_top_flow_samples_are_selected_by_volume(self):
+        from app.llm.client import _select_top_flows
+
+        flows = [
+            {"src": "10.0.0.1", "dst": "192.0.2.1", "count": 5, "bytes": 500},
+            {"src": "10.0.0.2", "dst": "192.0.2.2", "count": 500, "bytes": 5_000},
+            {"src": "10.0.0.3", "dst": "192.0.2.3", "count": 50, "bytes": 50_000},
+        ]
+        selected = _select_top_flows(flows, 2)
+        self.assertEqual([row["src"] for row in selected], ["10.0.0.3", "10.0.0.2"])
+
+    def test_yara_finding_prevents_no_findings_instruction(self):
+        context = {"features": {}, "osint": {}, "zeek": {}, "packet_count": 10, "yara_results": {"matched": 1}}
+        _, prompts, _ = _capture_section_prompts(context)
+        self.assertNotIn("No detector supplied a significant finding", prompts["Executive Summary"])
+
 
 class TestStripDuplicateHeading(unittest.TestCase):
     """The LLM sometimes echoes the section title; _strip_duplicate_heading removes it."""

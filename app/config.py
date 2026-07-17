@@ -22,6 +22,14 @@ LM_MODEL = "local"
 LM_LANGUAGE = "US English"
 LM_TIMEOUT_SECONDS = 120  # Per-section API call timeout
 
+# Model context-window control. At most half of the selected window is used for
+# prompt + evidence so providers do not need to compress the request context.
+LLM_CONTEXT_WINDOW_MIN = 10_000
+LLM_CONTEXT_WINDOW_MAX = 1_000_000
+LLM_CONTEXT_WINDOW_STEP = 1_000
+LLM_CONTEXT_WINDOW_DEFAULT = 32_000
+LLM_INPUT_BUDGET_RATIO = 0.5
+
 # Multi-provider LLM defaults. The active provider selects which backend
 # synthesize_report() dispatches to: LM Studio (local, chunked), OpenAI cloud,
 # or Anthropic (official SDK). See app/llm/providers.py.

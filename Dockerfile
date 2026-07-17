@@ -1,18 +1,10 @@
+# syntax=docker/dockerfile:1.7
+
 # ---------- Builder ----------
 FROM python:3.11-bookworm AS builder
 ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    curl ca-certificates gnupg \
-    tshark wireshark-common \
-    gcc g++ make libpcap0.8 libpcap0.8-dev \
- && rm -rf /var/lib/apt/lists/*
-
-# Add Zeek repo for Debian 12 (bookworm) and install Zeek (headers not needed here)
-RUN echo "deb [signed-by=/usr/share/keyrings/zeek.gpg] https://download.opensuse.org/repositories/security:/zeek/Debian_12/ /" \
-      > /etc/apt/sources.list.d/zeek.list \
- && curl -fsSL https://download.opensuse.org/repositories/security:/zeek/Debian_12/Release.key \
-      | gpg --dearmor -o /usr/share/keyrings/zeek.gpg \
- && apt-get update && apt-get install -y --no-install-recommends zeek \
+    gcc g++ make libpcap0.8-dev \
  && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /w
@@ -52,9 +44,10 @@ RUN echo "deb [signed-by=/usr/share/keyrings/zeek.gpg] https://download.opensuse
 ENV PATH="/opt/zeek/bin:${PATH}"
 
 WORKDIR /app
-COPY --from=builder /wheels /wheels
-COPY requirements.txt .
-RUN pip install --no-cache-dir /wheels/*
+# Mount, rather than copy, the wheelhouse so build artifacts do not remain in
+# the runtime image after installation.
+RUN --mount=type=bind,from=builder,source=/wheels,target=/wheels \
+    pip install --no-cache-dir /wheels/*
 
 # Repo-shaped layout: the package lives at /app/app so absolute imports
 # (from app.pipeline import ...) resolve identically to a local checkout.

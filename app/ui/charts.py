@@ -10,6 +10,10 @@ import plotly.graph_objects as go
 
 from app.ui.colors import severity_color
 
+MAX_TIMELINE_FLOW_POINTS = 10_000
+MAX_TIMELINE_VOLUME_POINTS = 5_000
+MAX_PROFILE_SAMPLES = 100_000
+
 
 def _threat_score_color(score: float) -> str:
     """Map a 0-1 threat score onto the shared severity palette.
@@ -199,7 +203,7 @@ def plot_flow_timeline(flows: list[dict[str, Any]]) -> go.Figure:
     if not flows:
         return go.Figure()
 
-    data = []
+    data: list[tuple[Any, ...]] = []
     for f in flows:
         if not f.get("pkt_times"):
             continue
@@ -212,23 +216,27 @@ def plot_flow_timeline(flows: list[dict[str, Any]]) -> go.Figure:
         duration = end_ts - start_ts
         proto = f.get("proto", "Unknown")
         size = f.get("count", 1)
-        data.append(
-            {
-                "ts": pd.to_datetime(start_ts, unit="s"),
-                "duration": duration,
-                "proto": proto,
-                "packets": size,
-                "src": f.get("src"),
-                "dst": f.get("dst"),
-            }
-        )
+        data.append((start_ts, duration, proto, size, f.get("src"), f.get("dst")))
 
     if not data:
         return go.Figure()
-    df = pd.DataFrame(data).sort_values("ts")
+    df = pd.DataFrame.from_records(data, columns=["ts", "duration", "proto", "packets", "src", "dst"])
+    df["ts"] = pd.to_datetime(df["ts"], unit="s", errors="coerce")
+    df = df.dropna(subset=["ts"]).sort_values("ts")
+    if df.empty:
+        return go.Figure()
 
-    # 1. Aggregate volume for area chart
-    df_vol = df.resample("1s", on="ts").agg({"packets": "sum"}).fillna(0).reset_index()
+    # Aggregate every flow for an accurate volume trace, but use a wider bucket
+    # for long captures so the browser never receives tens of thousands of empty
+    # one-second bins. The interactive scatter is time-stratified separately.
+    span_seconds = max(0.0, (df["ts"].iloc[-1] - df["ts"].iloc[0]).total_seconds())
+    bucket_seconds = max(1, math.ceil((span_seconds + 1) / MAX_TIMELINE_VOLUME_POINTS))
+    df_vol = df.resample(f"{bucket_seconds}s", on="ts").agg({"packets": "sum"}).fillna(0).reset_index()
+
+    scatter_df = df
+    if len(scatter_df) > MAX_TIMELINE_FLOW_POINTS:
+        stride = math.ceil(len(scatter_df) / MAX_TIMELINE_FLOW_POINTS)
+        scatter_df = scatter_df.iloc[::stride]
 
     fig = go.Figure()
 
@@ -247,19 +255,20 @@ def plot_flow_timeline(flows: list[dict[str, Any]]) -> go.Figure:
     )
 
     # Trace 2: Flows (Scatter) on primary Y
-    unique_protos = df["proto"].unique()
+    unique_protos = scatter_df["proto"].unique()
     colors = px.colors.qualitative.Pastel
     for i, p in enumerate(unique_protos):
-        sub = df[df["proto"] == p]
+        sub = scatter_df[scatter_df["proto"] == p]
+        marker_sizes = (2 + pd.to_numeric(sub["packets"], errors="coerce").fillna(1) * 0.5).clip(2, 18)
         fig.add_trace(
-            go.Scatter(
+            go.Scattergl(
                 x=sub["ts"],
                 y=sub["duration"],
                 mode="markers",
                 name=p,
                 # Refined marker scale: smaller bubbles
                 marker=dict(
-                    size=sub["packets"].apply(lambda x: min(2 + x * 0.5, 18)),
+                    size=marker_sizes,
                     opacity=0.5,
                     color=colors[i % len(colors)],
                     line=dict(width=0.5, color="rgba(255,255,255,0.2)"),
@@ -611,7 +620,7 @@ def build_sankey_html(
     """Build an HTML string rendering an ECharts Sankey diagram.
 
     Returns a tuple of (html_string, chart_height_px) or None if no data.
-    The HTML uses the ECharts CDN and is rendered via st.components.v1.html.
+    The HTML uses the ECharts CDN and is rendered in a Streamlit iframe.
     Supports draggable nodes, mouse-wheel zoom, click-drag pan, and a
     toolbar with save-as-image and reset buttons.
 
@@ -817,7 +826,10 @@ def plot_traffic_timeline_heatmap(flows: list[dict]) -> go.Figure | None:
         times = f.get("pkt_times", [])
         if not dst or not times:
             continue
-        for t in times[:500]:  # Limit per flow for performance
+        remaining = MAX_PROFILE_SAMPLES - len(rows)
+        if remaining <= 0:
+            break
+        for t in times[: min(500, remaining)]:
             try:
                 rows.append({"IP": dst, "timestamp": float(t)})
             except (ValueError, TypeError):
@@ -868,7 +880,10 @@ def plot_packet_size_histogram(flows: list[dict]) -> go.Figure | None:
     for f in flows:
         pkt_lens = f.get("pkt_lens", [])
         if isinstance(pkt_lens, list):
-            all_sizes.extend(pkt_lens[:1000])  # Limit per flow
+            remaining = MAX_PROFILE_SAMPLES - len(all_sizes)
+            if remaining <= 0:
+                break
+            all_sizes.extend(pkt_lens[: min(1000, remaining)])
 
     if len(all_sizes) < 10:
         return None
@@ -919,7 +934,10 @@ def plot_inter_arrival_histogram(flows: list[dict]) -> go.Figure | None:
         if len(ts) < 2:
             continue
         gaps = list(np.diff(ts))
-        all_gaps.extend(gaps[:500])  # Limit per flow
+        remaining = MAX_PROFILE_SAMPLES - len(all_gaps)
+        if remaining <= 0:
+            break
+        all_gaps.extend(gaps[: min(500, remaining)])
 
     if len(all_gaps) < 10:
         return None

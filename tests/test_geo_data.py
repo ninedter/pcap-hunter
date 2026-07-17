@@ -53,3 +53,27 @@ def test_get_location_details():
     lat, lon = geo_data.get_location_details("NonExistentCity", "NoCountry")
     assert lat == 0.0
     assert lon == 0.0
+
+
+def test_geo_index_builds_once(monkeypatch):
+    records = [
+        {"n": "City A", "lt": 1.0, "ln": 2.0, "cn": "Country A", "ct": "Continent A"},
+        {"n": "City B", "lt": 3.0, "ln": 4.0, "cn": "Country A", "ct": "Continent A"},
+    ]
+    calls = 0
+
+    def fake_load():
+        nonlocal calls
+        calls += 1
+        return records
+
+    geo_data._geo_index.cache_clear()
+    monkeypatch.setattr(geo_data, "load_geo_data", fake_load)
+    try:
+        assert geo_data.get_continents() == ["Continent A"]
+        assert geo_data.get_countries("Continent A") == ["Country A"]
+        assert geo_data.get_cities("Country A") == ["City A", "City B"]
+        assert geo_data.get_location_details("City B", "Country A") == (3.0, 4.0)
+        assert calls == 1
+    finally:
+        geo_data._geo_index.cache_clear()

@@ -40,6 +40,7 @@ sys.modules["anthropic"] = _fake_anthropic
 sys.modules.setdefault("openai", MagicMock())
 
 from app.llm import providers as P  # noqa: E402
+from app.llm.context_window import estimate_messages  # noqa: E402
 
 
 def _text_block(text: str):
@@ -75,12 +76,12 @@ class TestProviderConstants(unittest.TestCase):
 class TestSingleShotPrompt(unittest.TestCase):
     """The single-shot prompt carries grounding rules + the required tables."""
 
-    def test_system_prompt_keeps_grounding_and_adds_enrichment(self):
+    def test_system_prompt_keeps_grounding_and_sets_attribution_boundaries(self):
         sysp = P.SINGLE_SHOT_SYSTEM
         self.assertIn("Use ONLY facts present in the DATA blocks", sysp)
         self.assertIn("Quote indicator values verbatim", sysp)
-        self.assertIn("frontier model", sysp)
-        self.assertIn("MITRE ATT&CK", sysp)
+        self.assertIn("do not enrich the report", sysp)
+        self.assertIn("Use ATT&CK IDs only from attack_mapping", sysp)
         self.assertIn("hypotheses", sysp)
 
     def test_user_prompt_has_risk_matrix_and_ioc_summary(self):
@@ -91,6 +92,35 @@ class TestSingleShotPrompt(unittest.TestCase):
         # All ordered sections referenced
         for section in P._SINGLE_SHOT_SECTIONS:
             self.assertIn(section, prompt)
+
+    def test_user_prompt_carries_coverage_and_attribution_evidence(self):
+        ctx = _min_context()
+        ctx["capture_metrics"] = {
+            "detectors": {"zeek": "unavailable", "dns": "available"},
+            "visibility_gaps": ["zeek"],
+            "limitations": ["Zeek protocol logs are unavailable."],
+        }
+        ctx["attack_mapping"] = {
+            "attack_version": "19.1",
+            "techniques": [
+                {
+                    "technique_id": "T1071.004",
+                    "technique_name": "DNS",
+                    "tactic": "command-and-control",
+                    "confidence": 0.6,
+                    "evidence": ["DNS tunneling indicators"],
+                    "limitations": ["Network evidence is a hypothesis."],
+                }
+            ],
+        }
+
+        prompt = P.build_single_shot_prompt(ctx)
+
+        self.assertIn("[analysis_scope]", prompt)
+        self.assertIn('"zeek":"unavailable"', prompt)
+        self.assertIn("[attack_mapping]", prompt)
+        self.assertIn("T1071.004", prompt)
+        self.assertIn("Network evidence is a hypothesis.", prompt)
 
     def test_user_prompt_quotes_real_indicators(self):
         # Production-shape correlation → indicator must appear verbatim in DATA.
@@ -115,6 +145,29 @@ class TestSingleShotPrompt(unittest.TestCase):
         self.assertIn("Traditional Chinese", prompt)
         self.assertIn("Taiwan", prompt)
 
+    def test_larger_context_window_includes_more_evidence(self):
+        ctx = _min_context()
+        ctx["features"] = {
+            "flows": [{"src": f"10.0.0.{i}", "dst": "198.51.100.10", "proto": "TCP", "count": i} for i in range(1, 401)]
+        }
+
+        local_prompt = P.build_single_shot_prompt(ctx, context_window_tokens=10_000)
+        frontier_prompt = P.build_single_shot_prompt(ctx, context_window_tokens=1_000_000)
+
+        self.assertGreater(len(frontier_prompt), len(local_prompt))
+        self.assertNotIn("10.0.0.300", local_prompt)
+        self.assertIn("10.0.0.300", frontier_prompt)
+
+    def test_unlimited_context_includes_all_rows_even_with_10k_slider(self):
+        ctx = _min_context()
+        ctx["features"] = {
+            "flows": [{"src": f"10.0.0.{i}", "dst": "198.51.100.10", "proto": "TCP"} for i in range(1, 401)]
+        }
+
+        prompt = P.build_single_shot_prompt(ctx, context_window_tokens=10_000, unlimited_context=True)
+
+        self.assertIn("10.0.0.400", prompt)
+
 
 class TestSynthesizeDispatch(unittest.TestCase):
     """synthesize_report routes to the correct backend per provider."""
@@ -134,7 +187,28 @@ class TestSynthesizeDispatch(unittest.TestCase):
         args = gen.call_args.args
         self.assertEqual(args[0], "http://localhost:1234")
         self.assertEqual(args[2], "local")
+        self.assertEqual(gen.call_args.kwargs["context_window_tokens"], 32_000)
         self.assertEqual(out, "## chunked")
+
+    def test_lmstudio_unlimited_uses_one_full_context_request(self):
+        with (
+            patch.object(P._client, "generate_report") as chunked,
+            patch.object(P, "_synthesize_openai", return_value="## full context") as single,
+        ):
+            out = P.synthesize_report(
+                P.PROVIDER_LMSTUDIO,
+                base_url="http://localhost:1234",
+                api_key="lm",
+                model="local",
+                context=_min_context(),
+                unlimited_context=True,
+            )
+
+        chunked.assert_not_called()
+        single.assert_called_once()
+        self.assertTrue(single.call_args.kwargs["unlimited_context"])
+        self.assertTrue(single.call_args.kwargs["local_compatible"])
+        self.assertEqual(out, "## full context")
 
     def test_openai_makes_one_call_not_n_sections(self):
         fake_openai = MagicMock()
@@ -155,11 +229,62 @@ class TestSynthesizeDispatch(unittest.TestCase):
         self.assertEqual(fake_openai.return_value.chat.completions.create.call_count, 1)
         call = fake_openai.return_value.chat.completions.create.call_args
         self.assertEqual(call.kwargs["model"], "gpt-4o")
+        self.assertEqual(call.kwargs["temperature"], 0.0)
         # System + user messages
         self.assertEqual(len(call.kwargs["messages"]), 2)
         self.assertEqual(call.kwargs["messages"][0]["role"], "system")
         # The legitimate first section heading must survive post-processing
         self.assertIn("Executive Summary", out)
+
+    def test_openai_prompt_and_output_respect_10k_window(self):
+        fake_openai = MagicMock()
+        completion = MagicMock()
+        completion.choices = [MagicMock(message=MagicMock(content="## Executive Summary\n\nbody"))]
+        fake_openai.return_value.chat.completions.create.return_value = completion
+        ctx = _min_context()
+        ctx["features"] = {"flows": [{"src": "10.0.0.1", "dst": "198.51.100.1", "blob": "x" * 1000}] * 500}
+
+        with patch.dict(sys.modules, {"openai": MagicMock(OpenAI=fake_openai)}):
+            P.synthesize_report(
+                P.PROVIDER_OPENAI,
+                base_url="",
+                api_key="sk-test",
+                model="gpt-4o",
+                context=ctx,
+                context_window_tokens=10_000,
+            )
+
+        call = fake_openai.return_value.chat.completions.create.call_args
+        messages = call.kwargs["messages"]
+        self.assertLessEqual(estimate_messages(messages[0]["content"], messages[1]["content"]), 5_000)
+        self.assertEqual(call.kwargs["max_tokens"], 5_000)
+
+    def test_openai_unlimited_does_not_truncate_or_cap_output(self):
+        fake_openai = MagicMock()
+        completion = MagicMock()
+        completion.choices = [MagicMock(message=MagicMock(content="## Executive Summary\n\nbody"))]
+        fake_openai.return_value.chat.completions.create.return_value = completion
+        ctx = _min_context()
+        ctx["features"] = {
+            "flows": [{"src": f"10.0.0.{i}", "dst": "198.51.100.1", "blob": "x" * 1000} for i in range(1, 101)]
+        }
+
+        with patch.dict(sys.modules, {"openai": MagicMock(OpenAI=fake_openai)}):
+            P.synthesize_report(
+                P.PROVIDER_OPENAI,
+                base_url="",
+                api_key="sk-test",
+                model="gpt-4o",
+                context=ctx,
+                context_window_tokens=10_000,
+                unlimited_context=True,
+            )
+
+        call = fake_openai.return_value.chat.completions.create.call_args
+        messages = call.kwargs["messages"]
+        self.assertGreater(estimate_messages(messages[0]["content"], messages[1]["content"]), 5_000)
+        self.assertIn("10.0.0.100", messages[1]["content"])
+        self.assertEqual(call.kwargs["max_tokens"], 32_000)
 
     def test_single_shot_postprocess_strips_report_title_keeps_sections(self):
         # A redundant document title before the first `## Executive Summary`

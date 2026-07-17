@@ -136,3 +136,30 @@ class TestLMStudioModelPicker:
         pickers = _pickers_with_options(at, FAKE_LM_MODELS)
         assert pickers, "LM Studio section must render a model picker listing the fetched models"
         assert at.session_state["cfg_lm_model"] == FAKE_LM_MODELS[0]
+
+
+class TestContextWindowControl:
+    def test_slider_defaults_to_32k_and_updates_session_state(self):
+        at = _make_app()
+        at.run()
+
+        sliders = [slider for slider in at.slider if slider.label == "Model context window"]
+        assert len(sliders) == 1
+        assert sliders[0].value == 32_000
+
+        sliders[0].set_value(1_000_000).run()
+        assert at.session_state["cfg_llm_context_window"] == 1_000_000
+
+    def test_unlimited_checkbox_disables_slider(self):
+        at = _make_app()
+        at.run()
+
+        checkbox = at.checkbox(key="cfg_llm_unlimited_context")
+        assert checkbox.label == "No context window limit"
+        assert checkbox.value is False
+
+        checkbox.set_value(True).run()
+
+        slider = [slider for slider in at.slider if slider.label == "Model context window"][0]
+        assert at.session_state["cfg_llm_unlimited_context"] is True
+        assert slider.disabled is True

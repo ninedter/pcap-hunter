@@ -272,6 +272,8 @@ Everything lives in the **Config** tab; settings persist to `~/.pcap_hunter_conf
 - A **provider selector** (LM Studio / OpenAI / Anthropic) with per-provider fields: base URL, API key, and a model picker with **Fetch Models**.
 - **Test Connection** probes the selected provider and reports the result inline.
 - **Report language** — the 9-language selector described above.
+- **Model context window** — select 10K–1M tokens. PCAP Hunter uses no more than 50% for input evidence, reserving the rest for output and provider/tokenizer variance.
+- **No context window limit** — sends all available sanitized evidence in one request and disables the slider. The provider can still reject a request beyond the model's physical context limit.
 
 ### OSINT API Keys
 

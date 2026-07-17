@@ -1,4 +1,10 @@
-from app.ui.charts import plot_flow_timeline, plot_protocol_distribution, plot_world_map
+from app.ui.charts import (
+    MAX_TIMELINE_FLOW_POINTS,
+    MAX_TIMELINE_VOLUME_POINTS,
+    plot_flow_timeline,
+    plot_protocol_distribution,
+    plot_world_map,
+)
 
 
 def test_plot_world_map_empty():
@@ -114,3 +120,25 @@ def test_plot_flow_timeline_falls_back_to_pkt_times_extent():
     marker_traces = [t for t in fig.data if t.mode == "markers"]
     assert len(marker_traces) == 1
     assert marker_traces[0].y[0] == 5.0
+
+
+def test_plot_flow_timeline_bounds_large_capture_payload():
+    flows = [
+        {
+            "pkt_times": [float(i), float(i + 1)],
+            "first_ts": float(i),
+            "last_ts": float(i + 1),
+            "proto": "TCP" if i % 2 else "UDP",
+            "count": i % 20 + 1,
+            "src": f"10.0.{i // 256}.{i % 256}",
+            "dst": "203.0.113.10",
+        }
+        for i in range(MAX_TIMELINE_FLOW_POINTS * 2)
+    ]
+
+    fig = plot_flow_timeline(flows)
+
+    flow_points = sum(len(trace.x) for trace in fig.data if trace.mode == "markers")
+    volume_trace = next(trace for trace in fig.data if trace.name == "Volume")
+    assert flow_points <= MAX_TIMELINE_FLOW_POINTS
+    assert len(volume_trace.x) <= MAX_TIMELINE_VOLUME_POINTS

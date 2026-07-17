@@ -269,6 +269,8 @@ PCAP Hunter 執行 10 階段管道：
 - **供應商選擇器**（LM Studio / OpenAI / Anthropic），每個供應商有獨立欄位：base URL、API 金鑰，以及附 **Fetch Models** 按鈕的模型選單。
 - **Test Connection** 會實際探測所選供應商並就地回報結果。
 - **報告語言** — 即前述的 9 種語言選單。
+- **模型上下文視窗** — 可選擇 10K–1M token。PCAP Hunter 最多使用 50% 作為輸入證據，其餘空間保留給輸出與供應商/tokenizer 差異。
+- **無上下文視窗限制** — 在單次請求中傳送所有可用且已清理的證據，並停用滑桿。若超過模型的實際上下文上限，供應商仍可能拒絕請求。
 
 ### OSINT API Keys
 

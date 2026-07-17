@@ -2,6 +2,37 @@
 
 All notable changes to this project will be documented in this file.
 
+## [2.1.0] - 2026-07-17
+
+Version 2.1 adds explicit control over how much analysis evidence is sent to an LLM, while improving report grounding, background-processing parity, and performance on larger investigations.
+
+### Why 2.1.0
+
+This is a minor-version release because it adds backward-compatible, user-facing LLM controls and meaningful runtime improvements without intentionally removing API routes, changing authentication contracts, or requiring a destructive data migration. Existing installations adopt a safe 32K-token default with a 50% input budget; saved cases and configuration continue to load, and SQLite schema updates remain automatic.
+
+### Added
+
+- **Adjustable model context window** in Config → LLM Integration, ranging from 10K to 1M tokens and persisted across sessions.
+- **Conservative 50% input budget** that scales retained flows, IOCs, OSINT records, protocol evidence, and other report context with the selected window while reserving the other half for output and provider/tokenizer variance.
+- **No context window limit** option that disables the slider and sends all available sanitized analysis context in one request, including through LM Studio's OpenAI-compatible endpoint.
+- **Shared context-budget utilities and tests** covering normalization, multilingual token estimates, proportional evidence limits, prompt fitting, output caps, and unlimited mode.
+
+### Changed
+
+- **LLM reports are more evidence-grounded** with clearer coverage statements, observed-versus-inferred distinctions, deterministic ATT&CK constraints, calibrated uncertainty, and richer IOC/risk evidence.
+- **Background and API-triggered reports now receive foreground-equivalent context**, including correlations, flow anomalies, JA3 evidence, reverse DNS, final ATT&CK mapping, capture metrics, completed stages, and warnings.
+- **Case storage scales better** through WAL mode, busy timeouts, bounded list queries, batch IOC reads/writes, deterministic compressed JSON, and a stale-job lookup index.
+- **Large dashboards remain responsive** by capping browser-side profile samples, time-stratifying flow markers, and aggregating long capture timelines without dropping volume totals.
+- **Geographic selectors use cached indexes** instead of repeatedly scanning the complete city dataset on every Streamlit rerun.
+- **Docker builds use a bind-mounted wheelhouse**, keeping build artifacts out of the runtime image, and Streamlit's supported floor is now 1.50 for the current width/iframe APIs.
+
+### Fixed
+
+- Database-backed API keys are authenticated once per request and their resolved names are reused for accurate audit logging.
+- Persisted false-valued settings, including the unlimited-context toggle, now survive explicit config reloads.
+- Foreground and background report paths now apply the selected context policy consistently.
+- Case list summaries include tags and analysis counts without loading every saved analysis.
+
 ## [2.0.0] - 2026-07-14
 
 Version 2 turns PCAP Hunter into a more evidence-aware investigation workbench and strengthens both interactive and headless analysis paths.

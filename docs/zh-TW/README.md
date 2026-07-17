@@ -1,7 +1,7 @@
 # PCAP Hunter
 
 [![CI](https://github.com/ninedter/pcap-hunter/actions/workflows/ci.yml/badge.svg)](https://github.com/ninedter/pcap-hunter/actions/workflows/ci.yml)
-[![Release: v2.0.0](https://img.shields.io/badge/release-v2.0.0-7c3aed.svg)](https://github.com/ninedter/pcap-hunter/releases/tag/v2.0.0)
+[![Release: v2.1.0](https://img.shields.io/badge/release-v2.1.0-7c3aed.svg)](https://github.com/ninedter/pcap-hunter/releases/tag/v2.1.0)
 [![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](../../LICENSE)
 
@@ -15,8 +15,12 @@
 
 ---
 
-## 版本 2 新功能
+## 版本 2.1 新功能
 
+- **可調整的 LLM 上下文** — 可選擇 10K–1M token 的模型視窗；PCAP Hunter 最多使用其中 50% 作為輸入，為輸出與 tokenizer 差異保留空間，避免上下文壓縮。
+- **選用的無限制上下文** — 取消視窗上限並在單次請求中傳送所有可用且已清理的證據；啟用時滑桿會停用。
+- **更豐富且更以證據為本的報告** — 前景與背景產生流程現在共用關聯、流量異常、JA3、最終 ATT&CK 對應、擷取指標、階段狀態與警告。
+- **大型調查效能提升** — 有界案件查詢、批次 IOC 儲存、快取地理索引與瀏覽器圖表取樣上限可降低資料庫與儀表板負載。
 - **獨立的 MITRE ATT&CK 工作區** — 以證據為本的技術假設、ATT&CK v19.1 中繼資料、分析師處置、擷取涵蓋範圍、可視性缺口與 Navigator 匯出。
 - **擷取品質遙測** — 封包/流量規模、解析比率、時間範圍、取樣上限、完成階段與警告會隨 UI/API 結果傳遞，並與案件一同保存。
 - **可復原的 UI 分析** — Streamlit 會把 PCAP 工作提交至獨立行程佇列，將完整證據自動保存至 SQLite，並在停止頁面或重新載入瀏覽器後復原近期工作。
@@ -29,7 +33,7 @@
 
 ## 目錄
 
-- [版本 2 新功能](#版本-2-新功能)
+- [版本 2.1 新功能](#版本-21-新功能)
 - [視覺導覽](#視覺導覽)
 - [主要功能](#主要功能)
 - [整合 API](#整合-api)
@@ -106,13 +110,13 @@
 
 ### 10. Config — 集中式設定
 
-**LLM Integration** 區塊提供三種供應商（LM Studio、OpenAI、Anthropic），**YARA Rules** 區塊提供可設定的規則目錄，OSINT 供應商金鑰搭配 **Test Providers** 即時檢測按鈕，加上世界地圖的自家位置、執行檔路徑與管道門檻值——全部集中一處，各區塊並有獨立的清除按鈕。API 金鑰以 PBKDF2 加密儲存。
+**LLM Integration** 區塊提供三種供應商（LM Studio、OpenAI、Anthropic）、可調整的 10K–1M token 上下文視窗與選用的無限制模式；**YARA Rules** 區塊提供可設定的規則目錄，OSINT 供應商金鑰搭配 **Test Providers** 即時檢測按鈕，加上世界地圖的自家位置、執行檔路徑與管道門檻值——全部集中一處，各區塊並有獨立的清除按鈕。API 金鑰以 PBKDF2 加密儲存。
 
 ![Config 分頁](../images/08-config.png)
 
 #### 選擇 LLM 供應商
 
-挑選最適合你環境的後端：**LM Studio** 適合本地、實體隔離（air-gapped）的分析（逐節分段產生），**OpenAI** / **Anthropic** 則以單次完整上下文呼叫產生雲端報告。每個供應商各自保有金鑰與模型選單。
+挑選最適合你環境的後端：**LM Studio** 適合本地、實體隔離（air-gapped）的分析（逐節分段產生），**OpenAI** / **Anthropic** 則以單次完整上下文呼叫產生雲端報告。每個供應商各自保有金鑰與模型選單。所選上下文視窗會控制所有供應商的證據預算；無限制模式會單次傳送所有已清理證據，若超過模型的實際上限，供應商仍可能拒絕請求。
 
 ![LLM 供應商選擇](../images/09-llm-providers.png)
 
@@ -125,6 +129,7 @@
   - **LM Studio**（本地）— 隱私優先、適合實體隔離環境；報告採逐節產生以配合較小的上下文視窗。
   - **OpenAI**（雲端）— 單次完整上下文呼叫，一次送入全部證據語料產生報告。
   - **Anthropic**（雲端）— 透過官方 `anthropic` SDK 使用 Claude（`claude-opus-4-8`、`claude-sonnet-4-6`、`claude-haiku-4-5`），單次呼叫並支援串流。
+- **可設定的上下文預算** — 可選擇 10K–1M token 的模型視窗並採保守的 50% 輸入上限，或明確啟用無限制模式，一次送出所有已清理證據。
 - **以證據為本的報告** — SOC 就緒的報告，包含嚴重程度校準評估、誤報意識、信心度修飾語、以真正 Markdown 表格呈現的風險矩陣，以及 IOC 摘要表。
 - **LLM 選用的證據檢視** — 即使略過或無法使用模型，解析封包、流量、IOC、關聯、階段與警告證據仍然可見。
 - **多語言報告** — 9 種語言與地區術語：英文、繁體中文（台灣）、簡體中文、日文、韓文、義大利文、西班牙文、法文、德文。

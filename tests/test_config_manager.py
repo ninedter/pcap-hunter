@@ -23,6 +23,8 @@ class TestConfigManagerBasic:
         """Fresh installs use the same LM Studio endpoint and model as the runtime."""
         assert DEFAULT_CONFIG["cfg_llm_endpoint"] == C.LM_BASE_URL
         assert DEFAULT_CONFIG["cfg_llm_model"] == C.LM_MODEL
+        assert DEFAULT_CONFIG["cfg_llm_context_window"] == C.LLM_CONTEXT_WINDOW_DEFAULT
+        assert DEFAULT_CONFIG["cfg_llm_unlimited_context"] is False
 
     def test_load_missing_file(self, config_manager):
         """Loading non-existent file returns defaults."""
@@ -34,6 +36,8 @@ class TestConfigManagerBasic:
         original = {
             "cfg_llm_endpoint": "http://localhost:1234/v1",
             "cfg_llm_model": "test-model",
+            "cfg_llm_context_window": 128000,
+            "cfg_llm_unlimited_context": True,
             "cfg_pyshark_limit": 100000,
         }
         config_manager.save(original)
@@ -41,6 +45,8 @@ class TestConfigManagerBasic:
 
         assert loaded["cfg_llm_endpoint"] == original["cfg_llm_endpoint"]
         assert loaded["cfg_llm_model"] == original["cfg_llm_model"]
+        assert loaded["cfg_llm_context_window"] == original["cfg_llm_context_window"]
+        assert loaded["cfg_llm_unlimited_context"] is True
         assert loaded["cfg_pyshark_limit"] == original["cfg_pyshark_limit"]
 
     def test_get_single_value(self, config_manager):

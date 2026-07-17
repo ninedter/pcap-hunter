@@ -36,6 +36,8 @@ DEFAULT_CONFIG = {
     "cfg_llm_model": C.LM_MODEL,
     "cfg_llm_language": "US English",
     "cfg_llm_provider": "lmstudio",
+    "cfg_llm_context_window": C.LLM_CONTEXT_WINDOW_DEFAULT,
+    "cfg_llm_unlimited_context": False,
     "cfg_openai_model": "gpt-4o",
     "cfg_openai_base_url": "",
     "cfg_anthropic_model": "claude-opus-4-8",
@@ -77,6 +79,7 @@ class ConfigManager:
         self.config_path = Path(config_path)
         self._salt = self._load_or_create_salt()
         self._fernet = self._create_fernet(self._salt)
+        self._decryption_warning_emitted = False
         self.defaults = DEFAULT_CONFIG.copy()
 
     def _load_or_create_salt(self) -> bytes:
@@ -130,8 +133,10 @@ class ConfigManager:
         try:
             encrypted = value[4:-1]  # Remove "ENC[" and "]"
             return self._fernet.decrypt(encrypted.encode()).decode()
-        except Exception as e:
-            logger.warning("config operation failed: %s", e)
+        except Exception:
+            if not self._decryption_warning_emitted:
+                logger.warning("Saved credentials could not be decrypted on this host; affected values were cleared.")
+                self._decryption_warning_emitted = True
             return ""  # Return empty on decryption failure
 
     def load(self) -> dict[str, Any]:

@@ -412,7 +412,7 @@ def _render_case_list():
                 "Title": case.title,
                 "Status": case.status.value.title(),
                 "Severity": case.severity.value.title(),
-                "Analyses": len(case.analyses) if case.analyses else 0,
+                "Analyses": case.analysis_count,
                 "Tags": ", ".join(case.tags),
                 "Updated": case.updated_at.strftime("%Y-%m-%d %H:%M") if case.updated_at else "",
             }

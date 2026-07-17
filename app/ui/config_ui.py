@@ -22,6 +22,8 @@ from app.utils.config_manager import get_config_manager
 
 logger = logging.getLogger(__name__)
 
+_CONFIG_INITIALIZED_KEY = "_config_defaults_initialized"
+
 # Maximum upload size: 2 GB
 MAX_UPLOAD_SIZE_BYTES = 2 * 1024 * 1024 * 1024
 MAX_UPLOAD_SIZE_LABEL = "2 GB"
@@ -32,6 +34,8 @@ PERSIST_KEYS = {
     "cfg_lm_api_key": "cfg_openai_key",
     "cfg_lm_model": "cfg_llm_model",
     "cfg_lm_language": "cfg_llm_language",
+    "cfg_llm_context_window": "cfg_llm_context_window",
+    "cfg_llm_unlimited_context": "cfg_llm_unlimited_context",
     # Multi-provider LLM settings
     "cfg_llm_provider": "cfg_llm_provider",
     "cfg_openai_api_key": "cfg_openai_cloud_key",
@@ -60,7 +64,9 @@ PERSIST_KEYS = {
 
 def init_config_defaults():
     """Initialize config defaults, loading from persistent storage first."""
-    # Try to load saved config
+    if st.session_state.get(_CONFIG_INITIALIZED_KEY):
+        return
+
     cm = get_config_manager()
     saved_config = cm.load()
 
@@ -71,6 +77,20 @@ def init_config_defaults():
     _ss_default("cfg_lm_model", saved_config.get("cfg_llm_model") or os.getenv("LMSTUDIO_MODEL", C.LM_MODEL))
     lm_lang = saved_config.get("cfg_llm_language") or os.getenv("LMSTUDIO_LANGUAGE", C.LM_LANGUAGE)
     _ss_default("cfg_lm_language", lm_lang)
+    try:
+        context_window = int(
+            saved_config.get("cfg_llm_context_window") or os.getenv("LLM_CONTEXT_WINDOW", C.LLM_CONTEXT_WINDOW_DEFAULT)
+        )
+    except (TypeError, ValueError):
+        context_window = C.LLM_CONTEXT_WINDOW_DEFAULT
+    _ss_default(
+        "cfg_llm_context_window",
+        min(C.LLM_CONTEXT_WINDOW_MAX, max(C.LLM_CONTEXT_WINDOW_MIN, context_window)),
+    )
+    unlimited_context = saved_config.get("cfg_llm_unlimited_context", False)
+    if isinstance(unlimited_context, str):
+        unlimited_context = unlimited_context.strip().lower() in {"1", "true", "yes", "on"}
+    _ss_default("cfg_llm_unlimited_context", bool(unlimited_context))
 
     # Multi-provider LLM settings (saved config → env → defaults)
     _ss_default(
@@ -128,6 +148,7 @@ def init_config_defaults():
     _ss_default("cfg_home_continent", saved_config.get("cfg_home_continent", ""))
     _ss_default("cfg_home_country", saved_config.get("cfg_home_country", ""))
     _ss_default("cfg_home_city", saved_config.get("cfg_home_city", ""))
+    st.session_state[_CONFIG_INITIALIZED_KEY] = True
 
 
 def _ss_default(key: str, value):
@@ -159,8 +180,9 @@ def load_config() -> bool:
         saved_config = cm.load()
 
         for ss_key, cfg_key in PERSIST_KEYS.items():
-            if cfg_key in saved_config and saved_config[cfg_key]:
+            if cfg_key in saved_config and saved_config[cfg_key] is not None:
                 st.session_state[ss_key] = saved_config[cfg_key]
+        st.session_state[_CONFIG_INITIALIZED_KEY] = True
         return True
     except Exception:
         return False
@@ -353,6 +375,37 @@ def _render_llm_integration():
 
     st.selectbox("Report Language", languages, index=lang_idx, key="widget_lm_language", on_change=_update_lang)
 
+    _ss_default("cfg_llm_context_window", C.LLM_CONTEXT_WINDOW_DEFAULT)
+    _ss_default("cfg_llm_unlimited_context", False)
+    unlimited_context = bool(st.session_state.get("cfg_llm_unlimited_context", False))
+    st.slider(
+        "Model context window",
+        min_value=C.LLM_CONTEXT_WINDOW_MIN,
+        max_value=C.LLM_CONTEXT_WINDOW_MAX,
+        step=C.LLM_CONTEXT_WINDOW_STEP,
+        key="cfg_llm_context_window",
+        disabled=unlimited_context,
+        help="Set this to the context window configured for the selected model, including LM Studio's context length.",
+    )
+    st.checkbox(
+        "No context window limit",
+        key="cfg_llm_unlimited_context",
+        help="Send all available sanitized analysis context in one request and ignore the context-window slider.",
+    )
+    unlimited_context = bool(st.session_state.get("cfg_llm_unlimited_context", False))
+    context_window = int(st.session_state.get("cfg_llm_context_window", C.LLM_CONTEXT_WINDOW_DEFAULT))
+    if unlimited_context:
+        st.caption(
+            "**Unlimited mode:** all available sanitized analysis context is sent in one request. "
+            "The selected provider or model may still reject a request larger than its physical context window."
+        )
+    else:
+        st.caption(
+            f"Analysis input budget: **{int(context_window * C.LLM_INPUT_BUDGET_RATIO):,} tokens** "
+            f"(50% of the selected {context_window:,}-token window). The remaining half is reserved for output "
+            "and tokenizer/provider variance to avoid context compression."
+        )
+
 
 def render_config_tab():
     st.markdown("### Configuration")
@@ -484,7 +537,7 @@ def render_config_tab():
             "Pre-count packets", value=bool(st.session_state.get("cfg_pre_count", C.PRECNT_DEFAULT))
         )
 
-    osint_col1, osint_col2 = st.columns([3, 1])
+    osint_col1, _ = st.columns([3, 1])
     with osint_col1:
         st.session_state["cfg_osint_top_ips"] = st.number_input(
             "OSINT: Top N public IPs to enrich (0 = all)",
@@ -568,6 +621,7 @@ def render_config_tab():
                     del st.session_state[k]
             # Clear saved config
             get_config_manager().clear()
+            st.session_state.pop(_CONFIG_INITIALIZED_KEY, None)
             init_config_defaults()
             st.success("Config reset to defaults.")
             st.rerun()
@@ -580,10 +634,10 @@ def render_config_tab():
         st.warning("This will permanently delete all PCAP data. This cannot be undone.")
         col1, col2 = st.columns(2)
         with col1:
-            if st.button("Cancel", use_container_width=True, key="cancel_clear_pcap"):
+            if st.button("Cancel", width="stretch", key="cancel_clear_pcap"):
                 st.rerun()
         with col2:
-            if st.button("Confirm Delete", type="primary", use_container_width=True, key="confirm_clear_pcap"):
+            if st.button("Confirm Delete", type="primary", width="stretch", key="confirm_clear_pcap"):
                 try:
                     for item in C.DATA_DIR.iterdir():
                         if item.is_dir() and not item.is_symlink():
@@ -603,10 +657,10 @@ def render_config_tab():
         st.warning("This will permanently delete the OSINT cache. This cannot be undone.")
         col1, col2 = st.columns(2)
         with col1:
-            if st.button("Cancel", use_container_width=True, key="cancel_clear_osint"):
+            if st.button("Cancel", width="stretch", key="cancel_clear_osint"):
                 st.rerun()
         with col2:
-            if st.button("Confirm Delete", type="primary", use_container_width=True, key="confirm_clear_osint"):
+            if st.button("Confirm Delete", type="primary", width="stretch", key="confirm_clear_osint"):
                 try:
                     count = get_osint_cache().invalidate()
                     st.toast(f"OSINT cache cleared ({count} entries)")
@@ -620,10 +674,10 @@ def render_config_tab():
         st.warning("This will permanently delete all cases, analyses, and notes. This cannot be undone.")
         col1, col2 = st.columns(2)
         with col1:
-            if st.button("Cancel", use_container_width=True, key="cancel_clear_cases"):
+            if st.button("Cancel", width="stretch", key="cancel_clear_cases"):
                 st.rerun()
         with col2:
-            if st.button("Confirm Delete", type="primary", use_container_width=True, key="confirm_clear_cases"):
+            if st.button("Confirm Delete", type="primary", width="stretch", key="confirm_clear_cases"):
                 try:
                     if CaseRepository().clear_all():
                         st.toast("Cases and analyses cleared")

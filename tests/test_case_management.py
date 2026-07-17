@@ -334,6 +334,36 @@ class TestCaseRepository:
         cases = repo.list_cases()
         assert len(cases) == 3
 
+    def test_list_cases_includes_tags_and_analysis_count(self, repo):
+        case_id = repo.create_case(Case(title="Case with summary", tags=["c2", "urgent"]))
+        repo.save_analysis(Analysis(case_id=case_id, pcap_path="/first.pcap"))
+        repo.save_analysis(Analysis(case_id=case_id, pcap_path="/second.pcap"))
+
+        listed = repo.list_cases()
+
+        assert len(listed) == 1
+        assert listed[0].tags == ["c2", "urgent"]
+        assert listed[0].analysis_count == 2
+        assert listed[0].analyses == []
+
+    def test_list_cases_uses_bounded_queries(self, repo, monkeypatch):
+        for index in range(10):
+            repo.create_case(Case(title=f"Case {index}", tags=["shared", f"tag-{index}"]))
+
+        statements: list[str] = []
+        original_get_conn = repo._get_conn
+
+        def traced_connection():
+            conn = original_get_conn()
+            conn.set_trace_callback(statements.append)
+            return conn
+
+        monkeypatch.setattr(repo, "_get_conn", traced_connection)
+        assert len(repo.list_cases()) == 10
+
+        selects = [statement for statement in statements if statement.lstrip().upper().startswith("SELECT")]
+        assert len(selects) == 2
+
     def test_list_cases_with_status_filter(self, repo):
         """Test listing cases with status filter."""
         repo.create_case(Case(title="Open Case", status=CaseStatus.OPEN))

@@ -1,7 +1,7 @@
 # PCAP Hunter
 
 [![CI](https://github.com/ninedter/pcap-hunter/actions/workflows/ci.yml/badge.svg)](https://github.com/ninedter/pcap-hunter/actions/workflows/ci.yml)
-[![Release: v2.0.0](https://img.shields.io/badge/release-v2.0.0-7c3aed.svg)](https://github.com/ninedter/pcap-hunter/releases/tag/v2.0.0)
+[![Release: v2.1.0](https://img.shields.io/badge/release-v2.1.0-7c3aed.svg)](https://github.com/ninedter/pcap-hunter/releases/tag/v2.1.0)
 [![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 
@@ -15,8 +15,12 @@ By combining industry-standard network analysis tools (**Zeek**, **Tshark**, **P
 
 ---
 
-## What's new in version 2
+## What's new in version 2.1
 
+- **Adjustable LLM context** — choose a 10K–1M-token model window; PCAP Hunter uses at most 50% for input so output and tokenizer variance do not force context compression.
+- **Optional unlimited context** — disable the window cap and send every available sanitized evidence item in one request; the slider is disabled while this mode is active.
+- **Richer, better-grounded reports** — foreground and background generation now share correlations, flow anomalies, JA3, final ATT&CK mapping, capture metrics, stage status, and warnings.
+- **Faster large investigations** — bounded case queries, batched IOC persistence, cached geographic indexes, and capped browser chart samples reduce database and dashboard overhead.
 - **Dedicated MITRE ATT&CK workspace** — evidence-backed technique hypotheses, ATT&CK v19.1 metadata, analyst dispositions, capture coverage, visibility gaps, and Navigator export.
 - **Capture-quality telemetry** — packet/flow scale, parse ratio, time window, sampling limits, completed stages, and warnings now travel with UI and API results and persist with cases.
 - **Durable UI analysis** — Streamlit now submits PCAP work to a process-backed queue, autosaves full evidence to SQLite, and restores recent jobs after a page stop or browser reload.
@@ -29,7 +33,7 @@ By combining industry-standard network analysis tools (**Zeek**, **Tshark**, **P
 
 ## Table of Contents
 
-- [What's new in version 2](#whats-new-in-version-2)
+- [What's new in version 2.1](#whats-new-in-version-21)
 - [Visual Tour](#visual-tour)
 - [Key Features](#key-features)
 - [Integrations API](#integrations-api)
@@ -141,6 +145,7 @@ sparkline. Environment-variable keys are shown as read-only bootstrap entries.
 ### 10. Config — centralized settings
 
 An **LLM Integration** section with three providers (LM Studio, OpenAI, Anthropic),
+an adjustable 10K–1M-token context window, an optional unlimited-context mode,
 a **YARA Rules** section with a configurable rules directory, OSINT provider keys
 with a **Test Providers** live-check button, home location for the world map,
 binary paths, and pipeline thresholds — all in one place with per-section clear
@@ -153,7 +158,9 @@ buttons. API keys are PBKDF2-encrypted at rest.
 Pick the backend that fits your environment: **LM Studio** for local, air-gapped
 analysis (chunked per-section generation), or **OpenAI** / **Anthropic** for
 single-shot full-context cloud reports. Each provider keeps its own credentials
-and model picker.
+and model picker. The selected context window controls the evidence budget for
+every provider; unlimited mode sends all sanitized evidence in a single request
+and may be rejected if it exceeds the model's physical limit.
 
 ![LLM provider selection](docs/images/09-llm-providers.png)
 
@@ -166,6 +173,7 @@ and model picker.
   - **LM Studio** (local) — privacy-first, air-gapped friendly; reports are generated section-by-section to fit small context windows.
   - **OpenAI** (cloud) — single-shot report with the entire evidence corpus in one full-context call.
   - **Anthropic** (cloud) — Claude via the official `anthropic` SDK (`claude-opus-4-8`, `claude-sonnet-4-6`, `claude-haiku-4-5`), single-shot with streaming.
+- **Configurable Context Budget** — select a 10K–1M-token model window with a conservative 50% input ceiling, or explicitly enable unlimited mode to send all sanitized evidence at once.
 - **Evidence-Grounded Reporting** — SOC-ready reports with severity-calibrated assessments, false-positive awareness, confidence qualifiers, a Risk Matrix rendered as a real Markdown table, and an IOC Summary table.
 - **LLM-Optional Evidence View** — parsed packet, flow, IOC, correlation, stage, and warning evidence remains visible when generation is skipped or the provider is unavailable.
 - **Multi-Language Reports** — 9 languages with region-specific terminology: English, Traditional Chinese (Taiwan), Simplified Chinese, Japanese, Korean, Italian, Spanish, French, German.

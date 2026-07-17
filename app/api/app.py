@@ -109,10 +109,8 @@ def _title_for_status(status: int) -> str:
     }.get(status, "Error")
 
 
-def _identify_key(request: Request, settings) -> str:
-    """Derive key name for audit logging (NOT used for auth decisions)."""
-    import hashlib
-
+def _identify_env_key(request: Request, settings) -> str:
+    """Identify environment-backed keys without duplicating database authentication."""
     auth = request.headers.get("Authorization", "")
     if not auth.startswith("Bearer "):
         return "-"
@@ -121,15 +119,6 @@ def _identify_key(request: Request, settings) -> str:
         return "env:main"
     if settings.feed_key and secrets.compare_digest(presented, settings.feed_key):
         return "env:feed"
-    # Try DB key lookup for audit log
-    try:
-        key_repo = get_key_repo()
-        key_hash = hashlib.sha256(presented.encode("utf-8")).hexdigest()
-        api_key = key_repo.get_key_by_hash(key_hash)
-        if api_key:
-            return api_key.name
-    except Exception:
-        pass
     return "-"
 
 
@@ -208,9 +197,10 @@ def create_app() -> FastAPI:
         if not rid:  # sanitisation stripped everything
             rid = uuid.uuid4().hex
         request.state.request_id = rid  # stash for exception handler
-        key_name = _identify_key(request, settings)
+        fallback_key_name = _identify_env_key(request, settings)
         start = time.monotonic()
         response = await call_next(request)
+        key_name = getattr(request.state, "key_name", fallback_key_name)
         response.headers["X-Request-ID"] = rid
         duration_ms = int((time.monotonic() - start) * 1000)
         logger.info(

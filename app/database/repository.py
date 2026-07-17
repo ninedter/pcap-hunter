@@ -15,6 +15,8 @@ from app.utils.logger import get_logger
 
 logger = get_logger(__name__)
 
+JSON_COMPRESSION_LEVEL = 6
+
 
 class CaseRepository:
     """Repository for case management CRUD operations."""
@@ -36,14 +38,16 @@ class CaseRepository:
 
     def _get_conn(self) -> sqlite3.Connection:
         """Get database connection."""
-        conn = sqlite3.connect(str(self._db_path))
+        conn = sqlite3.connect(str(self._db_path), timeout=30.0)
         conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA busy_timeout=30000")
         return conn
 
     def _init_schema(self):
         """Initialize database schema."""
         conn = self._get_conn()
         try:
+            conn.execute("PRAGMA journal_mode=WAL")
             conn.executescript(
                 """
                 -- Cases table
@@ -55,7 +59,8 @@ class CaseRepository:
                     severity TEXT DEFAULT 'medium',
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    closed_at TIMESTAMP
+                    closed_at TIMESTAMP,
+                    source TEXT DEFAULT 'ui'
                 );
 
                 -- Analyses linked to cases
@@ -135,26 +140,19 @@ class CaseRepository:
                 CREATE INDEX IF NOT EXISTS idx_iocs_type_value ON iocs(ioc_type, value);
                 CREATE INDEX IF NOT EXISTS idx_notes_case ON notes(case_id);
                 CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status);
+                CREATE INDEX IF NOT EXISTS idx_jobs_status_heartbeat ON jobs(status, heartbeat_at);
                 CREATE INDEX IF NOT EXISTS idx_jobs_case ON jobs(case_id);
                 """
             )
-            # Existing case databases predate ATT&CK and capture-quality
-            # persistence.  Add the columns in place so upgrades do not erase
-            # prior investigations.
+            analysis_columns = {row["name"] for row in conn.execute("PRAGMA table_info(analyses)")}
             for column in ("attack_mapping_json", "capture_metrics_json", "session_artifacts_json"):
-                try:
-                    conn.execute(f"ALTER TABLE analyses ADD COLUMN {column} TEXT")  # noqa: S608 — fixed column names
-                except sqlite3.OperationalError as exc:
-                    if "duplicate column name" not in str(exc).lower():
-                        raise
-            conn.commit()
+                if column not in analysis_columns:
+                    conn.execute(f"ALTER TABLE analyses ADD COLUMN {column} TEXT")
 
-            # Idempotent column additions (ALTER TABLE ADD COLUMN errors if column exists)
-            try:
+            case_columns = {row["name"] for row in conn.execute("PRAGMA table_info(cases)")}
+            if "source" not in case_columns:
                 conn.execute("ALTER TABLE cases ADD COLUMN source TEXT DEFAULT 'ui'")
-                conn.commit()
-            except sqlite3.OperationalError:
-                pass  # column already exists
+            conn.commit()
         finally:
             conn.close()
 
@@ -256,7 +254,10 @@ class CaseRepository:
         """
         conn = self._get_conn()
         try:
-            query = "SELECT DISTINCT c.* FROM cases c"
+            query = (
+                "SELECT DISTINCT c.*, "
+                "(SELECT COUNT(*) FROM analyses a WHERE a.case_id = c.id) AS analysis_count FROM cases c"
+            )
             params: list[Any] = []
             conditions = []
 
@@ -282,11 +283,30 @@ class CaseRepository:
             params.extend([limit, offset])
 
             rows = conn.execute(query, params).fetchall()
-            cases = []
+            cases: list[Case] = []
             for row in rows:
                 case = self._row_to_case(dict(row))
-                case.tags = self._get_case_tags(conn, case.id)
+                case._analysis_count = int(row["analysis_count"] or 0)
                 cases.append(case)
+
+            if cases:
+                case_ids = [case.id for case in cases]
+                placeholders = ",".join("?" for _ in case_ids)
+                tag_rows = conn.execute(
+                    f"""
+                    SELECT ct.case_id, t.name
+                    FROM case_tags ct
+                    JOIN tags t ON t.id = ct.tag_id
+                    WHERE ct.case_id IN ({placeholders})
+                    ORDER BY t.name
+                    """,
+                    case_ids,
+                ).fetchall()
+                tags_by_case: dict[str, list[str]] = {case_id: [] for case_id in case_ids}
+                for tag_row in tag_rows:
+                    tags_by_case[tag_row["case_id"]].append(tag_row["name"])
+                for case in cases:
+                    case.tags = tags_by_case[case.id]
 
             return cases
         finally:
@@ -469,8 +489,16 @@ class CaseRepository:
 
             # Save IOCs as a replacement set for this analysis ID.
             conn.execute("DELETE FROM iocs WHERE analysis_id = ?", (analysis.id,))
-            for ioc in analysis.iocs:
-                self._save_ioc(conn, analysis.id, ioc)
+            conn.executemany(
+                """
+                INSERT OR IGNORE INTO iocs (analysis_id, ioc_type, value, context, severity)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                [
+                    (analysis.id, ioc.ioc_type.value, ioc.value, ioc.context, ioc.severity.value)
+                    for ioc in analysis.iocs
+                ],
+            )
 
             conn.commit()
             logger.info("Saved analysis: %s", analysis.id)
@@ -513,21 +541,19 @@ class CaseRepository:
         iocs = []
         artifacts = analysis.features.get("artifacts", {})
 
-        # Extract IPs
-        for ip in artifacts.get("ips", []):
-            iocs.append(IOC(ioc_type=IOCType.IP, value=ip, context="Extracted from PCAP"))
-
-        # Extract domains
-        for domain in artifacts.get("domains", []):
-            iocs.append(IOC(ioc_type=IOCType.DOMAIN, value=domain, context="Extracted from PCAP"))
-
-        # Extract hashes
-        for h in artifacts.get("hashes", []):
-            iocs.append(IOC(ioc_type=IOCType.HASH, value=h, context="Carved file hash"))
-
-        # Extract JA3
-        for ja3 in artifacts.get("ja3", []):
-            iocs.append(IOC(ioc_type=IOCType.JA3, value=ja3, context="TLS fingerprint"))
+        iocs.extend(
+            IOC(ioc_type=IOCType.IP, value=ip, context="Extracted from PCAP") for ip in artifacts.get("ips", [])
+        )
+        iocs.extend(
+            IOC(ioc_type=IOCType.DOMAIN, value=domain, context="Extracted from PCAP")
+            for domain in artifacts.get("domains", [])
+        )
+        iocs.extend(
+            IOC(ioc_type=IOCType.HASH, value=value, context="Carved file hash") for value in artifacts.get("hashes", [])
+        )
+        iocs.extend(
+            IOC(ioc_type=IOCType.JA3, value=value, context="TLS fingerprint") for value in artifacts.get("ja3", [])
+        )
 
         return iocs
 
@@ -687,22 +713,24 @@ class CaseRepository:
     def _get_case_analyses(self, conn: sqlite3.Connection, case_id: str) -> list[Analysis]:
         """Get analyses for a case."""
         rows = conn.execute("SELECT * FROM analyses WHERE case_id = ?", (case_id,)).fetchall()
-        return [self._row_to_analysis(dict(row), conn) for row in rows]
+        if not rows:
+            return []
+
+        analysis_ids = [row["id"] for row in rows]
+        placeholders = ",".join("?" for _ in analysis_ids)
+        ioc_rows = conn.execute(
+            f"SELECT * FROM iocs WHERE analysis_id IN ({placeholders}) ORDER BY id",
+            analysis_ids,
+        ).fetchall()
+        iocs_by_analysis: dict[str, list[IOC]] = {analysis_id: [] for analysis_id in analysis_ids}
+        for row in ioc_rows:
+            iocs_by_analysis[row["analysis_id"]].append(self._row_to_ioc(row))
+        return [self._row_to_analysis(dict(row), conn, iocs=iocs_by_analysis[row["id"]]) for row in rows]
 
     def _get_case_notes(self, conn: sqlite3.Connection, case_id: str) -> list[Note]:
         """Get notes for a case."""
         rows = conn.execute("SELECT * FROM notes WHERE case_id = ? ORDER BY created_at DESC", (case_id,)).fetchall()
         return [self._row_to_note(dict(row)) for row in rows]
-
-    def _save_ioc(self, conn: sqlite3.Connection, analysis_id: str, ioc: IOC) -> None:
-        """Save IOC to database."""
-        conn.execute(
-            """
-            INSERT OR IGNORE INTO iocs (analysis_id, ioc_type, value, context, severity)
-            VALUES (?, ?, ?, ?, ?)
-            """,
-            (analysis_id, ioc.ioc_type.value, ioc.value, ioc.context, ioc.severity.value),
-        )
 
     def _row_to_case(self, row: dict) -> Case:
         """Convert database row to Case object."""
@@ -728,7 +756,13 @@ class CaseRepository:
             closed_at=closed_at,
         )
 
-    def _row_to_analysis(self, row: dict, conn: sqlite3.Connection) -> Analysis:
+    def _row_to_analysis(
+        self,
+        row: dict,
+        conn: sqlite3.Connection,
+        *,
+        iocs: list[IOC] | None = None,
+    ) -> Analysis:
         """Convert database row to Analysis object."""
         analyzed_at = row.get("analyzed_at")
         if isinstance(analyzed_at, str):
@@ -744,18 +778,9 @@ class CaseRepository:
         capture_metrics = self._decompress_json(row.get("capture_metrics_json"))
         session_artifacts = self._decompress_json(row.get("session_artifacts_json"))
 
-        # Load IOCs
-        ioc_rows = conn.execute("SELECT * FROM iocs WHERE analysis_id = ?", (row["id"],)).fetchall()
-        iocs = [
-            IOC(
-                id=r["id"],
-                ioc_type=IOCType.from_str(r["ioc_type"]),
-                value=r["value"],
-                context=r["context"] if r["context"] else "",
-                severity=Severity.from_str(r["severity"] if r["severity"] else "medium"),
-            )
-            for r in ioc_rows
-        ]
+        if iocs is None:
+            ioc_rows = conn.execute("SELECT * FROM iocs WHERE analysis_id = ?", (row["id"],)).fetchall()
+            iocs = [self._row_to_ioc(ioc_row) for ioc_row in ioc_rows]
 
         return Analysis(
             id=row["id"],
@@ -774,6 +799,17 @@ class CaseRepository:
             capture_metrics=capture_metrics,
             session_artifacts=session_artifacts,
             iocs=iocs,
+        )
+
+    @staticmethod
+    def _row_to_ioc(row: sqlite3.Row) -> IOC:
+        """Convert a database row to an IOC object."""
+        return IOC(
+            id=row["id"],
+            ioc_type=IOCType.from_str(row["ioc_type"]),
+            value=row["value"],
+            context=row["context"] or "",
+            severity=Severity.from_str(row["severity"] or "medium"),
         )
 
     def _row_to_note(self, row: dict) -> Note:
@@ -797,8 +833,8 @@ class CaseRepository:
         """Compress JSON data."""
         if data is None:
             return None
-        json_str = json.dumps(data)
-        return gzip.compress(json_str.encode("utf-8"))
+        payload = json.dumps(data, separators=(",", ":")).encode("utf-8")
+        return gzip.compress(payload, compresslevel=JSON_COMPRESSION_LEVEL, mtime=0)
 
     def _decompress_json(self, data: bytes | None) -> dict | list | None:
         """Decompress JSON data."""

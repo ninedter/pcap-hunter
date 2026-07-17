@@ -178,7 +178,7 @@ def _run_osint_stage(result: PipelineResult, opts: dict, job_id: str, repo: Case
     return osint_data
 
 
-def _load_llm_settings() -> tuple[str, str, str, str, str]:
+def _load_llm_settings() -> tuple[str, str, str, str, str, int, bool]:
     """Load the active provider settings without putting credentials in a job row."""
     from app.llm import providers as llm_providers
 
@@ -208,7 +208,18 @@ def _load_llm_settings() -> tuple[str, str, str, str, str]:
         model = saved.get("cfg_llm_model") or os.getenv("LMSTUDIO_MODEL", C.LM_MODEL)
 
     language = saved.get("cfg_llm_language") or os.getenv("LMSTUDIO_LANGUAGE", C.LM_LANGUAGE)
-    return provider, base_url, api_key, model, language
+    from app.llm.context_window import normalize_context_window
+
+    context_window = normalize_context_window(
+        saved.get("cfg_llm_context_window") or os.getenv("LLM_CONTEXT_WINDOW", C.LLM_CONTEXT_WINDOW_DEFAULT)
+    )
+    unlimited_value = saved.get("cfg_llm_unlimited_context") or os.getenv("LLM_UNLIMITED_CONTEXT", "")
+    unlimited_context = (
+        unlimited_value
+        if isinstance(unlimited_value, bool)
+        else str(unlimited_value).strip().lower() in {"1", "true", "yes", "on"}
+    )
+    return provider, base_url, api_key, model, language, context_window, unlimited_context
 
 
 def _run_llm_stage(
@@ -228,7 +239,7 @@ def _run_llm_stage(
     from app.llm import providers as llm_providers
 
     _update_manual_stage(repo, job_id, "LLM report")
-    provider, base_url, api_key, model, language = _load_llm_settings()
+    provider, base_url, api_key, model, language, context_window, unlimited_context = _load_llm_settings()
     if provider in (llm_providers.PROVIDER_OPENAI, llm_providers.PROVIDER_ANTHROPIC) and not api_key:
         result.warnings.append(WARNING_LLM_NOT_CONFIGURED)
         _update_manual_stage(repo, job_id, "LLM report", completed=True)
@@ -238,6 +249,79 @@ def _run_llm_stage(
         _update_manual_stage(repo, job_id, "LLM report", completed=True)
         return
 
+    # Build the same deterministic post-analysis evidence used by the foreground
+    # Streamlit path. Without these rows, background reports received no
+    # correlations, flow anomalies, or final OSINT/YARA-aware ATT&CK mapping.
+    from app.analysis.correlation import correlate_indicators
+    from app.analysis.flow_analysis import detect_flow_asymmetry, detect_port_anomalies
+    from app.analysis.visibility import build_capture_metrics
+    from app.threat_intel.attack_mapping import ATTACKMapper
+
+    flows = result.features.get("flows") or []
+    flow_asymmetry = []
+    port_anomalies = []
+    try:
+        if flows:
+            flow_asymmetry = detect_flow_asymmetry(flows)
+            port_anomalies = detect_port_anomalies(flows)
+    except Exception:
+        logger.exception("Job %s: flow post-analysis for LLM context failed", job_id)
+
+    correlations = []
+    try:
+        correlations = correlate_indicators(
+            features=result.features,
+            osint=osint_data,
+            beacon_df=pd.DataFrame(result.beacon_df_records),
+            dns_analysis=result.dns_analysis,
+            tls_analysis=result.tls_analysis,
+            yara_results=yara_results,
+            asymmetry_results=flow_asymmetry,
+        )
+    except Exception:
+        logger.exception("Job %s: correlation analysis for LLM context failed", job_id)
+
+    try:
+        result.attack_mapping = (
+            ATTACKMapper()
+            .map_analysis(
+                features=result.features,
+                dns_analysis=result.dns_analysis or {},
+                tls_analysis=result.tls_analysis or {},
+                yara_results=yara_results or {},
+                beacon_results=result.beacon_df_records,
+                osint=osint_data or {},
+            )
+            .to_dict()
+        )
+    except Exception:
+        logger.exception("Job %s: ATT&CK mapping for LLM context failed", job_id)
+
+    try:
+        result.capture_metrics = build_capture_metrics(
+            {
+                "features": result.features,
+                "__total_pkts": result.packet_count,
+                "dns_analysis": result.dns_analysis,
+                "tls_analysis": result.tls_analysis,
+                "zeek_tables": result.zeek_tables,
+                "yara_results": yara_results,
+                "osint": osint_data,
+                "correlations": correlations,
+                "pipeline_warnings": result.warnings,
+            }
+        )
+    except Exception:
+        logger.exception("Job %s: capture metrics for LLM context failed", job_id)
+
+    ja3_analysis: dict = {}
+    try:
+        from app.pipeline.zeek import extract_ja3_from_zeek_tables
+
+        _, ja3_analysis = extract_ja3_from_zeek_tables(result.zeek_log_paths)
+    except Exception:
+        logger.exception("Job %s: JA3 extraction for LLM context failed", job_id)
+
     context = {
         "features": result.features,
         "osint": osint_data,
@@ -245,11 +329,22 @@ def _run_llm_stage(
         "beaconing": result.beacon_df_records,
         "carved": result.carved_items,
         "packet_count": result.packet_count,
+        "correlations": correlations,
         "dns_analysis": result.dns_analysis,
         "tls_analysis": result.tls_analysis,
         "yara_results": yara_results,
+        "flow_asymmetry": flow_asymmetry,
+        "port_anomalies": port_anomalies,
+        "ja3_analysis": ja3_analysis,
         "attack_mapping": result.attack_mapping,
         "capture_metrics": result.capture_metrics,
+        "pipeline_stages": result.stages_run,
+        "pipeline_warnings": result.warnings,
+        "rdns_map": {
+            ip: data["ptr"]
+            for ip, data in (osint_data or {}).get("ips", {}).items()
+            if isinstance(data, dict) and data.get("ptr")
+        },
         "config": {
             "limit_packets": opts.get("pyshark_packet_limit"),
             "do_pyshark": opts.get("do_pyshark", True),
@@ -267,6 +362,8 @@ def _run_llm_stage(
             model=model,
             context=context,
             language=language,
+            context_window_tokens=context_window,
+            unlimited_context=unlimited_context,
         )
         if result.summary_narrative:
             result.stages_run.append("llm")

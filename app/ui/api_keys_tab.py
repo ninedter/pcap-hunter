@@ -105,7 +105,7 @@ def _render_env_keys():
             }
         )
 
-    st.dataframe(pd.DataFrame(env_data), use_container_width=True, hide_index=True)
+    st.dataframe(pd.DataFrame(env_data), width="stretch", hide_index=True)
 
 
 def _render_key_list(repo: KeyRepository):
@@ -145,7 +145,7 @@ def _render_key_list(repo: KeyRepository):
         )
 
     df = pd.DataFrame(rows)
-    st.dataframe(df.drop(columns=["ID"]), use_container_width=True, hide_index=True)
+    st.dataframe(df.drop(columns=["ID"]), width="stretch", hide_index=True)
 
     # Key actions (expand per key)
     st.markdown("##### Key Actions")

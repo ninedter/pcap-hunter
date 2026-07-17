@@ -311,9 +311,15 @@ def test_worker_llm_opt_in_persists_report(tmp_path, monkeypatch):
     monkeypatch.setattr(
         queue_mod,
         "_load_llm_settings",
-        lambda: ("lmstudio", "http://localhost:1234/v1", "", "test-model", "US English"),
+        lambda: ("lmstudio", "http://localhost:1234/v1", "", "test-model", "US English", 32_000, False),
     )
-    monkeypatch.setattr(provider_mod, "synthesize_report", lambda *args, **kwargs: "# Durable report")
+    captured_llm_context = {}
+
+    def fake_synthesize_report(*args, **kwargs):
+        captured_llm_context.update(kwargs["context"])
+        return "# Durable report"
+
+    monkeypatch.setattr(provider_mod, "synthesize_report", fake_synthesize_report)
 
     fake_pcap = tmp_path / "fake.pcap"
     fake_pcap.write_bytes(b"\xd4\xc3\xb2\xa1" + b"\x00" * 20)
@@ -334,6 +340,12 @@ def test_worker_llm_opt_in_persists_report(tmp_path, monkeypatch):
     assert result["summary_narrative"] == "# Durable report"
     assert persisted.report == "# Durable report"
     assert "llm" in persisted.session_artifacts["pipeline_stages"]
+    assert "correlations" in captured_llm_context
+    assert "flow_asymmetry" in captured_llm_context
+    assert "port_anomalies" in captured_llm_context
+    assert "ja3_analysis" in captured_llm_context
+    assert captured_llm_context["capture_metrics"]["detectors"]["correlation"] == "available"
+    assert "pipeline_warnings" in captured_llm_context
 
 
 def test_report_only_job_updates_existing_analysis(tmp_path, monkeypatch):
@@ -342,7 +354,7 @@ def test_report_only_job_updates_existing_analysis(tmp_path, monkeypatch):
     monkeypatch.setattr(
         queue_mod,
         "_load_llm_settings",
-        lambda: ("lmstudio", "http://localhost:1234/v1", "", "test-model", "US English"),
+        lambda: ("lmstudio", "http://localhost:1234/v1", "", "test-model", "US English", 32_000, False),
     )
     monkeypatch.setattr(provider_mod, "synthesize_report", lambda *args, **kwargs: "# Updated report")
 

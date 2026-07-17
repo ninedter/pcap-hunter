@@ -228,6 +228,7 @@ class Case:
     tags: list[str] = field(default_factory=list)
     analyses: list[Analysis] = field(default_factory=list)
     notes: list[Note] = field(default_factory=list)
+    _analysis_count: int | None = field(default=None, repr=False, compare=False)
 
     def to_dict(self) -> dict:
         return {
@@ -277,7 +278,7 @@ class Case:
     @property
     def analysis_count(self) -> int:
         """Get number of analyses."""
-        return len(self.analyses)
+        return self._analysis_count if self._analysis_count is not None else len(self.analyses)
 
     @property
     def ioc_count(self) -> int:
@@ -288,6 +289,7 @@ class Case:
         """Add analysis to case."""
         analysis.case_id = self.id
         self.analyses.append(analysis)
+        self._analysis_count = None
         self.updated_at = datetime.now()
 
     def add_note(self, content: str) -> Note:

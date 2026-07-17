@@ -123,11 +123,6 @@ def _precompute_dash_aggregates(flows: list | None) -> None:
     st.session_state["dash_aggregates"] = compute_flow_aggregates(flows, top_n=10, weight="flows")
 
 
-def _ss_default(key: str, value):
-    if key not in st.session_state:
-        st.session_state[key] = value
-
-
 def cfg_get(name: str, env_key: str, default):
     return st.session_state.get(name) or os.getenv(env_key, default)
 
@@ -580,6 +575,22 @@ with tab_progress:
             api_key = cfg_get("cfg_lm_api_key", "LMSTUDIO_API_KEY", C.LM_API_KEY)
             model = cfg_get("cfg_lm_model", "LMSTUDIO_MODEL", C.LM_MODEL)
         language = cfg_get("cfg_lm_language", "LMSTUDIO_LANGUAGE", C.LM_LANGUAGE)
+        try:
+            llm_context_window = int(
+                cfg_get(
+                    "cfg_llm_context_window",
+                    "LLM_CONTEXT_WINDOW",
+                    C.LLM_CONTEXT_WINDOW_DEFAULT,
+                )
+            )
+        except (TypeError, ValueError):
+            llm_context_window = C.LLM_CONTEXT_WINDOW_DEFAULT
+        unlimited_value = cfg_get("cfg_llm_unlimited_context", "LLM_UNLIMITED_CONTEXT", False)
+        llm_unlimited_context = (
+            unlimited_value
+            if isinstance(unlimited_value, bool)
+            else str(unlimited_value).strip().lower() in {"1", "true", "yes", "on"}
+        )
         provider_label = llm_providers.provider_label(llm_provider)
 
         try:
@@ -891,6 +902,8 @@ with tab_progress:
                         "ja3_analysis": st.session_state.get("ja3_analysis"),
                         "attack_mapping": st.session_state.get("attack_mapping"),
                         "capture_metrics": st.session_state.get("capture_metrics"),
+                        "pipeline_stages": st.session_state.get("pipeline_stages") or [],
+                        "pipeline_warnings": st.session_state.get("pipeline_warnings") or [],
                         "rdns_map": st.session_state.get("rdns_map"),
                         "config": {
                             "limit_packets": limit_packets,
@@ -920,6 +933,8 @@ with tab_progress:
                             model=model,
                             context=context,
                             language=current_lang,
+                            context_window_tokens=llm_context_window,
+                            unlimited_context=llm_unlimited_context,
                         )
                     except Exception as e:
                         st.error(f"LLM call failed: {e}")
@@ -946,6 +961,7 @@ with tab_progress:
 # ---------------------- 3) Dashboard ----------------------
 with tab_dashboard:
     st.markdown("### Dashboard")
+    dashboard_beacons = get_df_state("beacon_df")
 
     # Batch summary at the top when in batch mode
     if st.session_state.get("__batch_mode") and st.session_state.get("__batch_result"):
@@ -960,7 +976,7 @@ with tab_dashboard:
     render_threat_summary(
         st.container(),
         correlations=st.session_state.get("correlations"),
-        beacon_df=get_df_state("beacon_df") if not get_df_state("beacon_df").empty else None,
+        beacon_df=dashboard_beacons if not dashboard_beacons.empty else None,
         yara_results=st.session_state.get("yara_results"),
         tls_analysis=st.session_state.get("tls_analysis"),
         dns_analysis=st.session_state.get("dns_analysis"),
@@ -976,7 +992,7 @@ with tab_dashboard:
         feats,
         st.session_state.get("osint"),
         st.session_state.get("dns_analysis"),
-        get_df_state("beacon_df") if not get_df_state("beacon_df").empty else None,
+        dashboard_beacons if not dashboard_beacons.empty else None,
     )
 
     # Initialize filter state
@@ -1335,12 +1351,15 @@ with tab_dashboard:
     with dash_col1:
         # Sankey flow diagram (ECharts via HTML — draggable nodes, zoom & pan)
         if filtered_flows:
-            import streamlit.components.v1 as components
-
             sankey_result = build_sankey_html(filtered_flows)
             if sankey_result:
                 sankey_html, sankey_h = sankey_result
-                components.html(sankey_html, height=sankey_h + 20, scrolling=True)
+                if hasattr(st, "iframe"):
+                    st.iframe(sankey_html, height=sankey_h + 20)
+                else:
+                    import streamlit.components.v1 as components
+
+                    components.html(sankey_html, height=sankey_h + 20, scrolling=True)
                 render_chart_hint(
                     "Drag nodes to rearrange. Source IP → Port (Protocol) → Destination IP. Width = packet volume."
                 )
@@ -1356,7 +1375,7 @@ with tab_dashboard:
                     _ts[c.get("indicator", "")] = c.get("composite_score", 0)
             fig = plot_network_graph(filtered_flows, threat_scores=_ts)
             if fig.data:
-                st.plotly_chart(fig, use_container_width=True)
+                st.plotly_chart(fig, width="stretch")
                 render_chart_hint("Node size = connections. Color: blue=low, red=high threat.")
 
     # Attack timeline (full-width, if available)
@@ -1368,16 +1387,14 @@ with tab_dashboard:
             features=feats,
             dns_analysis=st.session_state.get("dns_analysis"),
             yara_results=st.session_state.get("yara_results"),
-            beacon_results=(
-                get_df_state("beacon_df").to_dict("records") if not get_df_state("beacon_df").empty else []
-            ),
+            beacon_results=(dashboard_beacons.to_dict("records") if not dashboard_beacons.empty else []),
             tls_analysis=st.session_state.get("tls_analysis"),
         )
         if timeline:
             timeline_dicts = [e.to_dict() for e in timeline]
             st.plotly_chart(
                 plot_attack_timeline(timeline_dicts),
-                use_container_width=True,
+                width="stretch",
             )
             render_chart_hint("Diamond markers show events by severity and time.")
     except Exception as e:
@@ -1389,24 +1406,24 @@ with tab_dashboard:
         with prof_col1:
             pkt_hist = plot_packet_size_histogram(filtered_flows)
             if pkt_hist:
-                st.plotly_chart(pkt_hist, use_container_width=True)
+                st.plotly_chart(pkt_hist, width="stretch")
                 render_chart_hint("Packet size distribution — small uniform packets may indicate C2.")
         with prof_col2:
             iat_hist = plot_inter_arrival_histogram(filtered_flows)
             if iat_hist:
-                st.plotly_chart(iat_hist, use_container_width=True)
+                st.plotly_chart(iat_hist, width="stretch")
                 render_chart_hint("Inter-arrival time distribution — spikes at regular intervals suggest beaconing.")
 
         # Timeline heatmap (full-width)
         heatmap_fig = plot_traffic_timeline_heatmap(filtered_flows)
         if heatmap_fig:
-            st.plotly_chart(heatmap_fig, use_container_width=True)
+            st.plotly_chart(heatmap_fig, width="stretch")
             render_chart_hint(
                 "Rows = IPs, columns = time. Bright cells = high activity. Spot bursty or persistent connections."
             )
 
     # --- Beaconing / YARA / TLS summaries on dashboard ---
-    _beacon = get_df_state("beacon_df")
+    _beacon = dashboard_beacons
     _yara = st.session_state.get("yara_results")
     _tls = st.session_state.get("tls_analysis")
 
@@ -1435,7 +1452,7 @@ with tab_dashboard:
                         beacon_col_cfg["count"] = st.column_config.NumberColumn("Packets", format="%d")
                     if "mean_gap" in display_df.columns:
                         beacon_col_cfg["mean_gap"] = st.column_config.NumberColumn("Avg Gap (s)", format="%.1f")
-                    st.dataframe(display_df, hide_index=True, use_container_width=True, column_config=beacon_col_cfg)
+                    st.dataframe(display_df, hide_index=True, width="stretch", column_config=beacon_col_cfg)
 
     with detail_col2:
         if _yara and isinstance(_yara, dict) and _yara.get("matched", 0) > 0:

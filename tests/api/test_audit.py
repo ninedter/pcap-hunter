@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import logging
+from unittest.mock import patch
 
 from fastapi.testclient import TestClient
 
@@ -36,6 +37,47 @@ def test_audit_log_includes_key_name(monkeypatch, tmp_path, caplog):
     get_settings.cache_clear()
     get_repo.cache_clear()
     get_queue.cache_clear()
+
+
+def test_db_key_is_looked_up_once_and_named_in_audit_log(monkeypatch, tmp_path, caplog):
+    monkeypatch.delenv("PCAP_HUNTER_API_KEY", raising=False)
+    monkeypatch.delenv("PCAP_HUNTER_FEED_KEY", raising=False)
+    monkeypatch.setenv("PCAP_HUNTER_API_DB_PATH", str(tmp_path / "t.db"))
+
+    from app.api.auth import Scope
+    from app.api.deps import get_key_repo, get_queue, get_rate_limiter, get_repo, get_settings, get_usage_tracker
+    from app.api.key_models import APIKey, generate_api_key
+
+    get_settings.cache_clear()
+    get_repo.cache_clear()
+    get_queue.cache_clear()
+    get_key_repo.cache_clear()
+    get_rate_limiter.cache_clear()
+    get_usage_tracker.cache_clear()
+
+    raw_key, key_hash, prefix = generate_api_key()
+    key_repo = get_key_repo()
+    key_repo.create_key(APIKey(key_hash=key_hash, key_prefix=prefix, name="audit-key", scope=Scope.FULL))
+
+    from app.api.app import create_app
+
+    client = TestClient(create_app())
+    with (
+        patch.object(key_repo, "get_key_by_hash", wraps=key_repo.get_key_by_hash) as lookup,
+        caplog.at_level(logging.INFO, logger="app.api.app"),
+    ):
+        response = client.get("/api/v1/iocs.json", headers={"Authorization": f"Bearer {raw_key}"})
+
+    assert response.status_code == 200
+    assert lookup.call_count == 1
+    assert any("key_name=audit-key" in record.message for record in caplog.records)
+
+    get_settings.cache_clear()
+    get_repo.cache_clear()
+    get_queue.cache_clear()
+    get_key_repo.cache_clear()
+    get_rate_limiter.cache_clear()
+    get_usage_tracker.cache_clear()
 
 
 def test_cors_disabled_by_default(monkeypatch, tmp_path):

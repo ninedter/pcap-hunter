@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 from functools import lru_cache
 
-from fastapi import Header, HTTPException
+from fastapi import Header, HTTPException, Request
 
 from app.api.auth import Scope
 from app.api.key_auth import RateLimitError, authenticate
@@ -57,7 +57,7 @@ def get_usage_tracker() -> UsageTracker:
     return UsageTracker()
 
 
-def _do_auth(authorization: str | None, required: Scope) -> Scope:
+def _do_auth(request: Request, authorization: str | None, required: Scope) -> Scope:
     """Shared auth logic for both scope levels."""
     settings = get_settings()
     key_repo = get_key_repo()
@@ -72,6 +72,7 @@ def _do_auth(authorization: str | None, required: Scope) -> Scope:
             usage_tracker=usage_tracker,
             required=required,
         )
+        request.state.key_name = result.key_name
         return result.scope
     except ValueError as exc:
         # RFC 6750 §3: Bearer-auth APIs must advertise the scheme on 401.
@@ -87,12 +88,14 @@ def _do_auth(authorization: str | None, required: Scope) -> Scope:
 
 
 def require_full_scope(
+    request: Request,
     authorization: str | None = Header(default=None),
 ) -> Scope:
-    return _do_auth(authorization, Scope.FULL)
+    return _do_auth(request, authorization, Scope.FULL)
 
 
 def require_feed_scope(
+    request: Request,
     authorization: str | None = Header(default=None),
 ) -> Scope:
-    return _do_auth(authorization, Scope.FEED)
+    return _do_auth(request, authorization, Scope.FEED)

@@ -218,7 +218,7 @@ def render_mitre_page(state: Mapping[str, Any]) -> None:
                 }
                 for technique in techniques
             ]
-            st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+            st.dataframe(pd.DataFrame(rows), width="stretch", hide_index=True)
 
             st.markdown("#### Evidence detail")
             for technique in techniques:
@@ -275,7 +275,7 @@ def render_mitre_page(state: Mapping[str, Any]) -> None:
                 else "Unavailable",
             },
         ]
-        st.dataframe(pd.DataFrame(profile_rows), use_container_width=True, hide_index=True)
+        st.dataframe(pd.DataFrame(profile_rows), width="stretch", hide_index=True)
         review_counts = {
             status: sum(1 for tech in techniques if tech.disposition == status)
             for status in ("confirmed", "dismissed", "unreviewed")
@@ -285,7 +285,7 @@ def render_mitre_page(state: Mapping[str, Any]) -> None:
             f"{review_counts['unreviewed']} unreviewed"
         )
         st.markdown("#### Detector coverage")
-        st.dataframe(pd.DataFrame(visibility), use_container_width=True, hide_index=True)
+        st.dataframe(pd.DataFrame(visibility), width="stretch", hide_index=True)
         st.markdown("#### What this capture cannot establish")
         st.markdown(
             "- Process lineage, logged-in user, asset owner, MFA outcome, and authorization state.\n"

@@ -160,7 +160,6 @@ def run_pipeline(
     case_id: str,
     options: PipelineOptions,
     progress: Progress,
-    # TODO(task-6): heartbeat plumbing is finalized in Task 6 — keep signature stable.
     heartbeat: Callable[[], None] | None = None,
 ) -> PipelineResult:
     """Run the 10-stage pipeline against ``pcap_path`` and return a structured result.
@@ -203,8 +202,6 @@ def run_pipeline(
     beacon_records: list[dict] = []
     carved: list[dict] = []
 
-    # TODO(task-6): per-stage heartbeats may be too coarse for >30s stages
-    # (Zeek/PyShark on large pcaps). Task 6 owns mid-stage heartbeat injection.
     def _emit_heartbeat() -> None:
         if heartbeat is not None:
             heartbeat()
@@ -433,7 +430,7 @@ def run_pipeline(
         features=features,
         zeek_tables=zeek_tables,
         zeek_log_paths=zeek_log_paths,
-        carved_items=carved if options.do_carve else [],
+        carved_items=carved,
         mitre_techniques=[technique.technique_id for technique in partial_mapping.techniques],
         attack_mapping=partial_mapping.to_dict(),
         capture_metrics=capture_metrics,

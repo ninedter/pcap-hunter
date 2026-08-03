@@ -29,7 +29,7 @@ Wire format: `Authorization: Bearer <key>`. **At least one auth source must exis
 | `PCAP_HUNTER_FEED_KEY` env var | feed | only `/api/v1/iocs.*` |
 | Database-backed keys (`phk_...`) | full or feed | per key record |
 
-Database-backed keys are created via `POST /api/v1/admin/keys` or the Streamlit **API Keys** tab, and support per-key expiry, rate limits (RPM), usage tracking, and revocation — see [API Key Management](../API.md#api-key-management).
+Database-backed keys are created via `POST /api/v1/admin/keys` or **Settings → API access** in the production workbench, and support per-key expiry, rate limits (RPM), usage tracking, and revocation — see [API Key Management](../API.md#api-key-management).
 
 ## Submit a PCAP
 

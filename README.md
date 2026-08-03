@@ -11,14 +11,9 @@
 
 The latest workbench keeps the full packet-analysis depth of **Zeek**, **Tshark**, and **PyShark**, then adds an analyst-first interface for geographic flow aggregation, cross-filtered traffic views, evidence inventory, OSINT, reports, and optional **Large Language Model (LLM)** assistance. Deterministic evidence remains available even when an LLM or enrichment provider is unavailable.
 
-![Latest PCAP Hunter dashboard with privacy-safe destination labels](docs/images/workbench-current/dashboard-redacted.png)
+![PCAP Hunter v3 dashboard with privacy-safe destination labels](docs/images/workbench-v3/02-dashboard.png)
 
-<p align="center">
-  <img src="docs/images/workbench-current/evidence-redacted.png" width="49%" alt="Privacy-safe evidence inventory" />
-  <img src="docs/images/workbench-current/traffic-redacted.png" width="49%" alt="Privacy-safe linked traffic workspace" />
-</p>
-
-![Latest PCAP Hunter ATT&CK hypothesis workspace with privacy-safe evidence labels](docs/images/workbench-current/mitre-redacted.png)
+See every current workspace in the [version 3 visual tour](#visual-tour).
 
 > Documentation and design-handoff images use irreversible replacement labels such as `[IP 01]`, `[HOST 01]`, and `[CAPTURE 01]`. Raw addresses, hostnames, case details, capture filenames, secrets, email addresses, local paths, and precise home-location data are never embedded in these files.
 
@@ -60,127 +55,104 @@ The latest workbench keeps the full packet-analysis depth of **Zeek**, **Tshark*
 
 ## Visual Tour
 
-The current workbench is shown in the introduction above. The detailed tour below
-retains the version-2 workflow captures for feature-by-feature reference. IP
-addresses, API secrets, email addresses, and local user paths are masked in the
-image pixels before the files are committed.
+These captures come from the production version 3 React workbench. Documentation
+privacy mode irreversibly replaces addresses, hostnames, case details, capture
+filenames, secrets, email addresses, local paths, and precise locations before a
+screenshot is saved.
 
-### 1. Upload — load one or many PCAPs
+### 1. Analyze — upload, configure, and monitor
 
-Drag-and-drop `.pcap` / `.pcapng` files or paste a container path. Multiple files
-trigger batch mode with cross-file correlation, and a dismissable getting-started
-panel walks first-time users through the workflow.
+Load one capture or a batch, review the ten-stage run profile, choose whether to
+generate an AI report, and follow durable background progress from the run queue.
 
-![Upload tab](docs/images/01-upload.png)
+![Analyze workspace in PCAP Hunter v3](docs/images/workbench-v3/01-analyze.png)
 
-### 2. Progress — transparent 10-stage pipeline
+### 2. Dashboard — connected geographic overview
 
-Every stage reports durable job progress. PyShark and Zeek run in parallel, then
-DNS, TLS, beaconing, and carving fan out concurrently. The work runs outside the
-Streamlit page thread, so the upper-right Stop control or a browser reload does
-not discard the job; completed evidence is autosaved to Cases and restored.
+Risk, flows, alerts, beacon candidates, and capture health lead into a larger,
+proportioned world map. Destinations group by continent, country, and city while
+the expandable region tree preserves every underlying endpoint.
 
-![Progress tab](docs/images/02-progress.png)
+![Dashboard workspace in PCAP Hunter v3](docs/images/workbench-v3/02-dashboard.png)
 
-### 3. Dashboard — at-a-glance threat summary
+### 3. Findings — verdict and next actions
 
-The Dashboard surfaces the highest-signal findings first: overall risk level with a
-**"Why this risk level?"** explainability expander, a one-line **severity color
-legend**, alert count, beacon candidates (with progress-bar scores), YARA hits, and
-certificate issues. Sections that ran clean say so explicitly — no ambiguous blank
-panels. A global traffic map, protocol distribution, and UTC-labelled activity
-timeline put the capture in visual context.
+The findings summary explains the current verdict, keeps pipeline coverage
+visible, and provides direct next steps into capture coverage, threat intelligence,
+linked traffic, and the saved report.
 
-![Dashboard tab](docs/images/03-dashboard.png)
+![Findings workspace in PCAP Hunter v3](docs/images/workbench-v3/03-findings.png)
 
-### 4. MITRE Analysis — behaviors, evidence, and coverage
+### 4. Evidence — searchable indicator inventory
 
-The dedicated ATT&CK workspace treats mappings as analyst hypotheses rather than
-proof. It links network evidence to techniques and applicable detection context,
-lets analysts record a disposition and note, makes detector gaps explicit, and
-exports an ATT&CK Navigator layer with versioned metadata.
+Search and filter the active batch across IPs, domains, hashes, and fingerprints.
+Source capture, context, assessment, reverse-DNS names, WHOIS access, and IOC export
+stay together in one inventory.
 
-![MITRE Analysis tab](docs/images/10-mitre-analysis.png)
+![Evidence workspace in PCAP Hunter v3](docs/images/workbench-v3/04-evidence.png)
 
-### 5. LLM Analysis — AI-generated threat report
+### 5. Traffic — linked visual analysis
 
-A nine-section narrative — Executive Summary through Recommended Actions, plus an
-**IOC Summary table** and a **Risk Matrix rendered as a real Markdown table** — with
-confidence qualifiers and MITRE ATT&CK mapping. Generate locally via LM Studio
-(section-by-section) or in a single full-context call via OpenAI or Anthropic.
-Reports in 9 languages, including Traditional Chinese (zh-TW).
+Protocol, top-talker, timeline, IP, and time-range selections share one filter
+state. The same investigation can continue in the world map, Sankey flow, network
+graph, attack timeline, histograms, or heatmap without losing context.
 
-![LLM Analysis tab](docs/images/04-llm-analysis.png)
+![Traffic workspace in PCAP Hunter v3](docs/images/workbench-v3/05-traffic.png)
 
-When a report is skipped or unavailable, this tab still shows a deterministic
-snapshot of parsed packets, flows, IOCs, correlations, completed stages, and
-pipeline warnings.
+### 6. MITRE ATT&CK — evidence-backed hypotheses
 
-### 6. OSINT — multi-provider IOC enrichment
+Network observations are presented as ATT&CK hypotheses rather than proof of
+endpoint execution. Analysts can review confidence, disposition, coverage gaps,
+and exports from the same workspace.
 
-Prioritized IOC table with VirusTotal, AbuseIPDB, GreyNoise, Shodan, OTX, and
-VT Domain signals merged into one view. **Provider-status pills** report each
-provider honestly (OK / cached / rate-limited / key-rejected / no data), an explicit
-**WHOIS lookup** selectbox + button complements row-click dialogs, and IOC search
-offers a show-all-results toggle. Sub-tabs expose Domains, Detail Cards, Geo Map,
-Infrastructure ASN clustering, Export, Devices, and Notes.
+![MITRE ATT&CK workspace in PCAP Hunter v3](docs/images/workbench-v3/06-mitre.png)
 
-![OSINT tab](docs/images/05-osint.png)
+### 7. Threat intelligence — provider-aware IOC triage
 
-### 7. Raw Data — Zeek logs, flows, carved payloads, YARA matches
+VirusTotal, AbuseIPDB, GreyNoise, OTX, and Shodan coverage stays distinct from a
+provider returning no data. IP and domain triage retain verdict, ASN, organization,
+score, enrichment state, and WHOIS access.
 
-Every underlying data source is available: the flow table (with explicit
-**First/Last Seen (UTC)** timestamp columns), DNS and TLS analyses, NXDOMAIN
-analysis, JA3/JA3S fingerprints, Zeek `conn.log`/`dns.log`/`http.log`/`ssl.log`,
-carved HTTP payloads, and YARA scan results. Export any view as CSV or JSON with
-CSV-injection protection.
+![Threat intelligence workspace in PCAP Hunter v3](docs/images/workbench-v3/07-threat-intel.png)
 
-![Raw Data tab](docs/images/06-raw-data.png)
+### 8. Raw data — inspect the underlying evidence
 
-### 8. Cases — persistent investigation tracking
+Flow, DNS, TLS, JA3/JA3S, Zeek, carved payload, and YARA datasets remain available
+with exact timestamps, capture lineage, protocol details, packet counts, and byte
+counts.
 
-Promote any capture and its findings into a case. Cases carry IOCs, severity,
-tags, investigation notes, ATT&CK mappings, capture-quality metrics, status, and
-search — stored in a local SQLite database.
+![Raw data workspace in PCAP Hunter v3](docs/images/workbench-v3/08-raw-data.png)
 
-![Cases tab](docs/images/07-cases.png)
+### 9. Reports — narrative and machine-readable handoff
 
-### 9. API Keys — manage programmatic access
+Generate or refresh the optional AI threat report, verify which deterministic
+evidence sources were included, download the PDF, and switch to structured export
+formats without re-running packet analysis.
 
-Create, revoke, and monitor API keys for the Integrations API. Each key has its own
-scope (full or feed-only), optional expiration, per-key rate limits, and a usage
-sparkline. Environment-variable keys are shown as read-only bootstrap entries.
+![Reports workspace in PCAP Hunter v3](docs/images/workbench-v3/09-reports.png)
 
-![API Keys tab](docs/images/11-api-keys.png)
+### 10. Cases — persistent investigation tracking
 
-### 10. Config — centralized settings
+Keep captures, analyses, IOCs, severity, status, tags, and analyst notes together
+across sessions. Search existing cases or begin a new analysis directly from the
+case workspace.
 
-An **LLM Integration** section with three providers (LM Studio, OpenAI, Anthropic),
-an adjustable 10K–1M-token context window, an optional unlimited-context mode,
-a **YARA Rules** section with a configurable rules directory, OSINT provider keys
-with a **Test Providers** live-check button, home location for the world map,
-binary paths, and pipeline thresholds — all in one place with per-section clear
-buttons. API keys are PBKDF2-encrypted at rest.
+![Cases workspace in PCAP Hunter v3](docs/images/workbench-v3/10-cases.png)
 
-![Config tab](docs/images/08-config.png)
+### 11. Settings — one place for runtime configuration
 
-#### Choosing an LLM provider
+Manage LLM and report options, threat-intelligence providers, pipeline stages,
+tools and YARA, map location, API access, retention, and runtime logs. Stored
+secrets stay write-only and are encrypted at rest.
 
-Pick the backend that fits your environment: **LM Studio** for local, air-gapped
-analysis (chunked per-section generation), or **OpenAI** / **Anthropic** for
-single-shot full-context cloud reports. Each provider keeps its own credentials
-and model picker. The selected context window controls the evidence budget for
-every provider; unlimited mode sends all sanitized evidence in a single request
-and may be rejected if it exceeds the model's physical limit.
-
-![LLM provider selection](docs/images/09-llm-providers.png)
+![Settings workspace in PCAP Hunter v3](docs/images/workbench-v3/11-settings.png)
 
 ---
 
 ## Key Features
 
 ### AI-Powered Threat Analysis
-- **Multi-Provider LLM Support** — three interchangeable backends behind one Config section:
+- **Multi-Provider LLM Support** — three interchangeable backends under **Settings → LLM & reports**:
   - **LM Studio** (local) — privacy-first, air-gapped friendly; reports are generated section-by-section to fit small context windows.
   - **OpenAI** (cloud) — single-shot report with the entire evidence corpus in one full-context call.
   - **Anthropic** (cloud) — Claude via the official `anthropic` SDK (`claude-opus-4-8`, `claude-sonnet-4-6`, `claude-haiku-4-5`), single-shot with streaming.
@@ -253,12 +225,12 @@ and may be rejected if it exceeds the model's physical limit.
 
 ### Payload Carving & YARA Scanning
 - **HTTP Payload Extraction** via `tshark` with automatic SHA256 hashing.
-- **YARA Rules Config** — point the YARA Rules section in Config at any rules directory (scanned recursively); zero-config default is `data/yara_rules/` when present.
+- **YARA Rules Config** — point **Settings → Tools & YARA** at any rules directory (scanned recursively); zero-config default is `data/yara_rules/` when present.
 - **Safe Storage** — quarantined per-run directory with path traversal and symlink protection.
 
 ### Honest, Analyst-First UI
 - **Central severity color system** — one palette drives every verdict badge, chart, and pill, with a one-line legend for calibration.
-- **Honest provider status** — OSINT provider pills distinguish OK / cached / rate-limited / key-rejected / no-data instead of a generic error, aggregated across all queried indicators; a Test Providers button in Config live-checks each configured provider.
+- **Honest provider status** — OSINT provider pills distinguish OK / cached / rate-limited / key-rejected / no-data instead of a generic error, aggregated across all queried indicators; **Settings → Threat intelligence** can live-check each configured provider.
 - **Contextual empty states** — panels distinguish "ran clean" from "stage skipped/failed"; nothing renders as a silent blank.
 - **Humanized tables** — UTC-labelled timestamps, progress-bar score columns, named chart axes.
 - **Cross-Filtering** — unified drill-down across Map, Protocol Pie Chart, and Flow Timeline; "Exclude Private IPs" persists during exploration.
@@ -300,11 +272,11 @@ Integrates with leading threat intelligence providers:
 
 ## Integrations API
 
-PCAP Hunter ships a FastAPI-based REST API alongside the Streamlit UI so SOAR
+PCAP Hunter ships a FastAPI-based REST API alongside the production React workbench so SOAR
 platforms, SIEM systems, and custom scripts can submit PCAPs, poll job progress,
 retrieve cases/PDF reports, and pull IOC feeds (JSON / CSV / STIX 2.1)
 programmatically. It reuses the same 10-stage pipeline, SQLite case database, and
-configuration as the UI; DB-backed API keys are managed from the API Keys tab.
+configuration as the UI; DB-backed API keys are managed under **Settings → API access**.
 Headless results include capture-quality metrics and ATT&CK hypotheses, while IOC
 feeds include the technique IDs associated with contributing analyses. Uploads are
 streamed and validated before queueing; queue or persistence failures remove the
@@ -349,10 +321,16 @@ app/
 ├── reports/         # PDF report generation (WeasyPrint + kaleido charts)
 ├── security/        # OPSEC hardening & data sanitization
 ├── threat_intel/    # MITRE ATT&CK mapping
-├── ui/              # Streamlit interface (10 tabs, upload validation, MITRE workspace)
+├── web/             # Production FastAPI UI service + React static assets
+├── ui/              # Legacy Streamlit interface retained for standalone use
 ├── utils/           # Export, GeoIP, config, binary discovery, CEF
 ├── config.py        # Application defaults
-└── main.py          # Streamlit entry point
+└── main.py          # Legacy Streamlit entry point
+
+prototype-friendly-ui/
+├── src/             # React 19 workbench, linked filters, maps, and privacy mode
+├── worker/          # Frontend worker entry point
+└── vite.config.mjs  # Production frontend build
 ```
 
 ### Analysis Pipeline (10 Stages)
@@ -488,20 +466,20 @@ Open `http://localhost:8501` in your browser.
 
 ## Usage Guide
 
-1. **Upload** — Drag and drop one or more `.pcap` files in the Upload tab. Multiple files trigger batch mode with cross-file correlation.
-2. **Configure** — Pick an LLM provider (LM Studio / OpenAI / Anthropic), set your home location (Continent > Country > City), OSINT API keys, and optionally a YARA rules directory in the Config tab.
-3. **Analyze** — Click **Extract & Analyze** to start the pipeline.
-4. **Monitor** — Watch the Progress tab as stages execute in a durable background process: Packet Counting > Parsing + Zeek (parallel) > DNS / TLS / Beaconing / Carving (concurrent) > YARA > OSINT > LLM Report. Stopping or reloading the Streamlit page does not discard the job.
-5. **Review** — Explore results across Dashboard, MITRE Analysis, LLM Analysis, OSINT, Raw Data, and Cases tabs.
+1. **Upload** — In **Analyze → Upload & configure**, drag in one or more `.pcap` / `.pcapng` files or add an allowed container path. Multiple files automatically enable batch correlation.
+2. **Configure** — Use **Settings** to choose an LLM provider, home location, OSINT providers, YARA rules, pipeline stages, API access, and retention policy.
+3. **Analyze** — Review the run setup and click **Analyze capture**.
+4. **Monitor** — Open **Analyze → Run queue** while the durable background process executes Packet Counting > Parsing + Zeek (parallel) > DNS / TLS / Beaconing / Carving (concurrent) > YARA > OSINT > LLM Report. Reloading the page does not discard the job.
+5. **Review** — Move from Dashboard and Findings into Evidence, Traffic, MITRE ATT&CK, Threat intelligence, Raw data, Reports, and Cases.
 6. **Export** — Download CSV/JSON data, PDF reports, STIX bundles, ATT&CK Navigator layers, or CEF syslog events.
 
 ### Re-run Reports
 
-Changed your LLM provider, model, or report language? Click **Re-run Report** to regenerate only the AI report without re-processing the entire PCAP.
+Changed your LLM provider, model, or report language? Open **Reports** and click **Refresh** to regenerate only the AI report without re-processing the entire PCAP.
 
 ### Data Management
 
-Use the granular **Clear** buttons in Config to independently wipe PCAP data, OSINT cache, or the Cases database.
+Use **Settings → Data & retention** to independently manage PCAP data, OSINT cache, and the Cases database.
 
 ---
 
@@ -565,23 +543,23 @@ identical gate inside the runtime image, independent of the host Python setup.
 
 ### Regenerating doc screenshots
 
-`scripts/capture_screenshots.py` re-captures every README/manual screenshot with
-the real Docker-hosted Streamlit UI in headless Chromium. It masks IP addresses,
-API secrets, email addresses, and local user paths at the pixel level; tesseract
-provides a fallback for canvas-rendered tables and a final privacy audit.
+The current README tour is captured from the real Docker-hosted React workbench
+with documentation privacy mode enabled. That mode replaces IP addresses,
+hostnames, case details, capture filenames, secrets, email addresses, local paths,
+and precise locations in the application before pixels are captured.
 
 ```bash
-python3 -m pip install -r requirements-docs.txt
-python3 -m playwright install chromium
 DOCS_DATA="$(mktemp -d)"
 cp data/sample.pcap "$DOCS_DATA/sample.pcap"
 PCAP_HUNTER_DATA_BIND="$DOCS_DATA" make docker-up
-python3 scripts/capture_screenshots.py --seed-docs-key
+# Capture each visual-tour route with ?privacy=1 at 1440 × 1000.
 ```
 
 The isolated bind prevents local cases, keys, cache entries, or prior captures
-from appearing in the documentation. The script creates its example API key
-through the real UI, then reloads away the one-time secret before capture.
+from appearing in the documentation. Verify every file in
+`docs/images/workbench-v3/` visually and run the repository's sensitive-value
+checks before committing it. `scripts/capture_screenshots.py` remains available
+for the legacy Streamlit user-manual image set.
 
 ### Testing discipline
 

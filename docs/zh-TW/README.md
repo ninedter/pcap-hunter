@@ -11,12 +11,9 @@
 
 透過結合業界標準的網路分析工具（**Zeek**、**Tshark**、**PyShark**）與**大型語言模型（LLM）**及 **OSINT** API，PCAP Hunter 將封包分析中繁瑣的部分——解析、關聯與情資豐富化——自動化，讓分析師能專注於偵測與回應。
 
-![PCAP Hunter v3 儀表板，使用隱私安全的目的地標籤](../images/workbench-current/dashboard-redacted.png)
+![PCAP Hunter v3 儀表板，使用隱私安全的目的地標籤](../images/workbench-v3/02-dashboard.png)
 
-<p align="center">
-  <img src="../images/workbench-current/evidence-redacted.png" width="49%" alt="隱私安全的證據清單" />
-  <img src="../images/workbench-current/traffic-redacted.png" width="49%" alt="隱私安全的關聯流量工作區" />
-</p>
+所有最新工作區請見[版本 3 視覺導覽](#視覺導覽)。
 
 > 公開文件與設計交付只使用 `[IP 01]`、`[HOST 01]`、`[CAPTURE 01]` 等不可逆替代標籤，不會嵌入原始位址、主機名稱、案件內容、擷取檔名、機密、電子郵件、本機路徑或精確住家位置。
 
@@ -33,6 +30,7 @@
 - **可用的深度分析捷徑** — 世界地圖、Top IP/網域、Sankey、網路圖、攻擊時間軸、直方圖與熱圖按鈕都會開啟並聚焦正確內容。
 - **更大的地圖空間且不變形** — 桌面連線區域加高，地理投影會隨容器縮放，小螢幕仍維持可讀比例。
 - **不再截斷調查文字** — 協定、主機名稱、識別碼、表格、圖例與圖表標記會自動換行或調整，不會無聲消失。
+- **可持續的分析流程** — 執行進度、案件、發現、ATT&CK 假設、報告、匯出、OSINT 與原始證據都透過同一份工作台狀態保持連動。
 - **隱私安全文件模式** — 明確啟用後，位址、主機名稱、案件、檔名、位置與其他敏感內容會改成不可逆替代標籤。
 - **正式環境交付** — Docker 直接建置並提供 React 工作台，同時保留 Python 分析引擎、設定、OSINT 快取、案件資料與整合 API。
 
@@ -57,82 +55,80 @@
 
 ## 視覺導覽
 
-最新版本 3 工作台顯示於上方；以下保留版本 2 Streamlit 流程畫面，供逐項功能參考。所有公開圖片都會移除或不可逆替換 IPv4/IPv6 位址、API 機密、電子郵件與本機使用者路徑。
+以下畫面取自正式版本 3 React 工作台。文件隱私模式會在截圖儲存前，以不可逆方式替換位址、主機名稱、案件內容、擷取檔名、機密、電子郵件、本機路徑與精確位置。
 
-### 1. Upload — 載入一個或多個 PCAP
+### 1. Analyze — 上傳、設定與監看
 
-拖放 `.pcap` / `.pcapng` 檔案，或貼上容器路徑。上傳多個檔案會啟動批次模式並進行跨檔案關聯分析；可關閉的入門導覽面板會引導初次使用者熟悉整個工作流程。
+載入單一擷取或批次檔案、確認 10 階段執行設定、選擇是否產生 AI 報告，並從執行佇列持續查看背景分析進度。
 
-![Upload 分頁](../images/01-upload.png)
+![PCAP Hunter v3 的 Analyze 工作區](../images/workbench-v3/01-analyze.png)
 
-### 2. Progress — 透明的 10 階段管道
+### 2. Dashboard — 連動的地理概覽
 
-每個階段都會回報可持久化的工作進度。PyShark 與 Zeek 平行執行，接著 DNS、TLS、信標偵測與酬載提取同時展開。分析在 Streamlit 頁面執行緒之外運行，因此右上角的 Stop 控制或瀏覽器重新載入都不會丟失工作；完成的證據會自動保存至 Cases 並復原。
+風險、流量、警示、信標候選與擷取狀態會先摘要呈現，再接到放大且比例正確的世界地圖。目的地依洲、國家與城市分組，右側可展開的區域階層仍保留每個底層端點。
 
-![Progress 分頁](../images/02-progress.png)
+![PCAP Hunter v3 的 Dashboard 工作區](../images/workbench-v3/02-dashboard.png)
 
-### 3. Dashboard — 一目了然的威脅摘要
+### 3. Findings — 結論與後續行動
 
-儀表板優先呈現訊號最強的發現：整體風險等級搭配**「Why this risk level?」可解釋性展開面板**、一行式的**嚴重程度色彩圖例**、警報數量、信標候選（附進度條分數）、YARA 命中與憑證問題。確認乾淨的區塊會明確說明——不會出現語意不明的空白面板。全球流量地圖、協定分佈與標示 UTC 的活動時間軸，讓擷取內容具備完整的視覺脈絡。
+發現摘要會說明目前結論、持續顯示管道涵蓋範圍，並直接連到擷取涵蓋範圍、威脅情資、關聯流量與已儲存報告等後續工作。
 
-![Dashboard 分頁](../images/03-dashboard.png)
+![PCAP Hunter v3 的 Findings 工作區](../images/workbench-v3/03-findings.png)
 
-### 4. MITRE Analysis — 行為、證據與涵蓋範圍
+### 4. Evidence — 可搜尋的指標清單
 
-獨立的 ATT&CK 工作區將對應視為分析師假設，而不是既定事實。它會把網路證據連結至技術與適用的偵測情境，讓分析師記錄處置與筆記，明確顯示偵測缺口，並匯出含版本中繼資料的 ATT&CK Navigator 圖層。
+在目前批次中搜尋並篩選 IP、網域、雜湊與指紋。來源擷取、情境、評估、反向 DNS 名稱、WHOIS 查詢與 IOC 匯出都集中在同一份清單。
 
-![MITRE Analysis 分頁](../images/10-mitre-analysis.png)
+![PCAP Hunter v3 的 Evidence 工作區](../images/workbench-v3/04-evidence.png)
 
-### 5. LLM Analysis — AI 產生的威脅報告
+### 5. Traffic — 連動式視覺分析
 
-九個章節的敘事報告——從執行摘要到建議行動，外加 **IOC 摘要表**與**以真正 Markdown 表格呈現的風險矩陣（Risk Matrix）**——包含信心度修飾語與 MITRE ATT&CK 對應。可透過 LM Studio 在本地逐節產生，或透過 OpenAI / Anthropic 以單次完整上下文呼叫產生。報告支援 9 種語言，包括繁體中文（zh-TW）。
+協定、主要通訊端、時間軸、IP 與時間範圍共用同一組篩選狀態。調查可接續到世界地圖、Sankey 流程圖、網路圖、攻擊時間軸、直方圖或熱圖，不會遺失目前脈絡。
 
-![LLM Analysis 分頁](../images/04-llm-analysis.png)
+![PCAP Hunter v3 的 Traffic 工作區](../images/workbench-v3/05-traffic.png)
 
-即使報告被跳過或無法產生，此分頁仍會顯示解析封包、流量、IOC、關聯、完成階段與管道警告的確定性快照。
+### 6. MITRE ATT&CK — 以證據為本的假設
 
-### 6. OSINT — 多供應商 IOC 情資豐富化
+網路觀察結果會以 ATT&CK 假設呈現，而不會當成端點執行的既定事實。分析師可在同一工作區檢視信心度、處置狀態、涵蓋缺口與匯出內容。
 
-優先排序的 IOC 表格，將 VirusTotal、AbuseIPDB、GreyNoise、Shodan、OTX 與 VT Domain 的訊號合併為單一檢視。**供應商狀態標籤**誠實回報每個供應商的狀態（正常 / 快取 / 速率受限 / 金鑰遭拒 / 無資料），明確的 **WHOIS 查詢**下拉選單 + 按鈕與點選資料列的對話框相輔相成，IOC 搜尋並提供顯示全部結果的切換開關。子分頁涵蓋網域、詳細資訊卡、地理地圖、基礎設施 ASN 分群、匯出、裝置與筆記。
+![PCAP Hunter v3 的 MITRE ATT&CK 工作區](../images/workbench-v3/06-mitre.png)
 
-![OSINT 分頁](../images/05-osint.png)
+### 7. Threat intelligence — 保留供應商狀態的 IOC 分流
 
-### 7. Raw Data — Zeek log、流量、提取酬載、YARA 比對
+VirusTotal、AbuseIPDB、GreyNoise、OTX 與 Shodan 的涵蓋狀態，會和供應商「查無資料」清楚區分。IP 與網域分流會保留結論、ASN、組織、分數、情資豐富化狀態與 WHOIS 查詢入口。
 
-所有底層資料來源一應俱全：流量表（附明確的 **First/Last Seen (UTC)** 時間戳記欄位）、DNS 與 TLS 分析、NXDOMAIN 分析、JA3/JA3S 指紋、Zeek `conn.log`/`dns.log`/`http.log`/`ssl.log`、提取的 HTTP 酬載與 YARA 掃描結果。任何檢視都能匯出為 CSV 或 JSON，內建 CSV 注入防護。
+![PCAP Hunter v3 的 Threat intelligence 工作區](../images/workbench-v3/07-threat-intel.png)
 
-![Raw Data 分頁](../images/06-raw-data.png)
+### 8. Raw data — 檢視底層證據
 
-### 8. Cases — 持續性的調查追蹤
+流量、DNS、TLS、JA3/JA3S、Zeek、提取酬載與 YARA 資料集都可直接檢視，並保留精確時間戳記、擷取來源、協定細節、封包數與位元組數。
 
-將任何擷取與其發現升級為案件。案件包含 IOC、嚴重程度、標籤、調查筆記、ATT&CK 對應、擷取品質指標、狀態與搜尋功能——儲存在本地 SQLite 資料庫。
+![PCAP Hunter v3 的 Raw data 工作區](../images/workbench-v3/08-raw-data.png)
 
-![Cases 分頁](../images/07-cases.png)
+### 9. Reports — 敘事與機器可讀交付
 
-### 9. API Keys — 管理程式化存取
+產生或重新整理選用的 AI 威脅報告、確認納入的確定性證據來源、下載 PDF，或切換到結構化匯出格式，全程不需要重新執行封包分析。
 
-為整合 API 建立、撤銷與監控 API 金鑰。每把金鑰擁有自己的權限範圍（完整或僅限摘要）、選用的到期時間、逐金鑰速率限制與使用量趨勢圖。環境變數金鑰會顯示為唯讀的初始（bootstrap）項目。
+![PCAP Hunter v3 的 Reports 工作區](../images/workbench-v3/09-reports.png)
 
-![API Keys 分頁](../images/11-api-keys.png)
+### 10. Cases — 可持續追蹤的調查案件
 
-### 10. Config — 集中式設定
+跨工作階段保存擷取、分析、IOC、嚴重程度、狀態、標籤與分析師筆記。可搜尋既有案件，也能直接從案件工作區開始新的分析。
 
-**LLM Integration** 區塊提供三種供應商（LM Studio、OpenAI、Anthropic）、可調整的 10K–1M token 上下文視窗與選用的無限制模式；**YARA Rules** 區塊提供可設定的規則目錄，OSINT 供應商金鑰搭配 **Test Providers** 即時檢測按鈕，加上世界地圖的自家位置、執行檔路徑與管道門檻值——全部集中一處，各區塊並有獨立的清除按鈕。API 金鑰以 PBKDF2 加密儲存。
+![PCAP Hunter v3 的 Cases 工作區](../images/workbench-v3/10-cases.png)
 
-![Config 分頁](../images/08-config.png)
+### 11. Settings — 集中管理執行設定
 
-#### 選擇 LLM 供應商
+集中管理 LLM 與報告、威脅情資供應商、管道階段、工具與 YARA、地圖位置、API 存取、資料保留與執行記錄。已儲存的機密維持唯寫狀態，並以加密方式保存。
 
-挑選最適合你環境的後端：**LM Studio** 適合本地、實體隔離（air-gapped）的分析（逐節分段產生），**OpenAI** / **Anthropic** 則以單次完整上下文呼叫產生雲端報告。每個供應商各自保有金鑰與模型選單。所選上下文視窗會控制所有供應商的證據預算；無限制模式會單次傳送所有已清理證據，若超過模型的實際上限，供應商仍可能拒絕請求。
-
-![LLM 供應商選擇](../images/09-llm-providers.png)
+![PCAP Hunter v3 的 Settings 工作區](../images/workbench-v3/11-settings.png)
 
 ---
 
 ## 主要功能
 
 ### AI 驅動的威脅分析
-- **多供應商 LLM 支援** — 同一個 Config 區塊下三種可互換的後端：
+- **多供應商 LLM 支援** — **Settings → LLM & reports** 提供三種可互換的後端：
   - **LM Studio**（本地）— 隱私優先、適合實體隔離環境；報告採逐節產生以配合較小的上下文視窗。
   - **OpenAI**（雲端）— 單次完整上下文呼叫，一次送入全部證據語料產生報告。
   - **Anthropic**（雲端）— 透過官方 `anthropic` SDK 使用 Claude（`claude-opus-4-8`、`claude-sonnet-4-6`、`claude-haiku-4-5`），單次呼叫並支援串流。
@@ -205,12 +201,12 @@
 
 ### 酬載提取（Carving）與 YARA 掃描
 - 透過 `tshark` 提取 **HTTP 酬載**，自動計算 SHA256 雜湊。
-- **YARA 規則設定** — 將 Config 中的 YARA Rules 區塊指向任何規則目錄（遞迴掃描）；零設定預設值為存在時的 `data/yara_rules/`。
+- **YARA 規則設定** — 在 **Settings → Tools & YARA** 指定任何規則目錄（遞迴掃描）；零設定預設值為存在時的 `data/yara_rules/`。
 - **安全儲存** — 每次執行專屬的隔離目錄，具備路徑穿越與符號連結防護。
 
 ### 誠實、以分析師為本的介面
 - **集中式嚴重程度色彩系統** — 同一套色盤驅動所有判定徽章、圖表與狀態標籤，並附一行式圖例供校準。
-- **誠實的供應商狀態** — OSINT 供應商狀態標籤區分正常 / 快取 / 速率受限 / 金鑰遭拒 / 無資料，而非籠統的錯誤訊息，並彙整所有查詢指標的狀態；Config 中的 Test Providers 按鈕可即時檢測每個已設定的供應商。
+- **誠實的供應商狀態** — OSINT 供應商狀態標籤區分正常 / 快取 / 速率受限 / 金鑰遭拒 / 無資料，而非籠統的錯誤訊息，並彙整所有查詢指標的狀態；**Settings → Threat intelligence** 可即時檢測每個已設定的供應商。
 - **情境化空狀態** — 面板會區分「執行完畢且乾淨」與「階段被跳過/失敗」；絕不會出現無聲的空白。
 - **人性化表格** — 標示 UTC 的時間戳記、進度條分數欄位、具名的圖表座標軸。
 - **交叉篩選** — 地圖、協定圓餅圖與流量時間軸的統一鑽取；「排除私有 IP」在探索期間保持有效。
@@ -250,7 +246,7 @@
 
 ## 整合 API
 
-PCAP Hunter 隨附以 FastAPI 打造的 REST API，與 Streamlit UI 並行運作，讓 SOAR 平台、SIEM 系統與自訂腳本能以程式方式提交 PCAP、輪詢工作進度、取得案件 / PDF 報告，並拉取 IOC 摘要（JSON / CSV / STIX 2.1）。它重複使用與 UI 相同的 10 階段管道、SQLite 案件資料庫與設定；資料庫支援的 API 金鑰可在 API Keys 分頁管理。無介面結果包含擷取品質指標與 ATT&CK 假設，IOC 摘要則包含相關技術 ID；若排程或保存失敗，暫存檔案與案件會一併移除。
+PCAP Hunter 隨附以 FastAPI 打造的 REST API，與正式 React 工作台並行運作，讓 SOAR 平台、SIEM 系統與自訂腳本能以程式方式提交 PCAP、輪詢工作進度、取得案件 / PDF 報告，並拉取 IOC 摘要（JSON / CSV / STIX 2.1）。它重複使用與 UI 相同的 10 階段管道、SQLite 案件資料庫與設定；資料庫支援的 API 金鑰可在 **Settings → API access** 管理。無介面結果包含擷取品質指標與 ATT&CK 假設，IOC 摘要則包含相關技術 ID；若排程或保存失敗，暫存檔案與案件會一併移除。
 
 ```bash
 make run-api     # http://localhost:8000
@@ -291,10 +287,16 @@ app/
 ├── reports/         # PDF 報告產生（WeasyPrint + kaleido 圖表）
 ├── security/        # OPSEC 強化與資料清理
 ├── threat_intel/    # MITRE ATT&CK 對應
-├── ui/              # Streamlit 介面（10 個分頁、上傳驗證、MITRE 工作區）
+├── web/             # 正式 FastAPI UI 服務與 React 靜態檔案
+├── ui/              # 保留供獨立執行使用的舊版 Streamlit 介面
 ├── utils/           # 匯出、GeoIP、設定、執行檔探索、CEF
 ├── config.py        # 應用程式預設值
-└── main.py          # Streamlit 進入點
+└── main.py          # 舊版 Streamlit 進入點
+
+prototype-friendly-ui/
+├── src/             # React 19 工作台、連動篩選、地圖與隱私模式
+├── worker/          # 前端 worker 進入點
+└── vite.config.mjs  # 正式前端建置設定
 ```
 
 ### 分析管道（10 個階段）
@@ -407,20 +409,20 @@ make run         # 獨立安裝（先執行 python3 scripts/install.py）
 
 ## 使用指南
 
-1. **上傳** — 在 Upload 分頁拖放一個或多個 `.pcap` 檔案。多個檔案會啟動批次模式並進行跨檔案關聯分析。
-2. **設定** — 在 Config 分頁選擇 LLM 供應商（LM Studio / OpenAI / Anthropic）、設定自家位置（洲 > 國家 > 城市）、OSINT API 金鑰，並可選擇性指定 YARA 規則目錄。
-3. **分析** — 點擊 **Extract & Analyze** 啟動管道。
-4. **監控** — 在 Progress 分頁觀察獨立背景行程中的各階段：封包計數 > 解析 + Zeek（平行）> DNS / TLS / 信標偵測 / 酬載提取（同時執行）> YARA > OSINT > LLM 報告。停止或重新載入 Streamlit 頁面不會丟失工作。
-5. **審閱** — 在 Dashboard、MITRE Analysis、LLM Analysis、OSINT、Raw Data、Cases 分頁瀏覽結果。
+1. **上傳** — 在 **Analyze → Upload & configure** 拖放一個或多個 `.pcap` / `.pcapng` 檔案，或加入允許的容器路徑。多個檔案會自動啟用批次關聯分析。
+2. **設定** — 在 **Settings** 選擇 LLM 供應商、自家位置、OSINT 供應商、YARA 規則、管道階段、API 存取與資料保留原則。
+3. **分析** — 確認執行設定後，點擊 **Analyze capture**。
+4. **監看** — 在 **Analyze → Run queue** 查看背景行程的執行狀態：封包計數 > 解析 + Zeek（平行）> DNS / TLS / 信標偵測 / 酬載提取（同時執行）> YARA > OSINT > LLM 報告。重新載入頁面不會丟失工作。
+5. **審閱** — 從 Dashboard 與 Findings 前往 Evidence、Traffic、MITRE ATT&CK、Threat intelligence、Raw data、Reports 與 Cases。
 6. **匯出** — 下載 CSV/JSON 資料、PDF 報告、STIX 套件、ATT&CK Navigator 圖層或 CEF syslog 事件。
 
 ### 重新產生報告
 
-更換了 LLM 供應商、模型或報告語言？點擊 **Re-run Report** 僅重新產生 AI 報告，無需重新處理整個 PCAP。
+更換了 LLM 供應商、模型或報告語言？開啟 **Reports** 並點擊 **Refresh**，即可只重新產生 AI 報告，不必重新處理整份 PCAP。
 
 ### 資料管理
 
-使用 Config 分頁中細緻的 **Clear** 按鈕，分別清除 PCAP 資料、OSINT 快取或案件資料庫。
+使用 **Settings → Data & retention** 分別管理 PCAP 資料、OSINT 快取與案件資料庫。
 
 ---
 
@@ -481,18 +483,16 @@ make verify     # 格式檢查 + lint + 完整測試套件
 
 ### 重新產生文件截圖
 
-`scripts/capture_screenshots.py` 使用 Playwright 無介面 Chromium（搭配 tesseract 進行 OCR）從真實 Docker Streamlit UI 重新擷取所有 README / 使用手冊截圖，並在圖片像素中遮蔽 IPv4/IPv6 位址、API 機密、電子郵件與本機使用者路徑。最終 OCR 稽核若仍辨識出敏感值會使擷取失敗。
+目前 README 的視覺導覽畫面取自真實的 Docker React 工作台，並明確啟用文件隱私模式。應用程式會在擷取像素前，替換 IP 位址、主機名稱、案件內容、擷取檔名、機密、電子郵件、本機路徑與精確位置。
 
 ```bash
-python3 -m pip install -r requirements-docs.txt
-python3 -m playwright install chromium
 DOCS_DATA="$(mktemp -d)"
 cp data/sample.pcap "$DOCS_DATA/sample.pcap"
 PCAP_HUNTER_DATA_BIND="$DOCS_DATA" make docker-up
-python3 scripts/capture_screenshots.py --seed-docs-key
+# 以 1440 × 1000 開啟各個視覺導覽路由，並加上 ?privacy=1 後擷取。
 ```
 
-隔離的資料掛載可避免本機案件、金鑰、快取或先前擷取進入文件。範例 API 金鑰會透過真實 UI 建立，且在截圖前重新載入以清除只顯示一次的完整機密。
+隔離的資料掛載可避免本機案件、金鑰、快取或先前擷取進入文件。提交前請逐一檢查 `docs/images/workbench-v3/` 的畫面，並執行儲存庫的敏感值檢查。`scripts/capture_screenshots.py` 仍可用來產生舊版 Streamlit 使用手冊圖片。
 
 ### 測試紀律
 

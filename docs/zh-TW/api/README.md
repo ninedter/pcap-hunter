@@ -29,7 +29,7 @@ make run-api      # 啟動於 http://127.0.0.1:8000
 | `PCAP_HUNTER_FEED_KEY` 環境變數 | 摘要（feed） | 僅限 `/api/v1/iocs.*` |
 | 資料庫金鑰（`phk_...`） | 完整或摘要 | 依各金鑰記錄而定 |
 
-資料庫金鑰可透過 `POST /api/v1/admin/keys` 或 Streamlit 的 **API Keys** 分頁建立，支援逐金鑰到期時間、速率限制（RPM）、使用量追蹤與撤銷——詳見 [API Key Management](../../API.md#api-key-management)（英文）。
+資料庫金鑰可透過 `POST /api/v1/admin/keys` 或正式工作台的 **Settings → API access** 建立，支援逐金鑰到期時間、速率限制（RPM）、使用量追蹤與撤銷——詳見 [API Key Management](../../API.md#api-key-management)（英文）。
 
 ## 提交 PCAP 檔案
 

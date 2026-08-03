@@ -214,6 +214,7 @@ def test_worker_runs_osint_when_enabled(tmp_path, monkeypatch):
 @pytest.mark.skipif(not FIXTURE_PCAP.exists(), reason="tiny.pcap fixture missing")
 def test_worker_warns_when_osint_enabled_but_unconfigured(tmp_path, monkeypatch):
     monkeypatch.setattr(queue_mod, "_load_osint_keys", lambda: {})
+    monkeypatch.setattr(queue_mod, "bulk_resolve_ips", lambda ips, max_workers=8: {})
 
     db = str(tmp_path / "t.db")
     repo = CaseRepository(db_path=db)
@@ -224,6 +225,19 @@ def test_worker_warns_when_osint_enabled_but_unconfigured(tmp_path, monkeypatch)
 
     result = json.loads(repo.get_job(job_id).result_json)
     assert WARNING_OSINT_NOT_CONFIGURED in result["warnings"]
+
+
+def test_rdns_is_persisted_without_osint_provider_keys(tmp_path, monkeypatch):
+    from app.pipeline.runner import PipelineResult
+
+    repo = CaseRepository(db_path=str(tmp_path / "t.db"))
+    result = PipelineResult(features={"artifacts": {"ips": ["8.8.8.8"]}})
+    monkeypatch.setattr(queue_mod, "_load_osint_keys", lambda: {})
+    monkeypatch.setattr(queue_mod, "bulk_resolve_ips", lambda ips, max_workers=8: {"8.8.8.8": "dns.google"})
+
+    osint = queue_mod._run_osint_stage(result, {"osint_enabled": True}, "missing-job", repo)
+
+    assert osint["ips"]["8.8.8.8"]["ptr"] == "dns.google"
 
 
 @pytest.mark.skipif(not FIXTURE_PCAP.exists(), reason="tiny.pcap fixture missing")
@@ -454,6 +468,23 @@ def test_worker_runs_yara_when_carved_items_exist(tmp_path, monkeypatch):
     assert yara_call_args.get("items") == carved, "scan_carved_files must receive the carved_items list"
     analysis = repo.get_analysis(result["analysis_id"])
     assert analysis.yara_results == {"matches": [], "scanned": 1}
+
+
+def test_worker_records_yara_stage_when_no_carved_items(tmp_path, monkeypatch):
+    import app.pipeline.runner as runner_mod
+
+    monkeypatch.setattr(runner_mod, "run_pipeline", _instrumented_pipeline({}))
+    fake_pcap = tmp_path / "fake.pcap"
+    fake_pcap.write_bytes(b"\xd4\xc3\xb2\xa1" + b"\x00" * 20)
+    db = str(tmp_path / "t.db")
+    repo = CaseRepository(db_path=db)
+    repo.create_case(Case(id="cafe0012", title="t", status=CaseStatus.IN_PROGRESS, severity=Severity.LOW))
+    job_id = repo.create_job(Job(case_id="cafe0012", pcap_path=str(fake_pcap), options_json="{}"))
+
+    _worker_run(job_id, db, str(fake_pcap), {"osint_enabled": False, "do_yara": True})
+
+    result = json.loads(repo.get_job(job_id).result_json)
+    assert "yara_scan_skipped" in result["stages_run"]
 
 
 def test_worker_yara_failure_degrades_to_warning(tmp_path, monkeypatch):

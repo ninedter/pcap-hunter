@@ -1,0 +1,29 @@
+{
+  "name": "prototype-friendly-ui",
+  "version": "3.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build && node scripts/prepare-sites-build.mjs",
+    "build:web": "vite build",
+    "preview": "vite preview",
+    "test:ui": "node --test tests/*.test.mjs",
+    "test:sites": "node --test tests/sites-worker.test.mjs"
+  },
+  "dependencies": {
+    "@phosphor-icons/react": "^2.1.10",
+    "@vitejs/plugin-react": "5.0.4",
+    "@vnedyalk0v/react19-simple-maps": "^2.0.10",
+    "react": "19.2.0",
+    "react-dom": "19.2.0",
+    "react-markdown": "^10.1.0",
+    "recharts": "^3.10.1",
+    "remark-gfm": "^4.0.1",
+    "vite": "6.4.3",
+    "world-atlas": "^2.0.2"
+  },
+  "overrides": {
+    "postcss": "8.5.18"
+  }
+}

@@ -78,3 +78,23 @@ def test_job_to_response_done_percent_is_100():
     resp = _job_to_response(job)
     assert resp.progress.percent == 100
     assert resp.progress.stage == "Complete"
+
+
+def test_job_to_response_includes_active_stage_progress():
+    from app.api.routers.jobs import _job_to_response
+    from app.database.models import Job, JobStatus
+
+    job = Job(
+        id="j_partial",
+        case_id="case-1",
+        pcap_path="/tmp/x.pcap",
+        status=JobStatus.RUNNING,
+        progress_stage="OSINT enrichment",
+        progress_done=8,
+        progress_total=10,
+        progress_percent=50,
+    )
+
+    resp = _job_to_response(job)
+    assert resp.progress.percent == 85
+    assert resp.progress.stage == "OSINT enrichment"

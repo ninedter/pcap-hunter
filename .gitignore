@@ -43,6 +43,16 @@ data/
 !tests/fixtures/*.pcapng
 *.log
 .DS_Store
+node_modules/
+prototype-friendly-ui/dist/
+.ux-audit/
+output/
+tmp/
+prototype-friendly-ui/qa/
+prototype-friendly-ui/reference/
+/design-qa.md
+prototype-friendly-ui/design-qa.md
+prototype-friendly-ui/full-application-audit.md
 
 # Superpowers auto-generated specs and plans (session artifacts, not source)
 docs/superpowers/

@@ -89,6 +89,11 @@ class TestResolveIP:
         result = resolve_ip("192.0.2.1")
         assert result is None
 
+    @patch("app.utils.network_utils.socket.gethostbyaddr")
+    def test_root_ptr_returns_none(self, mock_gethostbyaddr):
+        mock_gethostbyaddr.return_value = (".", [], ["192.0.2.1"])
+        assert resolve_ip("192.0.2.1") is None
+
 
 class TestBulkResolveIPs:
     def test_empty_list(self):

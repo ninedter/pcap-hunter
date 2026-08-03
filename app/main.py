@@ -54,6 +54,7 @@ from app.ui.layout import (
     make_tabs,
     render_active_filters,
     render_analysis_snapshot,
+    render_app_header,
     render_batch_summary,
     render_carved,
     render_chart_hint,
@@ -75,9 +76,9 @@ from app.ui.layout import (
     render_severity_legend,
     render_threat_summary,
     render_tls_certificates,
+    render_workspace_heading,
     render_yara_results,
     render_zeek,
-    resolve_logo_path,
 )
 from app.ui.mitre_page import build_attack_mapping, render_mitre_page
 from app.ui.upload import UploadValidationError, save_uploaded_pcaps
@@ -255,19 +256,16 @@ st.set_page_config(
 )
 inject_css()
 
-# Header: logo + title side-by-side. Narrow left column for the mark so the
-# wordmark dominates and the layout still looks right on smaller screens.
-# The mark is theme-aware: the light-bg variant's navy strokes vanish on the
-# dark theme (the icon read as "cut off"), so each theme has its own PNG.
-# st.context.theme needs Streamlit >= 1.46 — fall back to the light asset.
 _theme = getattr(getattr(st, "context", None), "theme", None)
-_logo_path = resolve_logo_path(_STATIC_DIR, getattr(_theme, "type", None))
-_hdr_logo, _hdr_title = st.columns([1, 11], gap="small", vertical_alignment="center")
-with _hdr_logo:
-    if _logo_path is not None:
-        st.image(str(_logo_path), width=72)
-with _hdr_title:
-    st.title(C.APP_NAME)
+_capture_count = len(st.session_state.get("__pcap_paths") or [])
+if not _capture_count and st.session_state.get("__pcap_path"):
+    _capture_count = 1
+render_app_header(
+    _STATIC_DIR,
+    getattr(_theme, "type", None),
+    capture_count=_capture_count,
+    analysis_complete=analysis_has_run(),
+)
 
 # --- RE-RUN TRIGGER LOGIC ---
 if st.session_state.get("trigger_llm_rerun"):
@@ -960,7 +958,10 @@ with tab_progress:
 
 # ---------------------- 3) Dashboard ----------------------
 with tab_dashboard:
-    st.markdown("### Dashboard")
+    render_workspace_heading(
+        "Dashboard",
+        "Live threat posture, global traffic flows, and the visualizations your analysts already know.",
+    )
     dashboard_beacons = get_df_state("beacon_df")
 
     # Batch summary at the top when in batch mode
@@ -1056,6 +1057,8 @@ with tab_dashboard:
         help="Ignore RFC1918 (local) addresses in Top 10 charts and map visualization.",
     )
 
+    st.markdown("#### Global traffic origins & connectivity")
+
     # 1. World Map
     ip_locs = []
     if filtered_flows:
@@ -1073,49 +1076,49 @@ with tab_dashboard:
             if loc:
                 ip_locs.append(loc)
 
-    if ip_locs:
-        # Get home location from session state
-        home_lat = st.session_state.get("cfg_home_lat", 0.0)
-        home_lon = st.session_state.get("cfg_home_lon", 0.0)
+    # Keep the familiar world map visible even when a capture contains only
+    # private traffic or no address has a GeoIP match yet.
+    home_lat = st.session_state.get("cfg_home_lat", 0.0)
+    home_lon = st.session_state.get("cfg_home_lon", 0.0)
 
-        # Build threat scores lookup from correlations
-        _threat_scores: dict[str, float] = {}
-        for c in st.session_state.get("correlations") or []:
-            if hasattr(c, "indicator") and hasattr(c, "composite_score"):
-                _threat_scores[c.indicator] = c.composite_score
-            elif isinstance(c, dict):
-                _threat_scores[c.get("indicator", "")] = c.get("composite_score", 0)
+    _threat_scores: dict[str, float] = {}
+    for c in st.session_state.get("correlations") or []:
+        if hasattr(c, "indicator") and hasattr(c, "composite_score"):
+            _threat_scores[c.indicator] = c.composite_score
+        elif isinstance(c, dict):
+            _threat_scores[c.get("indicator", "")] = c.get("composite_score", 0)
 
-        # Render map with selection enabled
-        map_event = st.plotly_chart(
-            plot_world_map(
-                ip_locs,
-                flows=filtered_flows,
-                home_loc=(home_lat, home_lon),
-                threat_scores=_threat_scores,
-            ),
-            width="stretch",
-            on_select="rerun",
-            selection_mode=["points", "box", "lasso"],
-            key=f"map_select_{st.session_state.get('map_reset_counter', 0)}",
-        )
+    world_map_fig = plot_world_map(
+        ip_locs,
+        flows=filtered_flows,
+        home_loc=(home_lat, home_lon),
+        threat_scores=_threat_scores,
+    )
+    world_map_fig.update_layout(title=None, margin={"r": 0, "t": 0, "l": 0, "b": 0})
+    map_event = st.plotly_chart(
+        world_map_fig,
+        width="stretch",
+        on_select="rerun",
+        selection_mode=["points", "box", "lasso"],
+        key=f"map_select_{st.session_state.get('map_reset_counter', 0)}",
+    )
 
-        # Handle Map Selection
-        if map_event and "selection" in map_event:
-            points = map_event["selection"].get("points", [])
-            new_ips = set()
-            for p in points:
-                if "customdata" in p:
-                    # customdata is a list of IPs for that location
-                    new_ips.update(p["customdata"])
+    if map_event and "selection" in map_event:
+        points = map_event["selection"].get("points", [])
+        new_ips = set()
+        for p in points:
+            if "customdata" in p:
+                new_ips.update(p["customdata"])
 
-            if new_ips:
-                st.session_state["filter_ips"] = new_ips
-                st.rerun()
-        render_chart_hint("Click markers for IP details. Drag to select IPs. Scroll to zoom. Red=high threat.")
-    else:
-        st.info("No public IP locations found for map.")
+        if new_ips:
+            st.session_state["filter_ips"] = new_ips
+            st.rerun()
 
+    render_chart_hint("Click markers for IP details. Drag to select IPs. Scroll to zoom. Red=high threat.")
+    if not ip_locs:
+        st.caption("No public IP geolocation matches in this capture; the global view remains available.")
+
+    st.markdown("#### Traffic overview")
     col1, col2 = st.columns(2)
 
     # 2. Protocol Distribution

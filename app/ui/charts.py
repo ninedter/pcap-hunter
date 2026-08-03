@@ -14,6 +14,11 @@ MAX_TIMELINE_FLOW_POINTS = 10_000
 MAX_TIMELINE_VOLUME_POINTS = 5_000
 MAX_PROFILE_SAMPLES = 100_000
 
+FRIENDLY_NAVY = "#0d2146"
+FRIENDLY_MUTED = "#526079"
+FRIENDLY_GRID = "#e9eef5"
+FRIENDLY_SERIES = ["#2b8de0", "#7d46c8", "#2fac55", "#f3aa35", "#5f6f89"]
+
 
 def _threat_score_color(score: float) -> str:
     """Map a 0-1 threat score onto the shared severity palette.
@@ -42,9 +47,6 @@ def plot_world_map(
     flows: list of dicts with keys: src, dst, count (optional, for drawing lines)
     home_loc: (lat, lon) to use for private IPs that don't have geo data.
     """
-    if not ip_data and not flows:
-        return go.Figure()
-
     threat_scores = threat_scores or {}
 
     # Create a lookup for lat/lon by IP
@@ -182,13 +184,17 @@ def plot_protocol_distribution(protocol_counts: dict[str, int]) -> go.Figure:
         values=values,
         hole=0.4,
         title="Protocol Distribution",
-        template="plotly_dark",
-        color_discrete_sequence=px.colors.qualitative.Pastel,
+        template="plotly_white",
+        color_discrete_sequence=FRIENDLY_SERIES,
     )
     fig.update_traces(textposition="inside", textinfo="percent+label", customdata=labels)
     fig.update_layout(
         margin={"r": 0, "t": 30, "l": 0, "b": 0},
         height=400,
+        paper_bgcolor="rgba(0,0,0,0)",
+        plot_bgcolor="rgba(0,0,0,0)",
+        font=dict(color=FRIENDLY_NAVY),
+        title_font=dict(size=14, color=FRIENDLY_NAVY),
     )
     return fig
 
@@ -256,7 +262,7 @@ def plot_flow_timeline(flows: list[dict[str, Any]]) -> go.Figure:
 
     # Trace 2: Flows (Scatter) on primary Y
     unique_protos = scatter_df["proto"].unique()
-    colors = px.colors.qualitative.Pastel
+    colors = FRIENDLY_SERIES
     for i, p in enumerate(unique_protos):
         sub = scatter_df[scatter_df["proto"] == p]
         marker_sizes = (2 + pd.to_numeric(sub["packets"], errors="coerce").fillna(1) * 0.5).clip(2, 18)
@@ -271,7 +277,7 @@ def plot_flow_timeline(flows: list[dict[str, Any]]) -> go.Figure:
                     size=marker_sizes,
                     opacity=0.5,
                     color=colors[i % len(colors)],
-                    line=dict(width=0.5, color="rgba(255,255,255,0.2)"),
+                    line=dict(width=0.5, color="rgba(13,33,70,0.12)"),
                 ),
                 customdata=sub[["src", "dst", "packets"]],
                 hovertemplate=(
@@ -284,11 +290,11 @@ def plot_flow_timeline(flows: list[dict[str, Any]]) -> go.Figure:
 
     fig.update_layout(
         title="Analysis Timeline (Flows & Volume)",
-        template="plotly_dark",
+        template="plotly_white",
         height=500,
         xaxis_title="Time (UTC)",
         yaxis_title="Flow Duration (s)",
-        yaxis=dict(gridcolor="rgba(255,255,255,0.05)", zerolinecolor="rgba(255,255,255,0.1)"),
+        yaxis=dict(gridcolor=FRIENDLY_GRID, zerolinecolor="#dce2eb"),
         yaxis2=dict(
             title="Volume (pkts/sec)",
             overlaying="y",
@@ -310,9 +316,13 @@ def plot_flow_timeline(flows: list[dict[str, Any]]) -> go.Figure:
         hovermode="x unified",
         margin=dict(l=50, r=50, t=80, b=40),
         xaxis=dict(
-            gridcolor="rgba(255,255,255,0.05)",
+            gridcolor=FRIENDLY_GRID,
             rangeslider=dict(visible=False),  # Removal of rangeslider for cleaner look
         ),
+        paper_bgcolor="rgba(0,0,0,0)",
+        plot_bgcolor="rgba(0,0,0,0)",
+        font=dict(color=FRIENDLY_NAVY),
+        title_font=dict(size=14, color=FRIENDLY_NAVY),
     )
     return fig
 
@@ -343,7 +353,7 @@ def plot_top_n_charts(data: dict[str, dict[str, int]], title: str, count_label: 
         y=labels,
         orientation="h",
         title=title,
-        template="plotly_dark",
+        template="plotly_white",
         labels={"x": count_label, "y": ""},  # Hide redundant category label
         color_discrete_sequence=["#4A90E2"],  # Professional blue
     )
@@ -353,7 +363,8 @@ def plot_top_n_charts(data: dict[str, dict[str, int]], title: str, count_label: 
         yaxis={"categoryorder": "total ascending"},
         plot_bgcolor="rgba(0,0,0,0)",
         paper_bgcolor="rgba(0,0,0,0)",
-        title_font=dict(size=14, color="#DDD"),
+        font=dict(color=FRIENDLY_NAVY),
+        title_font=dict(size=14, color=FRIENDLY_NAVY),
     )
     fig.update_traces(
         marker_color="rgba(74, 144, 226, 0.7)", marker_line_color="rgba(74, 144, 226, 1)", marker_line_width=1
@@ -434,14 +445,14 @@ def plot_attack_timeline(timeline_events: list[dict[str, Any]]) -> go.Figure:
 
     fig.update_layout(
         title="Attack Timeline",
-        template="plotly_dark",
+        template="plotly_white",
         height=400,
         xaxis_title="Time (UTC)",
         yaxis=dict(
             title="Severity",
             tickvals=[0, 1, 2, 3, 4],
             ticktext=["Info", "Low", "Medium", "High", "Critical"],
-            gridcolor="rgba(255,255,255,0.05)",
+            gridcolor=FRIENDLY_GRID,
         ),
         legend=dict(
             orientation="h",
@@ -453,6 +464,10 @@ def plot_attack_timeline(timeline_events: list[dict[str, Any]]) -> go.Figure:
         ),
         hovermode="x unified",
         margin=dict(l=60, r=20, t=50, b=40),
+        paper_bgcolor="rgba(0,0,0,0)",
+        plot_bgcolor="rgba(0,0,0,0)",
+        font=dict(color=FRIENDLY_NAVY),
+        title_font=dict(size=14, color=FRIENDLY_NAVY),
     )
     return fig
 
@@ -547,7 +562,7 @@ def plot_network_graph(
             ),
             text=[n.split(".")[-1] if len(n) > 12 else n for n in nodes],
             textposition="top center",
-            textfont=dict(size=8, color="#AAA"),
+            textfont=dict(size=8, color=FRIENDLY_MUTED),
             hovertext=node_text,
             hoverinfo="text",
             showlegend=False,
@@ -556,12 +571,16 @@ def plot_network_graph(
 
     fig.update_layout(
         title="Network Communication Graph",
-        template="plotly_dark",
+        template="plotly_white",
         height=600,
         showlegend=False,
         xaxis=dict(showgrid=False, zeroline=False, showticklabels=False, constrain="domain"),
         yaxis=dict(showgrid=False, zeroline=False, showticklabels=False, scaleanchor="x", scaleratio=1),
         margin=dict(l=20, r=20, t=50, b=20),
+        paper_bgcolor="rgba(0,0,0,0)",
+        plot_bgcolor="rgba(0,0,0,0)",
+        font=dict(color=FRIENDLY_NAVY),
+        title_font=dict(size=14, color=FRIENDLY_NAVY),
     )
     return fig
 

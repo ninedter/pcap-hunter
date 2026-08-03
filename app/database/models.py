@@ -324,6 +324,8 @@ class Job:
     progress_stage: str | None = None
     progress_done: int = 0
     progress_total: int = 10
+    progress_percent: int = 0
+    progress_message: str | None = None
     submitted_at: datetime = field(default_factory=datetime.now)
     started_at: datetime | None = None
     finished_at: datetime | None = None
@@ -342,6 +344,8 @@ class Job:
             "progress_stage": self.progress_stage,
             "progress_done": self.progress_done,
             "progress_total": self.progress_total,
+            "progress_percent": self.progress_percent,
+            "progress_message": self.progress_message,
             "submitted_at": self.submitted_at.isoformat() if self.submitted_at else None,
             "started_at": self.started_at.isoformat() if self.started_at else None,
             "finished_at": self.finished_at.isoformat() if self.finished_at else None,
@@ -375,6 +379,8 @@ class Job:
             progress_stage=data.get("progress_stage"),
             progress_done=data.get("progress_done", 0),
             progress_total=data.get("progress_total", 10),
+            progress_percent=data.get("progress_percent", 0),
+            progress_message=data.get("progress_message"),
             submitted_at=submitted_at or datetime.now(),
             started_at=started_at,
             finished_at=finished_at,

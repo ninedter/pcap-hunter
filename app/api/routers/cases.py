@@ -37,6 +37,11 @@ def get_case(case_id: str, _scope=Depends(require_full_scope), repo=Depends(get_
 
 @router.get("/{case_id}/report.pdf")
 def get_case_report(case_id: str, _scope=Depends(require_full_scope), repo=Depends(get_repo)):
+    return build_case_report_response(case_id, repo)
+
+
+def build_case_report_response(case_id: str, repo) -> FileResponse:
+    """Build or return the cached PDF for any trusted local/API caller."""
     case = repo.get_case(case_id)
     if not case:
         raise HTTPException(status_code=404, detail="case_not_found")

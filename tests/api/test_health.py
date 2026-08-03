@@ -59,7 +59,7 @@ def test_openapi_reports_package_version(client):
     response = client.get("/api/v1/openapi.json")
 
     assert response.status_code == 200
-    assert response.json()["info"]["version"] == __version__ == "2.1.0"
+    assert response.json()["info"]["version"] == __version__ == "3.0.0"
 
 
 def test_openapi_operation_ids_are_unique(client):

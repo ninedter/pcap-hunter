@@ -125,6 +125,8 @@ class CaseRepository:
                     progress_stage TEXT,
                     progress_done INTEGER DEFAULT 0,
                     progress_total INTEGER DEFAULT 10,
+                    progress_percent INTEGER DEFAULT 0,
+                    progress_message TEXT,
                     submitted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     started_at TIMESTAMP,
                     finished_at TIMESTAMP,
@@ -152,6 +154,12 @@ class CaseRepository:
             case_columns = {row["name"] for row in conn.execute("PRAGMA table_info(cases)")}
             if "source" not in case_columns:
                 conn.execute("ALTER TABLE cases ADD COLUMN source TEXT DEFAULT 'ui'")
+
+            job_columns = {row["name"] for row in conn.execute("PRAGMA table_info(jobs)")}
+            if "progress_percent" not in job_columns:
+                conn.execute("ALTER TABLE jobs ADD COLUMN progress_percent INTEGER DEFAULT 0")
+            if "progress_message" not in job_columns:
+                conn.execute("ALTER TABLE jobs ADD COLUMN progress_message TEXT")
             conn.commit()
         finally:
             conn.close()
@@ -884,8 +892,9 @@ class CaseRepository:
                 """
                 INSERT INTO jobs (id, case_id, pcap_path, options_json, status,
                                   progress_stage, progress_done, progress_total,
+                                  progress_percent, progress_message,
                                   submitted_at, heartbeat_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     job.id,
@@ -896,6 +905,8 @@ class CaseRepository:
                     job.progress_stage,
                     job.progress_done,
                     job.progress_total,
+                    job.progress_percent,
+                    job.progress_message,
                     job.submitted_at.isoformat(),
                     datetime.now().isoformat(),
                 ),
@@ -1012,7 +1023,8 @@ class CaseRepository:
         try:
             conn.execute(
                 "UPDATE jobs SET status='done', finished_at=?, heartbeat_at=?, error_code=NULL, "
-                "error_detail=NULL, result_json=?, progress_stage='Complete', progress_done=progress_total "
+                "error_detail=NULL, result_json=?, progress_stage='Complete', progress_done=progress_total, "
+                "progress_percent=100, progress_message='All stages completed' "
                 "WHERE id=?",
                 (now, now, result_json, job_id),
             )
@@ -1020,12 +1032,67 @@ class CaseRepository:
         finally:
             conn.close()
 
-    def update_job_progress(self, job_id: str, stage: str, done: int, total: int) -> None:
+    def update_job_progress(
+        self,
+        job_id: str,
+        stage: str,
+        done: int,
+        total: int,
+        progress_percent: int = 0,
+        progress_message: str | None = None,
+    ) -> None:
         conn = self._get_conn()
         try:
             conn.execute(
-                "UPDATE jobs SET progress_stage=?, progress_done=?, progress_total=?, heartbeat_at=? WHERE id=?",
-                (stage, done, total, datetime.now().isoformat(), job_id),
+                "UPDATE jobs SET progress_stage=?, progress_done=?, progress_total=?, "
+                "progress_percent=?, progress_message=?, heartbeat_at=? WHERE id=?",
+                (
+                    stage,
+                    done,
+                    total,
+                    max(0, min(int(progress_percent), 100)),
+                    progress_message,
+                    datetime.now().isoformat(),
+                    job_id,
+                ),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+    def update_job_stage(
+        self,
+        job_id: str,
+        stage: str,
+        progress_percent: int = 0,
+        progress_message: str | None = None,
+    ) -> None:
+        """Update active-stage detail without rewriting the completed-stage counter."""
+        conn = self._get_conn()
+        try:
+            conn.execute(
+                "UPDATE jobs SET progress_stage=?, progress_percent=?, progress_message=?, heartbeat_at=? WHERE id=?",
+                (
+                    stage,
+                    max(0, min(int(progress_percent), 100)),
+                    progress_message,
+                    datetime.now().isoformat(),
+                    job_id,
+                ),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+    def complete_job_stage(self, job_id: str, stage: str, progress_message: str | None = None) -> None:
+        """Atomically finish one stage so parallel workers cannot lose increments."""
+        conn = self._get_conn()
+        try:
+            conn.execute(
+                "UPDATE jobs SET progress_stage=?, "
+                "progress_done=MIN(progress_done + 1, progress_total), progress_percent=100, "
+                "progress_message=?, heartbeat_at=? WHERE id=?",
+                (stage, progress_message, datetime.now().isoformat(), job_id),
             )
             conn.commit()
         finally:

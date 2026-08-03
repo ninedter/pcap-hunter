@@ -15,3 +15,10 @@ docker-compose.yml
 *.db
 *.pcap
 *.pcapng
+prototype-friendly-ui/node_modules/
+prototype-friendly-ui/dist/
+prototype-friendly-ui/qa/
+prototype-friendly-ui/reference/
+prototype-friendly-ui/tests/
+prototype-friendly-ui/worker/
+prototype-friendly-ui/scripts/

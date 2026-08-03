@@ -15,7 +15,8 @@ router = APIRouter(prefix="/api/v1/jobs", tags=["ingress"])
 
 
 def _job_to_response(job) -> JobStatusResponse:
-    pct = int(job.progress_done / max(job.progress_total, 1) * 100)
+    fractional_done = job.progress_done + (job.progress_percent / 100 if job.status == JobStatus.RUNNING else 0)
+    pct = int(min(fractional_done / max(job.progress_total, 1), 1) * 100)
     return JobStatusResponse(
         job_id=job.id,
         case_id=job.case_id,

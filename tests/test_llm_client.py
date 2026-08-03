@@ -531,7 +531,12 @@ class TestNormalizeBaseUrl:
     def test_generate_report_passes_normalized_url_to_openai(self):
         from app.llm import client as llm_client
 
-        with patch.object(llm_client, "OpenAI") as mock_openai:
+        # Keep this normalization assertion independent from the Docker-only
+        # host-bridge rewrite, which has its own focused coverage above.
+        with (
+            patch.dict("os.environ", {"PCAP_HUNTER_DOCKER_HOST_FALLBACK": "0"}),
+            patch.object(llm_client, "OpenAI") as mock_openai,
+        ):
             mock_completion = MagicMock()
             mock_completion.choices = [MagicMock(message=MagicMock(content="Body"))]
             mock_openai.return_value.chat.completions.create.return_value = mock_completion

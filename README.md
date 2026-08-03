@@ -1,39 +1,49 @@
 # PCAP Hunter
 
 [![CI](https://github.com/ninedter/pcap-hunter/actions/workflows/ci.yml/badge.svg)](https://github.com/ninedter/pcap-hunter/actions/workflows/ci.yml)
-[![Version: v2.1.0](https://img.shields.io/badge/version-v2.1.0-7c3aed.svg)](CHANGELOG.md#210---2026-07-17)
+[![Version: v3.0.0](https://img.shields.io/badge/version-v3.0.0-2563eb.svg)](CHANGELOG.md#300---2026-08-03)
 [![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 
 > **[繁體中文版 README (Traditional Chinese)](docs/zh-TW/README.md)**
 
-**PCAP Hunter** is an AI-enhanced threat hunting workbench that bridges manual packet analysis and automated security monitoring. It empowers SOC analysts and threat hunters to rapidly ingest, analyze, and extract actionable intelligence from raw PCAP files.
+**PCAP Hunter** is an AI-enhanced threat hunting workbench that bridges manual packet analysis and automated security monitoring. It gives SOC analysts and threat hunters one place to ingest captures, follow the durable analysis pipeline, review findings, explore linked traffic visualizations, validate ATT&CK hypotheses, enrich indicators, and preserve case evidence.
 
-By combining industry-standard network analysis tools (**Zeek**, **Tshark**, **PyShark**) with **Large Language Models (LLMs)** and **OSINT** APIs, PCAP Hunter automates the tedious parts of packet analysis — parsing, correlation, and enrichment — so analysts can focus on detection and response.
+The latest workbench keeps the full packet-analysis depth of **Zeek**, **Tshark**, and **PyShark**, then adds an analyst-first interface for geographic flow aggregation, cross-filtered traffic views, evidence inventory, OSINT, reports, and optional **Large Language Model (LLM)** assistance. Deterministic evidence remains available even when an LLM or enrichment provider is unavailable.
+
+![Latest PCAP Hunter dashboard with privacy-safe destination labels](docs/images/workbench-current/dashboard-redacted.png)
+
+<p align="center">
+  <img src="docs/images/workbench-current/evidence-redacted.png" width="49%" alt="Privacy-safe evidence inventory" />
+  <img src="docs/images/workbench-current/traffic-redacted.png" width="49%" alt="Privacy-safe linked traffic workspace" />
+</p>
+
+![Latest PCAP Hunter ATT&CK hypothesis workspace with privacy-safe evidence labels](docs/images/workbench-current/mitre-redacted.png)
+
+> Documentation and design-handoff images use irreversible replacement labels such as `[IP 01]`, `[HOST 01]`, and `[CAPTURE 01]`. Raw addresses, hostnames, case details, capture filenames, secrets, email addresses, local paths, and precise home-location data are never embedded in these files.
 
 📖 **[User Manual (English)](docs/en/USER_MANUAL.md)** | **[中文說明 (Traditional Chinese)](docs/zh-TW/README.md)**
 
 ---
 
-## What's new in version 2.1
+## What's new in version 3
 
-- **Adjustable LLM context** — choose a 10K–1M-token model window; PCAP Hunter uses at most 50% for input so output and tokenizer variance do not force context compression.
-- **Optional unlimited context** — disable the window cap and send every available sanitized evidence item in one request; the slider is disabled while this mode is active.
-- **Richer, better-grounded reports** — foreground and background generation now share correlations, flow anomalies, JA3, final ATT&CK mapping, capture metrics, stage status, and warnings.
-- **Faster large investigations** — bounded case queries, batched IOC persistence, cached geographic indexes, and capped browser chart samples reduce database and dashboard overhead.
-- **Dedicated MITRE ATT&CK workspace** — evidence-backed technique hypotheses, ATT&CK v19.1 metadata, analyst dispositions, capture coverage, visibility gaps, and Navigator export.
-- **Capture-quality telemetry** — packet/flow scale, parse ratio, time window, sampling limits, completed stages, and warnings now travel with UI and API results and persist with cases.
-- **Durable UI analysis** — Streamlit now submits PCAP work to a process-backed queue, autosaves full evidence to SQLite, and restores recent jobs after a page stop or browser reload.
-- **Safer PCAP intake** — Streamlit uploads are streamed in bounded chunks, preserve `.pcap`/`.pcapng`, validate magic bytes, enforce batch limits, and remove partial files after rejection.
-- **Stronger Integrations API** — headless jobs return ATT&CK mappings and capture metrics, IOC feeds carry related technique IDs, readiness checks avoid starting the worker queue, and failed submissions clean up provisional cases and files.
-- **Evidence without an LLM** — skipping or losing the optional AI narrative no longer hides deterministic packet, IOC, correlation, stage, and warning evidence.
-- **Runtime and export reliability** — Docker adapts local LM Studio addresses to the host bridge, HTTP carving decodes tshark byte arrays correctly, case re-saves replace stale IOCs, and PDF timestamps are consistently UTC.
+- **A new analyst-first workbench** — the production UI is now a responsive React application with clear Analyze, Dashboard, Findings, Investigate, Reports, Cases, and Settings workspaces.
+- **A proportioned, scalable world map** — global traffic stays readable as destination volume grows, grouping endpoints by continent, country, and city while preserving every underlying address.
+- **Compact destination navigation** — the former flat endpoint list is now an expandable continent → country → city → endpoint hierarchy with the active path opened automatically.
+- **Linked visual analysis** — protocol, timeline, search, and map selections share one filter state, so interacting with one visualization updates the other traffic views instead of becoming a visual-only selection.
+- **Working visualization shortcuts** — World map, Top IPs and domains, Sankey, network graph, attack timeline, histograms, and heatmap controls now open and focus their real destinations.
+- **More room without distortion** — the desktop connectivity panel is taller, the geographic projection scales with it, and responsive layouts retain readable proportions on smaller screens.
+- **No hidden investigation text** — protocols, hostnames, identifiers, tables, legends, and chart marks wrap or resize instead of being silently clipped.
+- **Durable analysis workflow** — run progress, cases, findings, ATT&CK hypotheses, reports, exports, OSINT, and raw evidence remain connected through a single workbench state.
+- **Privacy-safe documentation mode** — an explicit opt-in view replaces addresses, hostnames, case details, filenames, locations, and other sensitive values with irreversible labels for screenshots and design handoffs.
+- **Production-ready delivery** — Docker now builds and serves the React workbench directly while retaining the existing Python analysis engine, persistent configuration, OSINT cache, and authenticated integrations API.
 
 ---
 
 ## Table of Contents
 
-- [What's new in version 2.1](#whats-new-in-version-21)
+- [What's new in version 3](#whats-new-in-version-3)
 - [Visual Tour](#visual-tour)
 - [Key Features](#key-features)
 - [Integrations API](#integrations-api)
@@ -50,9 +60,10 @@ By combining industry-standard network analysis tools (**Zeek**, **Tshark**, **P
 
 ## Visual Tour
 
-These are captures of the real version-2 Streamlit app running in Docker against
-the bundled sample PCAP. IP addresses, API secrets, email addresses, and local
-user paths are masked in the image pixels before the files are committed.
+The current workbench is shown in the introduction above. The detailed tour below
+retains the version-2 workflow captures for feature-by-feature reference. IP
+addresses, API secrets, email addresses, and local user paths are masked in the
+image pixels before the files are committed.
 
 ### 1. Upload — load one or many PCAPs
 

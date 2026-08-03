@@ -1,0 +1,69 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" role="img" aria-label="PCAP Hunter">
+  <!--
+    PCAP Hunter logo
+    Concept: magnifying-glass scope (hunting / investigation) over a packet
+    waveform (PCAP). Red accent dot = detected IOC / alert.
+
+    Palette matches the app + PDF styles:
+      #1a1a2e  dark navy     (scope body)
+      #16213e  mid navy      (scope inner)
+      #0f3460  deep blue     (accent stroke)
+      #e94560  red alert     (detected packet / alert)
+      #ffffff  white         (background fill)
+  -->
+  <defs>
+    <clipPath id="lens-clip">
+      <circle cx="100" cy="100" r="72"/>
+    </clipPath>
+    <linearGradient id="handle-grad" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#1a1a2e"/>
+      <stop offset="100%" stop-color="#0f3460"/>
+    </linearGradient>
+    <linearGradient id="ring-grad" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#0f3460"/>
+      <stop offset="100%" stop-color="#1a1a2e"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Magnifying glass handle (behind lens so it tucks under the ring) -->
+  <rect x="160" y="160" width="68" height="22"
+        rx="11" ry="11"
+        transform="rotate(45 194 171)"
+        fill="url(#handle-grad)"/>
+
+  <!-- Lens background (clipped circle for inner scene) -->
+  <circle cx="100" cy="100" r="72" fill="#ffffff"/>
+
+  <!-- Inner scene: packet waveform + network dots -->
+  <g clip-path="url(#lens-clip)">
+    <!-- subtle grid guide lines -->
+    <line x1="28" y1="100" x2="172" y2="100" stroke="#e9eef5" stroke-width="2"/>
+
+    <!-- packet waveform (square-wave suggesting network bursts) -->
+    <polyline
+        points="36,112 52,112 52,82 72,82 72,112 92,112 92,68 116,68 116,112 140,112 140,88 164,88"
+        fill="none"
+        stroke="#16213e"
+        stroke-width="4"
+        stroke-linecap="round"
+        stroke-linejoin="round"/>
+
+    <!-- three packet nodes along the wave; middle one is the red alert -->
+    <circle cx="52"  cy="82"  r="5" fill="#16213e"/>
+    <circle cx="92"  cy="68"  r="6" fill="#e94560"/>
+    <circle cx="140" cy="88"  r="5" fill="#16213e"/>
+
+    <!-- crosshair reticle lines -->
+    <line x1="28" y1="100" x2="70" y2="100" stroke="#0f3460" stroke-width="2" stroke-dasharray="6 4"/>
+    <line x1="130" y1="100" x2="172" y2="100" stroke="#0f3460" stroke-width="2" stroke-dasharray="6 4"/>
+    <line x1="100" y1="28" x2="100" y2="70" stroke="#0f3460" stroke-width="2" stroke-dasharray="6 4"/>
+    <line x1="100" y1="130" x2="100" y2="172" stroke="#0f3460" stroke-width="2" stroke-dasharray="6 4"/>
+
+    <!-- center marker -->
+    <circle cx="100" cy="100" r="3" fill="#e94560"/>
+  </g>
+
+  <!-- Lens ring (outer) -->
+  <circle cx="100" cy="100" r="72" fill="none" stroke="url(#ring-grad)" stroke-width="12"/>
+</svg>

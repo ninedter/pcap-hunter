@@ -9,7 +9,7 @@ from app.ui.charts import (
 
 def test_plot_world_map_empty():
     fig = plot_world_map([], [])
-    assert fig.layout.title.text is None  # Or check if it returns empty figure structure
+    assert fig.layout.title.text == "Global Traffic Origins & Connectivity"
     assert len(fig.data) == 0
 
 

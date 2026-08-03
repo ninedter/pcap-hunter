@@ -24,7 +24,8 @@ def resolve_ip(ip: str, timeout: float = _RDNS_TIMEOUT) -> str | None:
         old = socket.getdefaulttimeout()
         socket.setdefaulttimeout(timeout)
         try:
-            return socket.gethostbyaddr(ip)[0]
+            hostname = socket.gethostbyaddr(ip)[0].strip().rstrip(".")
+            return hostname or None
         finally:
             socket.setdefaulttimeout(old)
     except (socket.herror, socket.gaierror, OSError, socket.timeout):

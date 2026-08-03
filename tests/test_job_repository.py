@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
 
 from app.database.models import Case, Job, JobStatus, Severity
@@ -68,11 +69,30 @@ def test_update_job_progress(tmp_path):
     case_id = repo.create_case(Case(title="T"))
     job_id = repo.create_job(Job(case_id=case_id, pcap_path="/tmp/x.pcap"))
 
-    repo.update_job_progress(job_id, "zeek", 3, 10)
+    repo.update_job_progress(job_id, "zeek", 3, 10, 47, "Processing conn.log")
     job = repo.get_job(job_id)
     assert job.progress_stage == "zeek"
     assert job.progress_done == 3
     assert job.progress_total == 10
+    assert job.progress_percent == 47
+    assert job.progress_message == "Processing conn.log"
+
+
+def test_parallel_stage_completions_increment_atomically(tmp_path):
+    repo = _setup_repo(tmp_path)
+    case_id = repo.create_case(Case(title="T"))
+    job_id = repo.create_job(Job(case_id=case_id, pcap_path="/tmp/x.pcap"))
+    repo.update_job_status(job_id, JobStatus.RUNNING)
+
+    with ThreadPoolExecutor(max_workers=7) as pool:
+        list(pool.map(lambda index: repo.complete_job_stage(job_id, f"stage-{index}"), range(7)))
+
+    repo.update_job_stage(job_id, "OSINT enrichment", 5, "Querying providers")
+    job = repo.get_job(job_id)
+    assert job.progress_done == 7
+    assert job.progress_stage == "OSINT enrichment"
+    assert job.progress_percent == 5
+    assert job.progress_message == "Querying providers"
 
 
 def test_find_stale_running_jobs(tmp_path):

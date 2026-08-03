@@ -26,16 +26,22 @@ def test_job_round_trip():
         progress_stage="zeek",
         progress_done=4,
         progress_total=10,
+        progress_percent=63,
+        progress_message="Parsing connections",
         submitted_at=datetime(2026, 4, 27, 15, 30),
     )
     d = job.to_dict()
     assert d["status"] == "running"
     assert d["progress_done"] == 4
     assert d["progress_stage"] == "zeek"
+    assert d["progress_percent"] == 63
+    assert d["progress_message"] == "Parsing connections"
     restored = Job.from_dict(d)
     assert restored.id == job.id
     assert restored.status == JobStatus.RUNNING
     assert restored.progress_stage == "zeek"
+    assert restored.progress_percent == 63
+    assert restored.progress_message == "Parsing connections"
 
 
 def test_job_defaults():
@@ -43,6 +49,8 @@ def test_job_defaults():
     assert job.status == JobStatus.QUEUED
     assert job.progress_done == 0
     assert job.progress_total == 10
+    assert job.progress_percent == 0
+    assert job.progress_message is None
     assert job.error_code is None
     assert job.result_json is None
 

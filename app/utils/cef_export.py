@@ -22,12 +22,14 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
 
+from app import __version__
+
 logger = logging.getLogger(__name__)
 
 _CEF_VERSION = "0"
 _VENDOR = "PCAPHunter"
 _PRODUCT = "ThreatWorkbench"
-_PRODUCT_VERSION = "1.0"
+_PRODUCT_VERSION = __version__
 
 # Map internal verdicts to CEF severity (0-10 scale)
 _SEVERITY_MAP = {

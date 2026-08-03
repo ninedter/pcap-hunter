@@ -7,7 +7,7 @@ The Integrations API lets external platforms (SOAR, SIEM, log analysis tools, cu
 
 | | |
 |---|---|
-| **API version** | `2.1.0` |
+| **API version** | `3.0.0` |
 | **Base URL** | `http://<host>:8000` — all business endpoints live under `/api/v1`; health probes (`/healthz`, `/readyz`) are at the root |
 | **Interactive docs** | Swagger UI at `/docs`, ReDoc at `/redoc`, OpenAPI 3.1 JSON at `/api/v1/openapi.json` (all unauthenticated) |
 | **Auth scheme** | `Authorization: Bearer <key>` |

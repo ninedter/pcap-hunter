@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import base64
+import html
 from pathlib import Path
 
 import pandas as pd
@@ -17,47 +19,58 @@ from app.utils.export import (
 
 
 def inject_css():
+    """Load the shared production theme used by every Streamlit workspace."""
+    css_path = Path(__file__).with_name("friendly_theme.css")
+    css = css_path.read_text(encoding="utf-8")
+    st.markdown(f"<style>{css}</style>", unsafe_allow_html=True)
+
+
+def image_data_uri(path: Path | None) -> str | None:
+    """Return a browser-safe data URI for a local raster brand asset."""
+    if path is None or not path.is_file():
+        return None
+    suffix = path.suffix.lower()
+    mime = "image/png" if suffix == ".png" else "image/jpeg"
+    payload = base64.b64encode(path.read_bytes()).decode("ascii")
+    return f"data:{mime};base64,{payload}"
+
+
+def render_app_header(
+    static_dir: Path,
+    theme_type: str | None,
+    *,
+    capture_count: int = 0,
+    analysis_complete: bool = False,
+) -> None:
+    """Render the fixed production header and persistent system-health footer."""
+    logo_path = resolve_logo_path(static_dir, theme_type)
+    logo_uri = image_data_uri(logo_path)
+    logo = f'<img src="{logo_uri}" alt="PCAP Hunter magnifying-glass logo">' if logo_uri else ""
+    capture_label = f"{capture_count} capture" + ("s" if capture_count != 1 else "")
+    status_class = "complete" if analysis_complete else "ready"
+    status_label = "Analysis ready" if analysis_complete else "Ready to analyze"
+    app_name = html.escape("PCAP Threat Hunting Workbench")
     st.markdown(
-        """
-        <style>
-        .block-container { padding-top: 1.4rem; padding-bottom: 2rem; }
-        .stTabs [role="tablist"] { gap: .5rem; }
-        .stTabs [role="tab"] { padding: .45rem .9rem; border-radius: 8px; }
-        .stButton>button { border-radius: 10px; }
-        .phase-row .stButton>button { height: 38px; }
-        .phase-row .stProgress { margin-top: 6px; }
-        .section-title { margin-top: .75rem; margin-bottom: .5rem; }
-        .dashboard-card {
-            border: 1px solid rgba(255, 255, 255, 0.05);
-            border-radius: 12px;
-            padding: 1.25rem;
-            background-color: rgba(255, 255, 255, 0.02);
-            margin-bottom: 1rem;
-        }
-        .metric-card {
-            background: linear-gradient(135deg, rgba(74, 144, 226, 0.1), rgba(0,0,0,0));
-            border-left: 3px solid #4A90E2;
-        }
-        .chart-hint {
-            color: rgba(255, 255, 255, 0.4);
-            font-size: 0.78rem;
-            font-style: italic;
-            margin-top: -0.5rem;
-            margin-bottom: 0.5rem;
-        }
-        .filter-badge {
-            display: inline-block;
-            padding: 0.2rem 0.6rem;
-            margin: 0.15rem;
-            border-radius: 12px;
-            background: rgba(74, 144, 226, 0.15);
-            border: 1px solid rgba(74, 144, 226, 0.3);
-            font-size: 0.8rem;
-            color: #AAA;
-        }
-        .hunt-item { margin-bottom: 0.3rem; }
-        </style>
+        f"""
+        <div class="pcap-app-header" aria-label="{app_name}">
+            <div class="pcap-brand">{logo}<strong>{app_name}</strong></div>
+            <div class="pcap-run-state">
+                <span class="pcap-capture-count">{html.escape(capture_label)}</span>
+                <span class="pcap-status {status_class}">{html.escape(status_label)}</span>
+            </div>
+        </div>
+        <div class="pcap-sidebar-health" aria-label="System healthy">
+            <i></i><span><strong>System healthy</strong><small>tshark · Zeek · worker</small></span>
+        </div>
         """,
+        unsafe_allow_html=True,
+    )
+
+
+def render_workspace_heading(title: str, description: str) -> None:
+    """Render a consistent answer-first workspace heading."""
+    st.markdown(
+        f'<div class="pcap-workspace-heading"><h1>{html.escape(title)}</h1><p>{html.escape(description)}</p></div>',
         unsafe_allow_html=True,
     )
 
@@ -131,18 +144,18 @@ def render_export_buttons(data, prefix: str, key_suffix: str = "", is_dataframe:
 
 
 def make_tabs():
-    """Top tabs, including a dedicated MITRE analysis workspace."""
+    """Production workspaces, styled as the persistent application sidebar."""
     tab_names = [
-        "📤 Upload",
-        "📈 Progress",
-        "📊 Dashboard",
-        "🧭 MITRE Analysis",
-        "🤖 LLM Analysis",
-        "🕵️ OSINT",
-        "📋 Raw Data",
-        "📁 Cases",
-        "🔑 API Keys",
-        "⚙️ Config",
+        "Analyze · Upload",
+        "Analyze · Progress",
+        "Dashboard",
+        "Investigate · MITRE",
+        "Reports · LLM",
+        "Investigate · OSINT",
+        "Investigate · Raw Data",
+        "Cases",
+        "Settings · API Keys",
+        "Settings · Config",
     ]
     tabs = st.tabs(tab_names)
     return tuple(tabs)

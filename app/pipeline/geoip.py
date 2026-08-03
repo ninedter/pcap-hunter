@@ -25,6 +25,7 @@ class GeoIP:
             if not match:
                 return None
 
+            continent = match.get("continent", {}).get("names", {}).get("en", "Unknown")
             country = match.get("country", {}).get("names", {}).get("en", "Unknown")
             city = match.get("city", {}).get("names", {}).get("en", "Unknown")
             loc = match.get("location", {})
@@ -34,7 +35,7 @@ class GeoIP:
             if lat is None or lon is None:
                 return None
 
-            return (ip, country, city, lat, lon)
+            return (ip, country, city, lat, lon, continent)
         except Exception:
             return None
 
@@ -43,7 +44,14 @@ class GeoIP:
         result = cls._lookup_cached(ip)
         if result is None:
             return None
-        return {"ip": result[0], "country": result[1], "city": result[2], "lat": result[3], "lon": result[4]}
+        return {
+            "ip": result[0],
+            "country": result[1],
+            "city": result[2],
+            "lat": result[3],
+            "lon": result[4],
+            "continent": result[5],
+        }
 
     @classmethod
     def close(cls):

@@ -97,13 +97,19 @@ def _sha256_file(path: str) -> str:
     return h.hexdigest()
 
 
-def _update_manual_stage(repo: CaseRepository, job_id: str, stage: str, *, completed: bool = False) -> None:
+def _update_manual_stage(
+    repo: CaseRepository,
+    job_id: str,
+    stage: str,
+    *,
+    completed: bool = False,
+    message: str | None = None,
+) -> None:
     """Publish progress for worker-owned stages that run after ``run_pipeline``."""
-    job = repo.get_job(job_id)
-    if job is None:
-        return
-    done = job.progress_done + (1 if completed else 0)
-    repo.update_job_progress(job_id, stage, min(done, job.progress_total), job.progress_total)
+    if completed:
+        repo.complete_job_stage(job_id, stage, message)
+    else:
+        repo.update_job_stage(job_id, stage, 5, message)
 
 
 def _json_safe_records(value: Any) -> list[dict]:
@@ -122,8 +128,8 @@ def _run_yara_stage(result: PipelineResult, opts: dict, job_id: str, repo: CaseR
     Appends to result.stages_run/warnings and touches the job heartbeat.
     """
     yara_results = None
+    _update_manual_stage(repo, job_id, "YARA Scanning")
     if opts.get("do_yara", True) and result.carved_items:
-        _update_manual_stage(repo, job_id, "YARA Scanning")
         try:
             from app.pipeline.yara_scan import scan_carved_files
 
@@ -139,7 +145,11 @@ def _run_yara_stage(result: PipelineResult, opts: dict, job_id: str, repo: CaseR
         except Exception:
             logger.exception("Job %s: yara stage failed", job_id)
             result.warnings.append(WARNING_YARA_FAILED)
-        _update_manual_stage(repo, job_id, "YARA Scanning", completed=True)
+        _update_manual_stage(repo, job_id, "YARA Scanning", completed=True, message="YARA scan complete")
+    else:
+        reason = "Skipped — no carved files" if opts.get("do_yara", True) else "Skipped by run settings"
+        result.stages_run.append("yara_scan_skipped")
+        _update_manual_stage(repo, job_id, "YARA Scanning", completed=True, message=reason)
     return yara_results
 
 
@@ -148,9 +158,9 @@ def _run_osint_stage(result: PipelineResult, opts: dict, job_id: str, repo: Case
 
     Appends to result.stages_run/warnings and touches the job heartbeat.
     """
-    osint_data: dict = {}
+    osint_data: dict = {"ips": {}, "domains": {}, "ja3": {}}
     if opts.get("osint_enabled", True):
-        _update_manual_stage(repo, job_id, "OSINT enrichment")
+        _update_manual_stage(repo, job_id, "OSINT enrichment", message="Querying configured reputation providers")
         keys = _load_osint_keys()
         if not keys:
             result.warnings.append(WARNING_OSINT_NOT_CONFIGURED)
@@ -165,16 +175,31 @@ def _run_osint_stage(result: PipelineResult, opts: dict, job_id: str, repo: Case
                     else [ip for ip in arts.get("ips", []) if is_public_ipv4(ip)]
                 )
                 osint_data = osint_enrich(arts, keys)
-                osint_data = osint_data if isinstance(osint_data, dict) else {}
-                all_public = [ip for ip in feats.get("artifacts", {}).get("ips", []) if is_public_ipv4(ip)]
-                for ip, hostname in bulk_resolve_ips(all_public, max_workers=C.RDNS_MAX_WORKERS).items():
-                    if ip in osint_data.get("ips", {}) and "ptr" not in osint_data["ips"][ip]:
-                        osint_data["ips"][ip]["ptr"] = hostname
+                osint_data = osint_data if isinstance(osint_data, dict) else {"ips": {}, "domains": {}, "ja3": {}}
                 result.stages_run.append("osint")
             except Exception:
                 logger.exception("Job %s: osint stage failed", job_id)
                 result.warnings.append(WARNING_OSINT_FAILED)
-        _update_manual_stage(repo, job_id, "OSINT enrichment", completed=True)
+        _update_manual_stage(repo, job_id, "OSINT enrichment", completed=True, message="Provider enrichment complete")
+
+    # PTR lookups are capture enrichment, not a paid reputation-provider feature.
+    # Run them even when OSINT is disabled or no provider keys are configured, and
+    # retain results for IPs that no provider happened to return.
+    try:
+        feats = result.features if isinstance(result.features, dict) else {}
+        all_public = [ip for ip in feats.get("artifacts", {}).get("ips", []) if is_public_ipv4(ip)]
+        ip_records = osint_data.setdefault("ips", {})
+        for ip, hostname in bulk_resolve_ips(all_public, max_workers=C.RDNS_MAX_WORKERS).items():
+            hostname = str(hostname).strip().rstrip(".")
+            if not hostname:
+                continue
+            details = ip_records.get(ip)
+            if not isinstance(details, dict):
+                details = {}
+                ip_records[ip] = details
+            details.setdefault("ptr", hostname)
+    except Exception:
+        logger.exception("Job %s: reverse DNS enrichment failed", job_id)
     return osint_data
 
 
@@ -238,7 +263,7 @@ def _run_llm_stage(
 
     from app.llm import providers as llm_providers
 
-    _update_manual_stage(repo, job_id, "LLM report")
+    _update_manual_stage(repo, job_id, "LLM report", message="Generating the saved threat narrative")
     provider, base_url, api_key, model, language, context_window, unlimited_context = _load_llm_settings()
     if provider in (llm_providers.PROVIDER_OPENAI, llm_providers.PROVIDER_ANTHROPIC) and not api_key:
         result.warnings.append(WARNING_LLM_NOT_CONFIGURED)
@@ -370,7 +395,7 @@ def _run_llm_stage(
     except Exception:
         logger.exception("Job %s: LLM stage failed", job_id)
         result.warnings.append(WARNING_LLM_FAILED)
-    _update_manual_stage(repo, job_id, "LLM report", completed=True)
+    _update_manual_stage(repo, job_id, "LLM report", completed=True, message="Threat narrative saved")
 
 
 def _persist_analysis(
@@ -522,13 +547,11 @@ def _worker_run(job_id: str, db_path: str, pcap_path: str, options_dict: dict) -
 
     def _on_event(event: ProgressEvent) -> None:
         if event.kind == "phase_start":
-            j = repo.get_job(job_id)
-            if j:
-                repo.update_job_progress(job_id, event.title, j.progress_done, j.progress_total)
+            repo.update_job_stage(job_id, event.title, 0, event.message)
+        elif event.kind == "phase_set":
+            repo.update_job_stage(job_id, event.title, event.percent, event.message)
         elif event.kind == "phase_done":
-            j = repo.get_job(job_id)
-            if j:
-                repo.update_job_progress(job_id, event.title, j.progress_done + 1, j.progress_total)
+            repo.complete_job_stage(job_id, event.title, event.message)
 
     progress = CallbackProgress(callback=_on_event, total_phases=10)
     options = PipelineOptions(**{k: v for k, v in options_dict.items() if k in PipelineOptions.__dataclass_fields__})

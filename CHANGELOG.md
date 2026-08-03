@@ -2,6 +2,48 @@
 
 All notable changes to this project will be documented in this file.
 
+## [3.0.0] - 2026-08-03
+
+Version 3 introduces a new analyst-first web workbench while preserving PCAP Hunter's existing analysis engine, saved configuration, OSINT cache, case evidence, and integrations API.
+
+### Why 3.0.0
+
+This is a major-version release because the primary application experience moves from the legacy Streamlit navigation model to a production React workbench served by the Python application. The analysis pipeline and persisted data remain compatible, but the information architecture, interaction model, responsive behavior, and deployment path have changed substantially.
+
+### Added
+
+- **Responsive analyst workbench** with dedicated Analyze, Dashboard, Findings, Investigate, Reports, Cases, and Settings destinations.
+- **Hierarchical geographic aggregation** that groups global destinations by continent, then country, then city as analysts zoom in, without discarding underlying endpoints.
+- **Expandable destination inventory** organized as continent → country → city → endpoint, with aggregate packet counts and the selected path opened by default.
+- **Shared visualization filtering** across protocols, timeline ranges, destination search, and the world map.
+- **Functional deep-dive shortcuts** for the world map, Top IPs and domains, Sankey flow, network graph, attack timeline, packet-size and inter-arrival histograms, and traffic heatmap.
+- **Privacy-safe documentation mode** that irreversibly replaces capture-specific addresses, hostnames, case details, filenames, email addresses, paths, and precise locations.
+- **Sanitized current-workbench screenshots and Figma handoff assets** for public documentation and design review.
+
+### Changed
+
+- The production Docker image now builds the React client and serves it through the Python web application on port 8501.
+- The world-map panel uses a taller responsive canvas and scales its projection to fill the available area without distorting the map.
+- Protocol legends, selected-destination metadata, evidence identifiers, and table values wrap or resize instead of being clipped.
+- Run progress, findings, evidence, traffic analysis, ATT&CK hypotheses, reports, cases, and settings now share a unified workbench state.
+- The README introduction and visual overview now describe and show the version 3 experience.
+- CEF exports, API metadata, documentation, tests, and frontend package metadata now report version 3.0.0.
+
+### Fixed
+
+- Protocol and time selections now recalculate map endpoints and traffic weights instead of only changing local chart appearance.
+- City-level grouping now combines endpoints that resolve to the same city while retaining individual endpoint details.
+- Additional-traffic-view controls now route to unique, focusable visualization destinations.
+- Docker-aware LLM URL tests now isolate the intended host-bridge behavior from non-container URL normalization.
+- Background job and case persistence paths handle queue failure, cancellation, stale state, and repeated saves more consistently.
+
+### Validation
+
+- Canonical Docker formatting, lint, and backend suite: 1,052 passed, 22 skipped, 0 failed.
+- Frontend interaction suite: 24 passed, 0 failed.
+- Sites delivery suite: 4 passed, 0 failed.
+- Production Docker health, SQLite integrity, configuration persistence, and OSINT-cache persistence verified after rebuild.
+
 ## [2.1.0] - 2026-07-17
 
 Version 2.1 adds explicit control over how much analysis evidence is sent to an LLM, while improving report grounding, background-processing parity, and performance on larger investigations.

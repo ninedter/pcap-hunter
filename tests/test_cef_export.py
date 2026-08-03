@@ -19,7 +19,7 @@ class TestCEFEvent:
             extensions={"src": "1.2.3.4"},
         )
         cef = event.to_cef()
-        assert cef.startswith("CEF:0|PCAPHunter|ThreatWorkbench|1.0|TEST-001|Test Event|5|")
+        assert cef.startswith("CEF:0|PCAPHunter|ThreatWorkbench|3.0.0|TEST-001|Test Event|5|")
         assert "src=1.2.3.4" in cef
 
     def test_pipe_escaping_in_name(self):

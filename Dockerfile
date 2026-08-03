@@ -1,5 +1,15 @@
 # syntax=docker/dockerfile:1.7
 
+# ---------- Web workbench ----------
+FROM node:22-bookworm-slim AS web-builder
+WORKDIR /web
+COPY prototype-friendly-ui/package.json prototype-friendly-ui/package-lock.json ./
+RUN npm ci
+COPY prototype-friendly-ui/index.html prototype-friendly-ui/vite.config.mjs ./
+COPY prototype-friendly-ui/src/ ./src/
+COPY prototype-friendly-ui/public/ ./public/
+RUN npm run build:web
+
 # ---------- Builder ----------
 FROM python:3.11-bookworm AS builder
 ENV DEBIAN_FRONTEND=noninteractive
@@ -53,6 +63,8 @@ RUN --mount=type=bind,from=builder,source=/wheels,target=/wheels \
 # (from app.pipeline import ...) resolve identically to a local checkout.
 # The previous flattened COPY (app/ -> /app/) broke `uvicorn app.api.app`.
 COPY app/ ./app/
+COPY .streamlit/ ./.streamlit/
+COPY --from=web-builder /web/dist/client/ ./app/web/static/
 
 # Non-root + data dirs
 RUN useradd -m runner && mkdir -p /data /app/data && chown -R runner:runner /app /data
@@ -60,9 +72,9 @@ USER runner
 
 EXPOSE 8000 8501
 
-# Default: run Streamlit. The compose file runs the integrations API from the
-# same image with an explicit uvicorn command.
-CMD ["streamlit", "run", "app/main.py", "--server.port=8501", "--server.address=0.0.0.0"]
+# Default: run the production React workbench and its local UI API. The compose
+# file runs the authenticated integrations API from the same image on port 8000.
+CMD ["uvicorn", "app.web.app:create_app", "--factory", "--host", "0.0.0.0", "--port", "8501"]
 
 # ---------- Test (canonical local verification: make docker-verify) ----------
 # Mirrors `make verify` (format check + lint + full suite) inside the runtime

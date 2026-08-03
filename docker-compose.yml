@@ -3,7 +3,7 @@ services:
   pcap-hunter-ui:
     build: .
     image: pcap-hunter:latest
-    command: ["streamlit", "run", "app/main.py", "--server.port=8501", "--server.address=0.0.0.0"]
+    command: ["uvicorn", "app.web.app:create_app", "--factory", "--host", "0.0.0.0", "--port", "8501"]
     # Pin the hostname: the config encryption key is derived from
     # user@platform.node() (config_manager.py), so a random per-recreate
     # container hostname would make saved API keys undecryptable.

@@ -1,7 +1,7 @@
 # PCAP Hunter
 
 [![CI](https://github.com/ninedter/pcap-hunter/actions/workflows/ci.yml/badge.svg)](https://github.com/ninedter/pcap-hunter/actions/workflows/ci.yml)
-[![Version: v2.1.0](https://img.shields.io/badge/version-v2.1.0-7c3aed.svg)](../../CHANGELOG.md#210---2026-07-17)
+[![Version: v3.0.0](https://img.shields.io/badge/version-v3.0.0-2563eb.svg)](../../CHANGELOG.md#300---2026-08-03)
 [![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](../../LICENSE)
 
@@ -11,29 +11,36 @@
 
 透過結合業界標準的網路分析工具（**Zeek**、**Tshark**、**PyShark**）與**大型語言模型（LLM）**及 **OSINT** API，PCAP Hunter 將封包分析中繁瑣的部分——解析、關聯與情資豐富化——自動化，讓分析師能專注於偵測與回應。
 
+![PCAP Hunter v3 儀表板，使用隱私安全的目的地標籤](../images/workbench-current/dashboard-redacted.png)
+
+<p align="center">
+  <img src="../images/workbench-current/evidence-redacted.png" width="49%" alt="隱私安全的證據清單" />
+  <img src="../images/workbench-current/traffic-redacted.png" width="49%" alt="隱私安全的關聯流量工作區" />
+</p>
+
+> 公開文件與設計交付只使用 `[IP 01]`、`[HOST 01]`、`[CAPTURE 01]` 等不可逆替代標籤，不會嵌入原始位址、主機名稱、案件內容、擷取檔名、機密、電子郵件、本機路徑或精確住家位置。
+
 📖 **[使用手冊（繁體中文）](USER_MANUAL.md)** | **[User Manual (English)](../en/USER_MANUAL.md)**
 
 ---
 
-## 版本 2.1 新功能
+## 版本 3 新功能
 
-- **可調整的 LLM 上下文** — 可選擇 10K–1M token 的模型視窗；PCAP Hunter 最多使用其中 50% 作為輸入，為輸出與 tokenizer 差異保留空間，避免上下文壓縮。
-- **選用的無限制上下文** — 取消視窗上限並在單次請求中傳送所有可用且已清理的證據；啟用時滑桿會停用。
-- **更豐富且更以證據為本的報告** — 前景與背景產生流程現在共用關聯、流量異常、JA3、最終 ATT&CK 對應、擷取指標、階段狀態與警告。
-- **大型調查效能提升** — 有界案件查詢、批次 IOC 儲存、快取地理索引與瀏覽器圖表取樣上限可降低資料庫與儀表板負載。
-- **獨立的 MITRE ATT&CK 工作區** — 以證據為本的技術假設、ATT&CK v19.1 中繼資料、分析師處置、擷取涵蓋範圍、可視性缺口與 Navigator 匯出。
-- **擷取品質遙測** — 封包/流量規模、解析比率、時間範圍、取樣上限、完成階段與警告會隨 UI/API 結果傳遞，並與案件一同保存。
-- **可復原的 UI 分析** — Streamlit 會把 PCAP 工作提交至獨立行程佇列，將完整證據自動保存至 SQLite，並在停止頁面或重新載入瀏覽器後復原近期工作。
-- **更安全的 PCAP 攝取** — Streamlit 上傳採有限區塊串流，保留 `.pcap`/`.pcapng`，驗證 Magic Bytes、執行批次限制，拒絕時清除不完整檔案。
-- **更強的整合 API** — 無介面工作會回傳 ATT&CK 對應與擷取指標，IOC 摘要包含相關技術 ID，失敗提交會清除暫存案件與檔案。
-- **不依賴 LLM 的證據檢視** — 即使跳過或無法產生 AI 敘事，確定性的封包、IOC、關聯、階段與警告證據仍然可見。
-- **執行與匯出可靠性** — Docker 會將本地 LM Studio 位址轉至主機橋接、HTTP 提取正確解碼 tshark 位元組、案件重存會取代過期 IOC，PDF 時間戳記統一使用 UTC。
+- **全新的分析師優先工作台** — 正式環境 UI 改為響應式 React 應用程式，清楚區分 Analyze、Dashboard、Findings、Investigate、Reports、Cases 與 Settings。
+- **比例穩定的世界地圖** — 目的地增加時仍保持完整視野，依縮放層級以洲、國家與城市聚合，同時保留所有底層端點。
+- **精簡的目的地導覽** — 原本冗長的平面清單改為可展開的「洲 → 國家 → 城市 → 端點」階層，並自動開啟目前選取路徑。
+- **跨視覺化連動** — 協定、時間軸、搜尋與地圖共用相同篩選狀態，任何一處互動都會同步更新其他流量檢視。
+- **可用的深度分析捷徑** — 世界地圖、Top IP/網域、Sankey、網路圖、攻擊時間軸、直方圖與熱圖按鈕都會開啟並聚焦正確內容。
+- **更大的地圖空間且不變形** — 桌面連線區域加高，地理投影會隨容器縮放，小螢幕仍維持可讀比例。
+- **不再截斷調查文字** — 協定、主機名稱、識別碼、表格、圖例與圖表標記會自動換行或調整，不會無聲消失。
+- **隱私安全文件模式** — 明確啟用後，位址、主機名稱、案件、檔名、位置與其他敏感內容會改成不可逆替代標籤。
+- **正式環境交付** — Docker 直接建置並提供 React 工作台，同時保留 Python 分析引擎、設定、OSINT 快取、案件資料與整合 API。
 
 ---
 
 ## 目錄
 
-- [版本 2.1 新功能](#版本-21-新功能)
+- [版本 3 新功能](#版本-3-新功能)
 - [視覺導覽](#視覺導覽)
 - [主要功能](#主要功能)
 - [整合 API](#整合-api)
@@ -50,7 +57,7 @@
 
 ## 視覺導覽
 
-以下畫面來自在 Docker 中執行的真實版本 2 Streamlit 應用程式，並以內建範例 PCAP 完成分析。提交前會在圖片像素中遮蔽 IPv4/IPv6 位址、API 機密、電子郵件與本機使用者路徑。
+最新版本 3 工作台顯示於上方；以下保留版本 2 Streamlit 流程畫面，供逐項功能參考。所有公開圖片都會移除或不可逆替換 IPv4/IPv6 位址、API 機密、電子郵件與本機使用者路徑。
 
 ### 1. Upload — 載入一個或多個 PCAP
 

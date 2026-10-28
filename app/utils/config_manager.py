@@ -7,12 +7,15 @@ import json
 import logging
 import os
 import platform
+import stat
+import tempfile
 from pathlib import Path
 from typing import Any
 
 from cryptography.fernet import Fernet
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
+from filelock import FileLock
 
 from app import config as C
 
@@ -57,190 +60,139 @@ DEFAULT_CONFIG = {
 
 
 class ConfigManager:
-    """
-    Manage application configuration with persistence and encryption.
+    """Persist settings with a random, separately stored Fernet key.
 
-    Sensitive values (API keys) are encrypted using Fernet symmetric encryption
-    derived from a machine-specific key.
+    Legacy machine-derived ciphertext is read only for atomic migration. New
+    ciphertext can be decrypted only with the protected key file (or injected
+    PCAP_HUNTER_CONFIG_KEY). Back up that key together with the configuration.
     """
 
-    # Legacy static salt for backward compatibility with existing configs
     _LEGACY_SALT = b"pcap_hunter_v1_salt"
 
     def __init__(self, config_path: str | Path | None = None):
-        """
-        Initialize the config manager.
-
-        Args:
-            config_path: Path to config file. Defaults to ~/.pcap_hunter_config.json
-        """
-        if config_path is None:
-            config_path = Path.home() / ".pcap_hunter_config.json"
-        self.config_path = Path(config_path)
-        self._salt = self._load_or_create_salt()
-        self._fernet = self._create_fernet(self._salt)
-        self._decryption_warning_emitted = False
+        self.config_path = Path(config_path or Path.home() / ".pcap_hunter_config.json")
+        self.config_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        self.key_path = Path(os.getenv("PCAP_HUNTER_CONFIG_KEY_FILE") or str(self.config_path) + ".key")
+        self._lock = FileLock(str(self.config_path) + ".lock", timeout=30, mode=0o600)
         self.defaults = DEFAULT_CONFIG.copy()
+        with self._lock:
+            self._fernet = Fernet(self._master_key())
 
-    def _load_or_create_salt(self) -> bytes:
-        """Load salt from existing config or generate a new one.
+    def _master_key(self) -> bytes:
+        injected = os.getenv("PCAP_HUNTER_CONFIG_KEY")
+        if injected:
+            key = injected.encode("ascii")
+            Fernet(key)  # Validate without logging its value.
+            return key
+        self.key_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        with FileLock(str(self.key_path) + ".lock", timeout=30, mode=0o600):
+            return self._file_master_key()
 
-        On first run (no config file), generates a random 16-byte salt.
-        On subsequent runs, reads the stored salt from the config JSON.
-        Falls back to legacy static salt for configs that lack a stored salt.
-        """
-        if self.config_path.exists():
+    def _file_master_key(self) -> bytes:
+        if not self.key_path.exists():
+            raw = self._read_saved()
+            if any(isinstance(v, str) and v.startswith("ENC2[") for v in raw.values()):
+                raise ValueError("Saved configuration encryption key is missing; restore the key backup.")
+            self.key_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+            flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
             try:
-                with open(self.config_path, "r", encoding="utf-8") as f:
-                    saved = json.load(f)
-                salt_b64 = saved.get("_salt")
-                if salt_b64:
-                    return base64.b64decode(salt_b64)
-                # Existing config without _salt — use legacy salt for backward compatibility
-                return self._LEGACY_SALT
-            except (json.JSONDecodeError, IOError):
-                return self._LEGACY_SALT
-        # New config — generate random salt
-        return os.urandom(16)
+                fd = os.open(self.key_path, flags, 0o600)
+            except FileExistsError:
+                pass
+            else:
+                with os.fdopen(fd, "wb") as output:
+                    output.write(Fernet.generate_key())
+                    output.flush()
+                    os.fsync(output.fileno())
+        fd = os.open(self.key_path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+        with os.fdopen(fd, "rb") as source:
+            info = os.fstat(source.fileno())
+            if not stat.S_ISREG(info.st_mode) or (os.name == "posix" and info.st_mode & 0o077):
+                raise ValueError("Configuration encryption key must be a private regular file (mode 0600).")
+            key = source.read(128).strip()
+        Fernet(key)
+        return key
 
-    def _create_fernet(self, salt: bytes) -> Fernet:
-        """Create Fernet instance with machine-derived key."""
-        # Use machine-specific identity (hostname + username)
-        # platform.node() is cross-platform (works on Windows, macOS, Linux)
-        machine_id = f"{os.getenv('USER', os.getenv('USERNAME', 'user'))}@{platform.node()}".encode()
+    def _read_saved(self) -> dict[str, Any]:
+        try:
+            saved = json.loads(self.config_path.read_text(encoding="utf-8"))
+            return saved if isinstance(saved, dict) else {}
+        except (FileNotFoundError, json.JSONDecodeError):
+            return {}
 
-        # Derive key using PBKDF2
-        kdf = PBKDF2HMAC(
-            algorithm=hashes.SHA256(),
-            length=32,
-            salt=salt,
-            iterations=100000,
-        )
-        key = base64.urlsafe_b64encode(kdf.derive(machine_id))
-        return Fernet(key)
+    def _legacy_fernet(self, saved: dict) -> Fernet:
+        salt = base64.b64decode(saved["_salt"], validate=True) if saved.get("_salt") else self._LEGACY_SALT
+        identity = f"{os.getenv('USER', os.getenv('USERNAME', 'user'))}@{platform.node()}".encode()
+        kdf = PBKDF2HMAC(algorithm=hashes.SHA256(), length=32, salt=salt, iterations=100000)
+        return Fernet(base64.urlsafe_b64encode(kdf.derive(identity)))
 
     def _encrypt(self, value: str) -> str:
-        """Encrypt a sensitive value."""
-        if not value:
-            return ""
-        encrypted = self._fernet.encrypt(value.encode())
-        return f"ENC[{encrypted.decode()}]"
+        return "ENC2[" + self._fernet.encrypt(value.encode()).decode() + "]" if value else ""
 
-    def _decrypt(self, value: str) -> str:
-        """Decrypt a sensitive value."""
-        if not value or not value.startswith("ENC["):
-            return value
+    def _decode(self, value: Any, saved: dict) -> str:
+        if value is None:
+            return ""
+        if not isinstance(value, str):
+            raise ValueError("Saved credential has an invalid format.")
         try:
-            encrypted = value[4:-1]  # Remove "ENC[" and "]"
-            return self._fernet.decrypt(encrypted.encode()).decode()
-        except Exception:
-            if not self._decryption_warning_emitted:
-                logger.warning("Saved credentials could not be decrypted on this host; affected values were cleared.")
-                self._decryption_warning_emitted = True
-            return ""  # Return empty on decryption failure
+            if value.startswith("ENC2["):
+                return self._fernet.decrypt(value[5:-1].encode()).decode()
+            if value.startswith("ENC["):
+                return self._legacy_fernet(saved).decrypt(value[4:-1].encode()).decode()
+            return value
+        except Exception as exc:
+            raise ValueError(
+                "Saved credentials cannot be decrypted; restore the configuration and key backup."
+            ) from exc
 
     def load(self) -> dict[str, Any]:
-        """
-        Load configuration from file.
-
-        Returns:
-            Configuration dict merged with defaults
-        """
-        config = self.defaults.copy()
-
-        if not self.config_path.exists():
+        with self._lock:
+            saved = self._read_saved()
+            config = self.defaults.copy()
+            migration = False
+            for key, value in saved.items():
+                if key.startswith("_"):
+                    continue
+                config[key] = self._decode(value, saved) if key in SENSITIVE_KEYS else value
+                if key in SENSITIVE_KEYS and value and not value.startswith("ENC2["):
+                    migration = True
+            if migration:
+                self._save_locked(config)
             return config
 
+    def _save_locked(self, config: dict[str, Any]) -> None:
+        saved = {"_encryption_version": 2}
+        for key, value in config.items():
+            if not key.startswith("_"):
+                saved[key] = self._encrypt(str(value) if value else "") if key in SENSITIVE_KEYS else value
+        fd, name = tempfile.mkstemp(prefix=".pcap-config-", dir=self.config_path.parent)
         try:
-            with open(self.config_path, "r", encoding="utf-8") as f:
-                saved = json.load(f)
-
-            # Merge saved values with defaults
-            for key, value in saved.items():
-                if key == "_salt":
-                    continue  # Internal key, not exposed in config
-                if key in SENSITIVE_KEYS:
-                    config[key] = self._decrypt(value)
-                else:
-                    config[key] = value
-
-        except (json.JSONDecodeError, IOError):
-            # Return defaults on error
-            pass
-
-        return config
+            with os.fdopen(fd, "w", encoding="utf-8") as output:
+                json.dump(saved, output, indent=2)
+                output.flush()
+                os.fsync(output.fileno())
+            os.replace(name, self.config_path)
+        finally:
+            Path(name).unlink(missing_ok=True)
 
     def save(self, config: dict[str, Any]) -> None:
-        """
-        Save configuration to file with secure permissions.
-
-        Args:
-            config: Configuration dict to save
-
-        Raises:
-            IOError: If file cannot be written
-            TypeError: If config is not a dictionary
-        """
         if not isinstance(config, dict):
             raise TypeError("Config must be a dictionary")
-
-        to_save = {}
-
-        # Persist the salt so it can be loaded on next run
-        to_save["_salt"] = base64.b64encode(self._salt).decode("ascii")
-
-        for key, value in config.items():
-            if key == "_salt":
-                continue  # Skip user-supplied _salt; we manage it internally
-            if key in SENSITIVE_KEYS:
-                to_save[key] = self._encrypt(str(value) if value else "")
-            else:
-                to_save[key] = value
-
-        try:
-            # Write to file
-            with open(self.config_path, "w", encoding="utf-8") as f:
-                json.dump(to_save, f, indent=2)
-
-            # Set secure permissions (owner read/write only) - Unix only
-            try:
-                os.chmod(self.config_path, 0o600)
-            except (OSError, AttributeError):
-                pass  # Ignore on Windows or if chmod fails
-
-        except IOError as e:
-            raise IOError(f"Failed to save config: {e}") from e
+        with self._lock:
+            self._save_locked(config)
 
     def get(self, key: str, default: Any = None) -> Any:
-        """
-        Get a single configuration value.
-
-        Args:
-            key: Configuration key
-            default: Default value if key not found
-
-        Returns:
-            Configuration value or default
-        """
-        config = self.load()
-        return config.get(key, default)
+        return self.load().get(key, default)
 
     def set(self, key: str, value: Any) -> None:
-        """
-        Set a single configuration value.
-
-        Args:
-            key: Configuration key
-            value: Value to set
-        """
-        config = self.load()
-        config[key] = value
-        self.save(config)
+        with self._lock:
+            config = self.load()
+            config[key] = value
+            self._save_locked(config)
 
     def clear(self) -> None:
-        """Delete the configuration file."""
-        if self.config_path.exists():
-            self.config_path.unlink()
+        with self._lock:
+            self.config_path.unlink(missing_ok=True)
 
 
 # Global instance for convenience

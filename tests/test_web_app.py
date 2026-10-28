@@ -10,7 +10,7 @@ from app.web import app as web_app
 def _client(monkeypatch, tmp_path) -> TestClient:
     repo = CaseRepository(db_path=str(tmp_path / "cases.db"))
     monkeypatch.setattr(web_app, "get_repo", lambda: repo)
-    return TestClient(web_app.create_app())
+    return TestClient(web_app.create_app(), base_url="http://localhost")
 
 
 def test_geo_picker_resolves_taipei_coordinates(monkeypatch, tmp_path):
@@ -68,3 +68,19 @@ def test_whois_route_rejects_private_ip_without_lookup(monkeypatch, tmp_path):
     response = client.get("/api/ui/whois", params={"target": "192.168.1.10"})
 
     assert response.status_code == 422
+
+
+def test_cross_site_case_and_model_requests_are_blocked_before_side_effects(monkeypatch, tmp_path):
+    client = _client(monkeypatch, tmp_path)
+
+    def unexpected_discovery(*args, **kwargs):
+        raise AssertionError("An untrusted website must not initiate provider requests")
+
+    monkeypatch.setattr(web_app, "_discover_llm_models", unexpected_discovery)
+    headers = {"Origin": "https://attacker.example", "Content-Type": "text/plain"}
+    created = client.post("/api/ui/cases", content='{"title":"untrusted"}', headers=headers)
+    models = client.post("/api/ui/llm/models", content='{"provider":"lmstudio"}', headers=headers)
+
+    assert created.status_code == 403
+    assert models.status_code == 403
+    assert web_app.get_repo().list_cases() == []

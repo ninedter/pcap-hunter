@@ -1687,3 +1687,25 @@ Request counts are accumulated in memory and flushed to the SQLite database ever
 | `key_id` | TEXT FK | References `api_keys.id` |
 | `date` | TEXT | `YYYY-MM-DD` |
 | `requests` | INTEGER | Daily count |
+
+## Case-scoped agent API
+
+See [agent setup and contracts](AGENT_USAGE.md) for dedicated `pha_` credentials, case grants, expiry, request/submission budgets, and local MCP configuration. These credentials cannot invoke legacy `full`/`feed` routes.
+
+| Route | Permission |
+| --- | --- |
+| `GET /api/v1/agent/capabilities` | Valid agent credential |
+| `GET /api/v1/agent/cases` and `/agent/cases/{case}` | `cases:read` |
+| `GET /api/v1/cases/{case}/analyses` | `cases:read` |
+| `GET /api/v1/analyses/{analysis}/manifest`, `/evidence`, `/flows`, `/indicator`, `/evidence/{record}` | `evidence:read` |
+| `GET /api/v1/agent/jobs/{job}` | `jobs:read` |
+| `GET /api/v1/agent/cases/{case}/report.pdf` | `reports:read` |
+| `POST /api/v1/agent/captures` | `captures:submit`; multipart `pcap` only; idempotency required |
+| `POST /api/v1/agent/jobs/{job}/cancel` | `captures:submit`; submitting agent only |
+| `POST /api/v1/agent/cases/{case}/drafts` | `notes:append`; valid evidence references; idempotency required |
+
+Every resource operation also checks the explicit case grant. Evidence and flows accept typed exact filters, signed cursors, optional snapshot IDs, and limits 1–200. Flow time filters use ISO 8601 with a UTC offset. Query responses carry exact saved counts, coverage, warnings and request IDs; a partial packet parse is not a negative threat verdict. Large detector groups use bounded parts with JSON Pointer locators and ordered text fragments.
+
+`POST/GET /api/v1/admin/agents`, `DELETE /api/v1/admin/agents/{id}`, and `GET /api/v1/admin/agents/{id}/audit` require legacy `full` administration authority. Local analyst controls are in Settings → Agent access. Agent mode allows zero-key startup without opening protected routes.
+
+The authoritative request schemas and bounds are available in the running OpenAPI document at `/api/v1/openapi.json`. Browser access remains loopback-only; no remote MCP transport is enabled.

@@ -129,3 +129,7 @@ curl -H "Authorization: Bearer $PCAP_HUNTER_FEED_KEY" \
 - [Splunk](integrations/splunk.md)
 - [Elastic](integrations/elastic.md)
 - [Wazuh](integrations/wazuh.md)
+
+## 案件範圍代理存取
+
+專用 `pha_` 憑證以指定案件及操作權限限制存取，不授予管理或刪除案件權限。代理模式可在零憑證時啟動，但受保護的端點仍會拒絕未授權請求。請參閱[代理使用說明](../AGENT_USAGE.md)。

@@ -2,6 +2,36 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+
+### Added
+
+- Case-scoped, expiring agent credentials with evidence/flow pagination, immutable analysis citations, request budgets and audit records.
+- Local stdio MCP tools for threat hunting, optional idempotent offline capture submissions, and cited investigation drafts that require analyst review.
+- Traffic replay and endpoint volume views, with Dashboard Top 10 summaries and complete protocol drill-down in Investigate → Traffic.
+
+### Changed
+
+- Store new analysis timestamps with explicit UTC offsets so newer analyses invalidate cached PDF reports correctly on hosts outside UTC.
+- Reorganize protocol/endpoint charts and shared page spacing for readability; distinguish all-capture totals from replay samples.
+- Discover available models after successful LM Studio, OpenAI-compatible or Anthropic connection checks.
+- Use the exact dashboard heading **Deep-Dive Visualization**.
+
+### Security
+
+- Run every agent capture in a new restricted container with only its own read-only input and private scratch storage. Keep the Docker socket exclusively in a trusted launcher; remove job containers before publishing worker results or timeout acknowledgements, and stop cancelled jobs as a whole.
+- Bound parser-controlled result bytes, JSON depth and allocation before API persistence; retain trusted isolation receipts separately from parser output.
+- Require native amd64 and arm64 CI jobs, including real cross-job filesystem/process/network controls, packaged tests and image scans.
+- Replace the Debian runtime with a minimal, signature-verified public Wolfi
+  runtime containing patched native libraries. Keep Debian build environments
+  outside the shipped runtime.
+- Compile TShark 4.6.9 and Zeek 9.0.1 LTS from pinned source archives. Compile
+  Python's XML binding against patched libxml2 instead of retaining its older
+  bundled library; pin the offline chart browser and verify its archive hash.
+- Check native versions and actual XML linkage during every image build. Fail
+  CI on all high/critical runtime advisories, including unfixed advisories, and
+  retain the raw scan, SBOM and supplementary native component manifest.
+
 ## [3.0.0] - 2026-08-03
 
 Version 3 introduces a new analyst-first web workbench while preserving PCAP Hunter's existing analysis engine, saved configuration, OSINT cache, case evidence, and integrations API.

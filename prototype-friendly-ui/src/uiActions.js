@@ -1,5 +1,7 @@
 function csvCell(value) {
-  return `"${String(value ?? "").replaceAll('"', '""')}"`;
+  const text = String(value ?? "");
+  const safe = /^[\s\uFEFF]*[=+\-@\t\r\n＝＋－＠]/u.test(text) ? `'${text}` : text;
+  return `"${safe.replaceAll('"', '""')}"`;
 }
 
 export function buildIocCsv(rows = []) {

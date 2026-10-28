@@ -163,6 +163,42 @@ def test_report_pdf_404_when_no_analysis(client, tmp_path, monkeypatch):
     assert r.json()["code"] == "report_no_analysis"
 
 
+@pytest.mark.parametrize("aware", [False, True])
+def test_report_cache_uses_utc_for_legacy_and_new_timestamps(client, tmp_path, monkeypatch, aware):
+    from datetime import datetime, timezone
+
+    from app.api.deps import get_repo
+    from app.reports.pdf_generator import PDFReportGenerator
+
+    case_id = _seed_case_with_analysis("pdf-timezone")
+    repo = get_repo()
+    analysis = repo.get_case(case_id).analyses[0]
+    analysis.analyzed_at = datetime(2026, 1, 1, tzinfo=timezone.utc if aware else None)
+    repo.save_analysis(analysis)
+    reports = tmp_path / "reports"
+    reports.mkdir()
+    pdf = reports / (case_id + ".pdf")
+    pdf.write_bytes(b"%PDF-cached")
+    os.utime(pdf, (analysis.sort_timestamp + 1, analysis.sort_timestamp + 1))
+    monkeypatch.setenv("PCAP_HUNTER_REPORTS_DIR", str(reports))
+    monkeypatch.setattr(PDFReportGenerator, "generate", lambda *a, **kw: pytest.fail("fresh cache rendered again"))
+    prior_tz = os.environ.get("TZ")
+    try:
+        os.environ["TZ"] = "Etc/GMT+10"
+        if hasattr(time, "tzset"):
+            time.tzset()
+        response = client.get(f"/api/v1/cases/{case_id}/report.pdf", headers={"Authorization": "Bearer MAIN"})
+        assert response.status_code == 200
+        assert response.content == b"%PDF-cached"
+    finally:
+        if prior_tz is None:
+            os.environ.pop("TZ", None)
+        else:
+            os.environ["TZ"] = prior_tz
+        if hasattr(time, "tzset"):
+            time.tzset()
+
+
 def test_report_pdf_503_when_renderer_unavailable(client, tmp_path, monkeypatch):
     """An unavailable weasyprint stack degrades to 503 problem+json, never a crash."""
     from app.reports.pdf_generator import PDFReportGenerator

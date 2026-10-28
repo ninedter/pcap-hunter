@@ -1,4 +1,8 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { lazy, Suspense, useEffect, useMemo, useRef, useState } from "react";
+import { isPrivacyMode } from "./privacy.js";
+const AgentsSettings = lazy(() => import("./AgentsSettings.jsx"));
+const EvidenceExplorer = lazy(() => import("./EvidenceExplorer.jsx"));
+const AnalysisScope = lazy(() => import("./EvidenceExplorer.jsx").then((module) => ({ default: module.AnalysisScope })));
 import {
   AddressBook,
   ArrowLeft,
@@ -75,15 +79,16 @@ import {
   createCoordinates,
 } from "@vnedyalk0v/react19-simple-maps";
 import worldGeography from "world-atlas/countries-110m.json";
-import ReactMarkdown from "react-markdown";
-import remarkGfm from "remark-gfm";
+const ReportMarkdown = lazy(() => import("./ReportMarkdown.jsx"));
 
 import { PIPELINE_STAGES as pipelineStages, normalizeJobProgress } from "./progress.js";
 import { aggregateMapFlows, buildMapFlowHierarchy, getMapAggregationLabel, getMapAggregationLevel, getNextMapZoom } from "./mapAggregation.js";
-import { filterDashboardMapFlows } from "./dashboardFilters.js";
+import { buildDashboardViewRoute, buildScreenRoute, filterDashboardMapFlows, formatTrafficBytes, isCurrentRoute } from "./dashboardFilters.js";
 import { getDashboardViewForTarget, getTrafficViewTool, trafficViewTools } from "./trafficViews.js";
-import { buildAttackNavigatorLayer, buildIocCsv, getDashboardChartExport, isPrivateAddress } from "./uiActions.js";
-import { useWorkbench } from "./workbench.js";
+import { buildAttackNavigatorLayer, buildIocCsv, getDashboardChartExport } from "./uiActions.js";
+import { acceptsLlmDiscoveryResponse, getLlmConnectionSignature, getLlmModelPickerState, nextLlmDiscoveryGeneration, shouldResetLlmDiscoveryForConfigSync, shouldSyncSettingsDraft, useWorkbench } from "./workbench.js";
+import TrafficReplay from "./TrafficReplay.jsx";
+import { summarizeTrafficReplayEvents } from "./trafficReplay.js";
 
 const navigation = [
   { id: "analyze", label: "Analyze", icon: UploadSimple },
@@ -109,6 +114,7 @@ const settingsNavigation = [
   { id: "tools", label: "Tools & YARA", icon: HardDrives },
   { id: "map", label: "Map & location", icon: MapPin },
   { id: "api", label: "API access", icon: Key },
+  { id: "agents", label: "Agent access", icon: Brain },
   { id: "data", label: "Data & retention", icon: Database },
   { id: "logs", label: "Runtime logs", icon: Code },
 ];
@@ -440,21 +446,26 @@ function ChartTooltip({ active, payload, label }) {
   return <div className="chart-tooltip"><strong>{label}</strong><span>{payload[0].value} flows</span></div>;
 }
 
-function TrafficOverview({ expanded = false, data, activeProtocol = "All", activeTime = "", onProtocolSelect, onTimeSelect, onClearFilters, filterTarget = "overview" }) {
+function TrafficOverview({ expanded = false, data, activeProtocol = "All", activeTime = "", onProtocolSelect, onTimeSelect, onClearFilters, filterTarget = "overview", contextMode = "linked" }) {
+  const [showAllProtocols, setShowAllProtocols] = useState(false);
   const protocols = data?.protocols ?? protocolData;
   const talkers = data?.top_talkers ?? talkerData;
   const timeline = data?.traffic ?? trafficData;
   const totalFlows = data?.flows ?? protocols.reduce((sum, row) => sum + row.value, 0);
   const selectedProtocol = protocols.find((item) => item.name === activeProtocol);
-  const hasLinkedFilter = Boolean(selectedProtocol || activeTime);
+  const hasLinkedFilter = contextMode === "workspace" ? Boolean(selectedProtocol || activeTime) : Boolean(selectedProtocol || activeTime);
   const selectProtocol = (name) => onProtocolSelect?.(activeProtocol === name ? "All" : name);
-  const interactiveCopy = filterTarget === "map" ? "Click a protocol or time point to filter the world map" : "Click a protocol or time point to filter this traffic overview";
-  const summaryLabel = filterTarget === "map" ? "Map" : "Traffic overview";
+  const interactiveCopy = contextMode === "workspace" ? "All-capture flow context; replay filters are applied above." : filterTarget === "map" ? "Click a protocol or time point to filter the world map" : "Click a protocol or time point to filter this traffic overview";
+  const summaryLabel = contextMode === "workspace" ? "Replay widgets filtered; all-capture overview marker" : filterTarget === "map" ? "Map" : "Traffic overview";
+  const compactProtocols = protocols.slice(0, 6);
+  const visibleProtocols = showAllProtocols || !selectedProtocol || compactProtocols.some((item) => item.name === selectedProtocol.name)
+    ? (showAllProtocols ? protocols : compactProtocols)
+    : [...compactProtocols, selectedProtocol];
   return (
-    <section className={`traffic-section ${expanded ? "expanded" : ""}`}><div className="section-heading"><div><h2>Traffic overview</h2><p>{onProtocolSelect || onTimeSelect ? interactiveCopy : "Protocol distribution, top talkers, and traffic volume over time."}</p></div>{expanded && <div className={`linked-filter-summary ${hasLinkedFilter ? "active" : ""}`} aria-live="polite"><Funnel size={16} />{hasLinkedFilter ? <><span>{summaryLabel} filtered by {[selectedProtocol?.name, activeTime && `${activeTime} UTC`].filter(Boolean).join(" · ")}</span><button type="button" onClick={onClearFilters}>Clear</button></> : <span>{filterTarget === "map" ? "Visualizations linked to map" : "Filters ready"}</span>}</div>}</div><div className="traffic-card">
-      <div className="protocol-panel"><div className="donut-wrap" aria-label={onProtocolSelect ? "Interactive protocol distribution" : "Protocol distribution"}><ResponsiveContainer width="100%" height="100%"><PieChart><Pie data={protocols} dataKey="value" innerRadius={expanded ? 49 : 42} outerRadius={expanded ? 64 : 58} paddingAngle={1} stroke="#fff" strokeWidth={2} onClick={(entry) => entry?.name && selectProtocol(entry.name)} className={onProtocolSelect ? "interactive-donut" : undefined}>{protocols.map((entry) => <Cell key={entry.name} fill={entry.color} opacity={selectedProtocol && selectedProtocol.name !== entry.name ? 0.28 : 1} />)}</Pie></PieChart></ResponsiveContainer><span className="donut-total"><strong>{selectedProtocol?.value ?? totalFlows}</strong>{selectedProtocol?.name ?? "Flows"}</span></div><div className="legend" aria-label="Protocol flow counts">{protocols.map((item) => onProtocolSelect ? <button type="button" className={activeProtocol === item.name ? "active" : ""} aria-pressed={activeProtocol === item.name} onClick={() => selectProtocol(item.name)} key={item.name} title={`Filter the ${filterTarget === "map" ? "map" : "traffic overview"} to ${item.name}`}><span className="legend-dot" style={{ background: item.color }} /><span className="legend-name">{item.name}</span><b>{item.value}</b></button> : <div key={item.name} title={`${item.name}: ${item.value} flows`}><span className="legend-dot" style={{ background: item.color }} /><span className="legend-name">{item.name}</span><b>{item.value}</b></div>)}</div></div>
+    <section className={`traffic-section ${expanded ? "expanded" : ""}`}><div className="section-heading"><div><h2>Traffic overview</h2><p>{onProtocolSelect || onTimeSelect ? interactiveCopy : "Protocol distribution, top talkers, and traffic volume over time."}</p></div>{expanded && <div className={`linked-filter-summary ${hasLinkedFilter ? "active" : ""}`} aria-live="polite"><Funnel size={16} />{contextMode === "workspace" ? <><span>{selectedProtocol ? `Replay widgets filtered by ${selectedProtocol.name}; protocol counts remain all-capture.` : activeTime ? `All-capture overview point marked at ${activeTime} UTC; replay range is unchanged.` : "All-capture protocol counts; replay filters and overview markers are controlled separately."}</span>{hasLinkedFilter && <button type="button" onClick={onClearFilters}>Clear</button>}</> : hasLinkedFilter ? <><span>{summaryLabel} filtered by {[selectedProtocol?.name, activeTime && `${activeTime} UTC`].filter(Boolean).join(" · ")}</span><button type="button" onClick={onClearFilters}>Clear</button></> : <span>{filterTarget === "map" ? "Visualizations linked to map" : "Filters ready"}</span>}</div>}</div><div className="traffic-card">
+      <div className="protocol-panel">{protocols.length ? <><div className="donut-wrap" aria-label={contextMode === "workspace" ? "All-capture protocol counts; selecting a protocol filters replay widgets above" : onProtocolSelect ? "Interactive protocol distribution" : "Protocol distribution"}><ResponsiveContainer width="100%" height="100%"><PieChart><Pie data={protocols} dataKey="value" innerRadius={expanded ? 49 : 42} outerRadius={expanded ? 64 : 58} paddingAngle={1} stroke="#fff" strokeWidth={2} onClick={(entry) => entry?.name && selectProtocol(entry.name)} className={onProtocolSelect ? "interactive-donut" : undefined}>{protocols.map((entry) => <Cell key={entry.name} fill={entry.color} opacity={selectedProtocol && selectedProtocol.name !== entry.name ? 0.28 : 1} />)}</Pie></PieChart></ResponsiveContainer><span className="donut-total"><strong>{selectedProtocol?.value ?? totalFlows}</strong>{selectedProtocol?.name ?? "Flows"}</span></div><div className="legend-wrap"><div className="legend" id="traffic-protocol-flow-counts" aria-label="Protocol flow counts">{visibleProtocols.map((item) => onProtocolSelect ? <button type="button" className={activeProtocol === item.name ? "active" : ""} aria-pressed={activeProtocol === item.name} onClick={() => selectProtocol(item.name)} key={item.name} title={contextMode === "workspace" ? `Filter replay widgets to ${item.name}; counts remain all-capture` : `Filter the ${filterTarget === "map" ? "map" : "traffic overview"} to ${item.name}`}><span className="legend-dot" style={{ background: item.color }} /><span className="legend-name">{item.name}</span><b>{item.value}</b></button> : <div key={item.name} title={`${item.name}: ${item.value} flows`}><span className="legend-dot" style={{ background: item.color }} /><span className="legend-name">{item.name}</span><b>{item.value}</b></div>)}</div>{protocols.length > 6 && <button type="button" className="protocol-disclosure compact" onClick={() => setShowAllProtocols((current) => !current)} aria-expanded={showAllProtocols} aria-controls="traffic-protocol-flow-counts">{showAllProtocols ? "Show fewer flow protocols" : `Show all ${protocols.length} flow protocols`}</button>}</div></> : <ChartEmptyState label="No protocol flow counts are available for this capture." />}</div>
       <div className="chart-panel"><div className="chart-heading"><strong>Top talkers</strong><span>By total bytes</span></div><ResponsiveContainer width="100%" height={expanded ? 190 : 126}><BarChart data={talkers} layout="vertical" margin={{ left: 8, right: 28, top: 4, bottom: 4 }}><XAxis type="number" hide /><YAxis type="category" dataKey="name" width={104} tick={{ fill: "#66728a", fontSize: 11 }} axisLine={false} tickLine={false} /><Tooltip /><Bar dataKey="bytes" fill="#3d9bea" radius={[0, 5, 5, 0]} barSize={7} /></BarChart></ResponsiveContainer></div>
-      <div className={`chart-panel timeline-panel ${onTimeSelect ? "interactive-chart-panel" : ""}`} data-testid={onTimeSelect ? "traffic-timeline-chart" : undefined} role={onTimeSelect ? "group" : undefined} aria-label={onTimeSelect ? `Traffic timeline ${filterTarget === "map" ? "map" : "workspace"} filter` : undefined}><div className="chart-heading"><strong>Traffic over time</strong><span>{activeTime ? `${summaryLabel} filtered to ${activeTime} UTC · click again to clear` : onTimeSelect ? `Flows per minute · click a point to filter the ${filterTarget === "map" ? "map" : "traffic overview"}` : "Flows per minute"}</span></div><ResponsiveContainer width="100%" height={expanded ? 195 : 132}><AreaChart data={timeline} margin={{ left: -22, right: 4, top: 10, bottom: 0 }} onClick={(state) => state?.activeLabel && onTimeSelect?.(activeTime === state.activeLabel ? "" : state.activeLabel)}><CartesianGrid stroke="#eef1f6" vertical={false} /><XAxis dataKey="time" tick={{ fill: "#77839a", fontSize: 10 }} axisLine={{ stroke: "#dce2eb" }} tickLine={false} interval={2} /><YAxis allowDecimals={false} tick={{ fill: "#77839a", fontSize: 10 }} axisLine={false} tickLine={false} /><Tooltip content={<ChartTooltip />} />{activeTime && <ReferenceLine x={activeTime} stroke="#ff3942" strokeWidth={2} strokeDasharray="4 3" />}<Area type="monotone" dataKey="flows" stroke="#3d9bea" strokeWidth={2.3} fill="#e9f4fe" activeDot={{ r: 5, fill: "#ff3942", stroke: "#fff", strokeWidth: 2 }} /></AreaChart></ResponsiveContainer></div>
+      <div className={`chart-panel timeline-panel ${onTimeSelect ? "interactive-chart-panel" : ""}`} data-testid={onTimeSelect ? "traffic-timeline-chart" : undefined} role={onTimeSelect ? "group" : undefined} aria-label={onTimeSelect ? contextMode === "workspace" ? "All-capture traffic timeline with an overview-only time marker" : `Traffic timeline ${filterTarget === "map" ? "map" : "workspace"} filter` : undefined}><div className="chart-heading"><strong>Traffic over time</strong><span>{contextMode === "workspace" ? activeTime ? `All-capture overview point marked at ${activeTime} UTC; replay range is unchanged · click again to clear` : "All-capture flows per minute · click a point to mark it without changing replay range" : activeTime ? `${summaryLabel} filtered to ${activeTime} UTC · click again to clear` : onTimeSelect ? `Flows per minute · click a point to filter the ${filterTarget === "map" ? "map" : "traffic overview"}` : "Flows per minute"}</span></div><ResponsiveContainer width="100%" height={expanded ? 195 : 132}><AreaChart data={timeline} margin={{ left: 4, right: 8, top: 10, bottom: 0 }} onClick={(state) => state?.activeLabel && onTimeSelect?.(activeTime === state.activeLabel ? "" : state.activeLabel)}><CartesianGrid stroke="#eef1f6" vertical={false} /><XAxis dataKey="time" tick={{ fill: "#77839a", fontSize: 10 }} axisLine={{ stroke: "#dce2eb" }} tickLine={false} interval={2} /><YAxis allowDecimals={false} tick={{ fill: "#77839a", fontSize: 10 }} axisLine={false} tickLine={false} /><Tooltip content={<ChartTooltip />} />{activeTime && <ReferenceLine x={activeTime} stroke="#ff3942" strokeWidth={2} strokeDasharray="4 3" />}<Area type="monotone" dataKey="flows" stroke="#3d9bea" strokeWidth={2.3} fill="#e9f4fe" activeDot={{ r: 5, fill: "#ff3942", stroke: "#fff", strokeWidth: 2 }} /></AreaChart></ResponsiveContainer></div>
     </div></section>
   );
 }
@@ -625,7 +636,7 @@ function FamiliarVisualizations({ data, focusTarget = "" }) {
   };
   return (
     <section className="dashboard-advanced" id="dashboard-deep-dives">
-      <div className="section-heading"><div><h2>Familiar deep-dive visualizations</h2><p>The established flow, topology, timeline, and profiling views remain one click away.</p></div><button className="button secondary" onClick={exportCurrentChart}><DownloadSimple size={17} /> Export current chart</button></div>
+      <div className="section-heading"><div><h2>Deep-Dive Visualization</h2><p>The established flow, topology, timeline, and profiling views remain one click away.</p></div><button className="button secondary" onClick={exportCurrentChart}><DownloadSimple size={17} /> Export current chart</button></div>
       <SegmentedTabs items={[{ id: "paths", label: "Sankey flow", icon: ShareNetwork }, { id: "network", label: "Network graph", icon: ShareNetwork }, { id: "profile", label: "Traffic profiling", icon: Pulse }, { id: "timeline", label: "Attack timeline", icon: ClockCounterClockwise }]} active={view} onChange={setView} label="Dashboard visualization" />
       <div className="panel advanced-chart-panel">
         {view === "paths" && <div className="advanced-chart dashboard-view-target" id="sankey-flow" tabIndex={-1}><div className="chart-heading roomy"><strong>Traffic flow · client → service → server</strong><span>Width represents packet volume; hover a path for detail.</span></div>{liveSankey.links.length ? <><div className="sankey-label-grid"><div><span>Observed nodes</span><strong>{sankeyNames.slice(0, 2).join(" · ")}</strong></div><div><span>Services</span><strong>{sankeyNames.filter((name) => name.includes(" / ")).slice(0, 2).join(" · ") || "Protocol paths"}</strong></div><div><span>Destinations</span><strong>{sankeyNames.slice(-3).join(" · ")}</strong></div></div><ResponsiveContainer width="100%" height={300}><Sankey data={liveSankey} nodePadding={28} nodeWidth={12} margin={{ top: 10, right: 24, bottom: 10, left: 24 }} link={{ stroke: "#83aee0" }}><Tooltip /></Sankey></ResponsiveContainer></> : <ChartEmptyState label="No flow paths are available for this capture." />}</div>}
@@ -639,6 +650,66 @@ function FamiliarVisualizations({ data, focusTarget = "" }) {
 
 function ChartEmptyState({ label }) {
   return <div className="chart-empty-state"><ChartLine size={30} weight="duotone" /><strong>{label}</strong><span>The visualization remains available when matching evidence is present.</span></div>;
+}
+
+function CaptureScope({ summary = {}, replay = {} }) {
+  const selectedBytes = Number(summary.capture_file_bytes) || 0;
+  const parsedBytes = Number(summary.parsed_traffic_bytes) || 0;
+  const parsedPackets = Number(summary.parsed_packet_count) || 0;
+  const returnedEvents = Math.max(0, Number(replay.returned_event_count) || 0);
+  const sampledEvents = Math.max(0, Number(replay.sampled_event_count) || 0);
+  const byteCoverage = String(summary.byte_coverage || "unknown").toLowerCase();
+  const replayCoverage = String(replay.coverage || "unavailable").toLowerCase();
+  const incomplete = ["partial", "unknown"].includes(byteCoverage) || ["sampled", "unavailable"].includes(replayCoverage) || Boolean(replay.truncated);
+  const selectedLabel = selectedBytes ? formatTrafficBytes(selectedBytes) : "Capture file size unavailable";
+  const parsedLabel = parsedBytes ? formatTrafficBytes(parsedBytes) : parsedPackets ? `Parsed byte total unavailable · ${parsedPackets.toLocaleString()} parsed packets` : "No parsed flow traffic";
+  const sampleLabel = returnedEvents || sampledEvents ? `${returnedEvents.toLocaleString()} returned replay events from ${sampledEvents.toLocaleString()} sampled events` : "No replay sample events";
+  const asDate = (value) => new Date(typeof value === "number" ? value * 1000 : value);
+  const hasTimeRange = summary.first_seen !== null && summary.first_seen !== undefined && summary.last_seen !== null && summary.last_seen !== undefined;
+  const durationSeconds = Number(summary.duration_seconds);
+  const timeRange = hasTimeRange ? `${asDate(summary.first_seen).toLocaleString()} – ${asDate(summary.last_seen).toLocaleString()}` : "Time range unavailable";
+  const duration = Number.isFinite(durationSeconds) ? `${durationSeconds.toLocaleString(undefined, { maximumFractionDigits: 1 })} seconds` : "Duration unavailable";
+  return <section className="capture-scope panel" aria-label="Current capture scope"><div className="capture-scope-head"><span className="eyebrow">Current capture scope</span><strong>{incomplete ? "Capture file / parsed flow traffic / replay sample" : "Capture file coverage"}</strong><small>{timeRange} · {duration}</small></div><p><b>Capture file</b> {selectedLabel} <span>·</span> <b>Parsed flow traffic</b> {parsedLabel} <span>·</span> <b>Returned / sampled replay events</b> {sampleLabel}{incomplete && <em>Coverage is incomplete</em>} <i>Byte coverage: {byteCoverage}</i></p></section>;
+}
+
+function ProtocolByteDistribution({ protocols = [], activeProtocol = "All", onProtocolSelect, description = "Parsed byte volume by protocol.", showDonut = false, defaultVisibleCount = 10, expandByDefault = false, onOpenTraffic, title = "Protocol distribution", sectionId }) {
+  const [showAll, setShowAll] = useState(expandByDefault);
+  const rows = useMemo(() => (Array.isArray(protocols) ? [...protocols] : []).sort((left, right) => (Number(right.bytes) || 0) - (Number(left.bytes) || 0)), [protocols]);
+  const total = rows.reduce((sum, row) => sum + (Number(row.bytes) || 0), 0);
+  const colors = ["#18a9bd", "#5e82c5", "#9b83d1", "#d6a74d"];
+  const initialRows = rows.slice(0, defaultVisibleCount);
+  const selectedRow = rows.find((row) => row.name === activeProtocol);
+  const visibleRows = showAll || rows.length <= initialRows.length
+    ? rows
+    : selectedRow && !initialRows.some((row) => row.name === selectedRow.name)
+      ? [...initialRows, selectedRow]
+      : initialRows;
+  const remainingRows = rows.slice(initialRows.length);
+  const remainingBytes = remainingRows.reduce((sum, row) => sum + (Number(row.bytes) || 0), 0);
+  const pieData = [
+    ...initialRows.map((row, index) => ({ name: row.name, value: Math.max(0, Number(row.bytes) || 0), color: colors[index % colors.length] })),
+    ...(remainingBytes > 0 ? [{ name: "Other protocols", value: remainingBytes, color: "#cbd5e1" }] : []),
+  ].filter((row) => row.value > 0);
+  const listId = `${sectionId || "protocol-byte-distribution"}-list`;
+  const canDisclose = !onOpenTraffic && !expandByDefault && rows.length > initialRows.length;
+  return <section className={`protocol-byte-distribution panel ${showDonut ? "with-donut" : ""}`} id={sectionId} tabIndex={sectionId ? -1 : undefined}><div className="panel-title compact"><div><h2>{title}</h2><p>{description}</p></div><strong>{formatTrafficBytes(total)}</strong></div>{rows.length ? <><div className="protocol-byte-body">{showDonut && pieData.length > 0 && <div className="protocol-byte-donut" aria-label={`Protocol byte distribution totaling ${formatTrafficBytes(total)}`}><ResponsiveContainer width="100%" height="100%"><PieChart><Pie data={pieData} dataKey="value" innerRadius={58} outerRadius={82} paddingAngle={1} stroke="#fff" strokeWidth={1}>{pieData.map((row) => <Cell key={row.name} fill={row.color} />)}</Pie></PieChart></ResponsiveContainer><div className="protocol-byte-donut-total"><strong>{formatTrafficBytes(total)}</strong><span>All protocols</span></div></div>}<div className="protocol-byte-list-wrap"><p className="protocol-byte-summary" aria-live="polite">{showAll || rows.length <= initialRows.length ? `${rows.length} protocols ranked by parsed bytes` : `Top ${initialRows.length} protocols by parsed bytes · ${rows.length - initialRows.length} smaller protocols available`}</p><div className="protocol-byte-list" id={listId}>{visibleRows.map((row) => { const index = rows.findIndex((item) => item.name === row.name); const bytes = Number(row.bytes) || 0; const percent = Number(row.percent); const width = Number.isFinite(percent) ? Math.max(0, Math.min(100, percent)) : (total ? bytes / total * 100 : 0); const content = <><span style={{ background: colors[index % colors.length] }} /><strong>{row.name}</strong><i><b style={{ width: `${width}%`, background: colors[index % colors.length] }} /></i><em>{formatTrafficBytes(bytes)} <small>{width.toFixed(1)}%</small></em></>; return onProtocolSelect ? <button key={row.name} type="button" className={activeProtocol === row.name ? "active" : ""} onClick={() => onProtocolSelect(activeProtocol === row.name ? "All" : row.name)} aria-pressed={activeProtocol === row.name}>{content}</button> : <div key={row.name}>{content}</div>; })}</div>{canDisclose && <button type="button" className="protocol-disclosure" onClick={() => setShowAll((current) => !current)} aria-expanded={showAll} aria-controls={listId}>{showAll ? "Show fewer protocols" : `Show all ${rows.length} protocols`}</button>}{onOpenTraffic && <div className="protocol-detail-action"><span>Dashboard values use parsed all-capture bytes.</span><button type="button" className="text-button" onClick={onOpenTraffic}>Open all-capture detail in Traffic <ArrowRight size={15} /></button></div>}</div></div></> : <ChartEmptyState label="No protocol byte distribution is available for this capture." />}</section>;
+}
+
+function CaptureMetricCards({ summary = {}, fallback = {}, replayScope }) {
+  const scoped = replayScope && typeof replayScope === "object";
+  const metrics = [
+    { label: scoped ? "Replay sample events" : "Packets", value: Number(scoped ? replayScope.event_count : (summary.packet_count ?? fallback.packets ?? 0)).toLocaleString(), icon: Copy },
+    { label: scoped ? "Replay sample bytes" : "Parsed traffic", value: formatTrafficBytes(scoped ? replayScope.bytes : (summary.parsed_traffic_bytes ?? 0)), hint: scoped ? "Known returned-event lengths only" : `${String(summary.byte_coverage || "unknown")} coverage`, icon: ChartLine },
+    { label: scoped ? "Replay sample flows" : "Flows", value: Number(scoped ? replayScope.flow_count : (summary.flow_count ?? fallback.flows ?? 0)).toLocaleString(), icon: ArrowsLeftRight },
+    { label: scoped ? "Replay endpoints" : "IP hosts", value: Number(scoped ? replayScope.endpoint_count : (summary.endpoint_count ?? 0)).toLocaleString(), icon: GlobeHemisphereWest },
+  ];
+  return <section className="dashboard-summary capture-metric-cards">{metrics.map(({ label, value, hint, icon: Icon }) => <article key={label}><span><Icon size={22} weight="duotone" /></span><div><small>{label}</small><strong>{value}</strong>{hint && <small>{hint}</small>}</div></article>)}</section>;
+}
+
+function EndpointRanking({ endpoints = [], onOpen, description = "Combined bytes as source and destination. Open an IP in Traffic to inspect matching replay events." }) {
+  const largest = Math.max(0, ...endpoints.map((row) => Number(row.bytes) || 0));
+  const rankedEndpoints = endpoints.slice(0, 10);
+  return <section className="endpoint-ranking panel"><div className="panel-title compact"><div><h2>Endpoint volume ranking</h2><p>{description}</p></div><span className="eyebrow">Bytes</span></div>{endpoints.length ? <div className="endpoint-ranking-list" id="endpoint-volume-ranking">{rankedEndpoints.map((row) => { const bytes = Number(row.bytes) || 0; const packets = Number(row.packets) || 0; const flows = Number(row.flow_count) || 0; const width = largest ? Math.max(2, bytes / largest * 100) : 0; return <button key={row.ip} onClick={() => onOpen(row.ip)} aria-label={`Open ${row.ip} in Investigate Traffic`}><span className="endpoint-ip">{row.ip}</span><span className="endpoint-bytes">{formatTrafficBytes(bytes)}</span><span className="endpoint-meter" aria-hidden="true"><i style={{ width: `${width}%` }} /></span><small>{packets.toLocaleString()} packet{packets === 1 ? "" : "s"} · {flows.toLocaleString()} flow{flows === 1 ? "" : "s"}</small></button>; })}</div> : <ChartEmptyState label="No endpoint byte ranking is available for this capture." />}</section>;
 }
 
 function Dashboard({ workbench, onNavigate }) {
@@ -658,6 +729,7 @@ function Dashboard({ workbench, onNavigate }) {
     dashboard,
   }, null, 2), "application/json");
   const openTopItem = (row) => onNavigate("investigate", { investigateTab: "evidence", evidenceQuery: row.name });
+  const captureSummary = dashboard.capture_summary || {};
 
   useEffect(() => {
     if (!focusTarget) return undefined;
@@ -672,10 +744,14 @@ function Dashboard({ workbench, onNavigate }) {
 
   return (
     <div className="screen dashboard-screen">
-      <PageHeading title="Dashboard" description={`The familiar visual overview, restored for ${workbench.active_case_title || "the active capture set"}.`} actions={<><span className="coverage-badge"><Check size={14} /> {dashboard.stages.length}/10 stages recorded</span><button className="button secondary" onClick={exportDashboard}><DownloadSimple size={17} /> Export dashboard</button></>} />
-      <section className="dashboard-summary">
-        {[{ label: "Risk level", value: dashboard.risk, icon: ShieldCheck }, { label: "Flows", value: dashboard.flows, icon: ArrowsLeftRight }, { label: "Alerts", value: dashboard.alerts, icon: Bell }, { label: "Beacons", value: dashboard.beacons, icon: Pulse }, { label: "YARA / cert issues", value: issueCount, icon: CheckCircle }].map(({ label, value, icon: Icon }) => <article key={label}><span><Icon size={22} weight="duotone" /></span><div><small>{label}</small><strong>{value}</strong></div></article>)}
-      </section>
+      <PageHeading title="Dashboard" description={`The familiar visual overview, restored for ${workbench.active_case_title || "the active capture set"}.`} actions={<><span className="coverage-badge"><Check size={14} /> {dashboard.stages.length}/10 stages recorded</span><button className="button secondary" onClick={() => onNavigate("investigate", { investigateTab: "traffic", trafficProtocol: protocol === "All" ? "" : protocol })}><Play size={17} /> Open traffic replay</button><button className="button secondary" onClick={exportDashboard}><DownloadSimple size={17} /> Export dashboard</button></>} />
+      <CaptureScope summary={captureSummary} replay={dashboard.traffic_replay} />
+      <CaptureMetricCards summary={captureSummary} fallback={dashboard} />
+      <section className="detection-status" aria-label="Detection status"><span><ShieldCheck size={16} /> Risk {dashboard.risk}</span><span><Bell size={16} /> {dashboard.alerts} alerts</span><span><Pulse size={16} /> {dashboard.beacons} beacons</span><span><CheckCircle size={16} /> {issueCount} YARA / certificate issues</span></section>
+      <div className="traffic-summary-grid">
+        <ProtocolByteDistribution protocols={dashboard.protocol_distribution} activeProtocol={protocol} onProtocolSelect={setProtocol} showDonut onOpenTraffic={() => onNavigate("investigate", { investigateTab: "traffic", trafficProtocol: protocol === "All" ? "" : protocol, trafficChart: "all-capture-protocol-distribution" })} />
+        <EndpointRanking endpoints={dashboard.endpoint_ranking || []} onOpen={(trafficIp) => onNavigate("investigate", { investigateTab: "traffic", trafficIp })} />
+      </div>
       <div className="dashboard-filter-bar">
         <div className="dashboard-search"><MagnifyingGlass size={19} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search IPs or locations on the dashboard…" aria-label="Search dashboard IPs and locations" /></div>
         <div className="protocol-filters" aria-label="Protocol filter">{["All", "TCP", "UDP", "DNS"].map((item) => <button className={protocol === item ? "active" : ""} onClick={() => setProtocol(item)} key={item}>{item}</button>)}</div>
@@ -700,12 +776,13 @@ function Investigate({ workbench, onOpenTrafficView }) {
   return (
     <div className="screen">
       <PageHeading title="Investigate" description="Move from the verdict into traffic, behaviors, enrichment, and underlying evidence." />
+      <AnalysisScope workbench={workbench} />
       <SegmentedTabs items={investigateTabs} active={tab} onChange={setTab} label="Investigation workspace" />
-      {tab === "evidence" && <EvidenceWorkspace items={workbench.dashboard.evidence} lookupWhois={workbench.lookupWhois} initialQuery={window.history.state?.evidenceQuery || ""} />}
+      {tab === "evidence" && <EvidenceExplorer workbench={workbench} />}
       {tab === "traffic" && <TrafficWorkspace data={workbench.dashboard} onOpenTrafficView={onOpenTrafficView} onChangeTab={setTab} />}
       {tab === "mitre" && <MitreWorkspace data={workbench.dashboard} initialView={window.history.state?.mitreView || "findings"} />}
       {tab === "intel" && <ThreatIntelWorkspace data={workbench.dashboard} config={workbench.config} lookupWhois={workbench.lookupWhois} />}
-      {tab === "raw" && <RawWorkspace data={workbench.dashboard} />}
+      {tab === "raw" && <EvidenceExplorer workbench={workbench} kind="flows" />}
     </div>
   );
 }
@@ -763,26 +840,54 @@ function EvidenceWorkspace({ items = evidence, lookupWhois, initialQuery = "" })
 }
 
 function TrafficWorkspace({ data, onOpenTrafficView, onChangeTab }) {
-  const [filterMode, setFilterMode] = useState("all");
-  const [ipQuery, setIpQuery] = useState("");
-  const [protocol, setProtocol] = useState("All");
+  const [filterMode, setFilterMode] = useState(() => window.history.state?.trafficIp ? "ip" : window.history.state?.trafficProtocol ? "protocol" : "all");
+  const [ipQuery, setIpQuery] = useState(() => window.history.state?.trafficIp || "");
+  const [protocol, setProtocol] = useState(() => window.history.state?.trafficProtocol || "All");
   const [timeBucket, setTimeBucket] = useState("");
+  const [from, setFrom] = useState("");
+  const [to, setTo] = useState("");
   const [excludePrivate, setExcludePrivate] = useState(false);
   const protocolNames = (data.protocols || []).map((item) => item.name);
   const timeBuckets = (data.traffic || []).map((item) => item.time);
-  const talkers = (data.top_talkers || []).filter((item) => (!ipQuery.trim() || item.name.toLowerCase().includes(ipQuery.toLowerCase())) && (!excludePrivate || !isPrivateAddress(item.name)));
-  const filteredData = { ...data, top_talkers: talkers };
-  const clearFilters = () => { setFilterMode("all"); setIpQuery(""); setProtocol("All"); setTimeBucket(""); setExcludePrivate(false); };
+  const replayFilters = { ip: ipQuery, protocol, from, to, excludePrivate };
+  const hasActiveTrafficFilters = Boolean(ipQuery.trim() || protocol !== "All" || timeBucket || from || to || excludePrivate);
+  const scopedReplay = useMemo(() => summarizeTrafficReplayEvents(data.traffic_replay, replayFilters), [data.traffic_replay, replayFilters.ip, replayFilters.protocol, replayFilters.from, replayFilters.to, replayFilters.excludePrivate]);
+  const clearFilters = () => { setFilterMode("all"); setIpQuery(""); setProtocol("All"); setTimeBucket(""); setFrom(""); setTo(""); setExcludePrivate(false); };
   const chooseMode = (nextMode) => {
+    if (nextMode === "all") return clearFilters();
     setFilterMode(nextMode);
-    if (nextMode === "all") clearFilters();
+    if (nextMode === "ip") { setProtocol("All"); setTimeBucket(""); setFrom(""); setTo(""); }
+    if (nextMode === "protocol") { setIpQuery(""); setTimeBucket(""); setFrom(""); setTo(""); }
+    if (nextMode === "time") { setIpQuery(""); setProtocol("All"); setTimeBucket(""); }
   };
   const shortcuts = [
     ["Cross-file correlation", "Review shared indicators across captures", ShareNetwork, "evidence"],
     ["Beacon candidates", `${data.beacons || 0} candidate${data.beacons === 1 ? "" : "s"} detected`, Pulse, "mitre"],
     ["Flow anomalies", "Inspect exact packets, ports, and timestamps", Waveform, "raw"],
   ];
-  return <div className="workspace-stack"><div className="filter-bar" aria-label="Traffic filters"><button className={`filter-chip ${filterMode === "all" ? "active" : ""}`} onClick={() => chooseMode("all")} aria-pressed={filterMode === "all"}><Funnel size={15} /> All flows</button><button className={`filter-chip ${filterMode === "ip" ? "active" : ""}`} onClick={() => chooseMode("ip")} aria-pressed={filterMode === "ip"}>IP</button><button className={`filter-chip ${filterMode === "protocol" ? "active" : ""}`} onClick={() => chooseMode("protocol")} aria-pressed={filterMode === "protocol"}>Protocol</button><button className={`filter-chip ${filterMode === "time" ? "active" : ""}`} onClick={() => chooseMode("time")} aria-pressed={filterMode === "time"}>Time range</button><label className="compact-check"><input type="checkbox" checked={excludePrivate} onChange={(event) => setExcludePrivate(event.target.checked)} /> Exclude private IPs</label><button className="text-button" onClick={clearFilters}>Clear filters</button></div>{filterMode !== "all" && <div className="traffic-filter-controls">{filterMode === "ip" && <label>Filter top talkers by IP<input value={ipQuery} onChange={(event) => setIpQuery(event.target.value)} placeholder="Enter a full or partial IP" /></label>}{filterMode === "protocol" && <label>Protocol<select value={protocol} onChange={(event) => setProtocol(event.target.value)}><option>All</option>{protocolNames.map((item) => <option key={item}>{item}</option>)}</select></label>}{filterMode === "time" && <label>Time point<select value={timeBucket} onChange={(event) => setTimeBucket(event.target.value)}><option value="">All times</option>{timeBuckets.map((item) => <option key={item}>{item}</option>)}</select></label>}<span>{talkers.length} top talker{talkers.length === 1 ? "" : "s"} shown</span></div>}<TrafficOverview expanded data={filteredData} activeProtocol={protocol} activeTime={timeBucket} onProtocolSelect={(value) => { setProtocol(value); setFilterMode(value === "All" ? "all" : "protocol"); }} onTimeSelect={(value) => { setTimeBucket(value); setFilterMode(value ? "time" : "all"); }} onClearFilters={clearFilters} filterTarget="workspace" /><div className="three-card-grid">{shortcuts.map(([title, copy, Icon, target]) => <button className="mini-card" key={title} onClick={() => onChangeTab(target)} aria-label={`${title}: open ${target === "mitre" ? "MITRE ATT&CK" : target}`}><Icon size={24} weight="duotone" /><div><h3>{title}</h3><p>{copy}</p></div><ArrowRight size={18} /></button>)}</div><section className="panel" id="additional-traffic-views"><div className="panel-title compact"><div><h2>Additional traffic views</h2><p>Open the visualization that best answers your current question.</p></div></div><div className="tool-grid">{trafficViewTools.map((tool) => <button key={tool.target} onClick={() => onOpenTrafficView(tool.target)} aria-label={`Open ${tool.label} on the dashboard`}><ChartLine size={19} />{tool.label}<ArrowRight size={16} /></button>)}</div></section></div>;
+  const selectProtocol = (value) => { if (value === "All") return clearFilters(); setProtocol(value); setIpQuery(""); setTimeBucket(""); setFrom(""); setTo(""); setFilterMode("protocol"); };
+  useEffect(() => {
+    if (window.history.state?.trafficChart !== "all-capture-protocol-distribution") return undefined;
+    const frame = window.requestAnimationFrame(() => {
+      const target = document.getElementById("all-capture-protocol-distribution");
+      target?.scrollIntoView({ behavior: "smooth", block: "start" });
+      target?.focus({ preventScroll: true });
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, []);
+  return <div className="workspace-stack">
+    <CaptureScope summary={data.capture_summary} replay={data.traffic_replay} />
+    <CaptureMetricCards replayScope={{ event_count: scopedReplay.events.length, bytes: scopedReplay.totalBytes, flow_count: scopedReplay.flowCount, endpoint_count: scopedReplay.endpointCount }} />
+    <ProtocolByteDistribution protocols={data.protocol_distribution} activeProtocol={protocol} onProtocolSelect={selectProtocol} title="All-capture protocol bytes" description="Parsed byte volume across the active capture. Selecting a protocol filters replay widgets below; it does not change these all-capture values." expandByDefault sectionId="all-capture-protocol-distribution" />
+    <div className="filter-bar" aria-label="Traffic filters"><button className={`filter-chip ${filterMode === "all" ? "active" : ""}`} onClick={() => chooseMode("all")} aria-pressed={filterMode === "all"}><Funnel size={15} /> All flows</button><button className={`filter-chip ${filterMode === "ip" ? "active" : ""}`} onClick={() => chooseMode("ip")} aria-pressed={filterMode === "ip"}>IP</button><button className={`filter-chip ${filterMode === "protocol" ? "active" : ""}`} onClick={() => chooseMode("protocol")} aria-pressed={filterMode === "protocol"}>Protocol</button><button className={`filter-chip ${filterMode === "time" ? "active" : ""}`} onClick={() => chooseMode("time")} aria-pressed={filterMode === "time"}>Time range</button><label className="compact-check"><input type="checkbox" checked={excludePrivate} onChange={(event) => setExcludePrivate(event.target.checked)} /> Exclude private IPs</label><button className="text-button" onClick={clearFilters} disabled={!hasActiveTrafficFilters}>Clear filters</button></div>
+    {filterMode !== "all" && <div className="traffic-filter-controls">{filterMode === "ip" && <label>Filter traffic by IP<input value={ipQuery} onChange={(event) => setIpQuery(event.target.value)} /></label>}{filterMode === "protocol" && <label>Protocol<select value={protocol} onChange={(event) => selectProtocol(event.target.value)}><option>All</option>{protocolNames.map((item) => <option key={item}>{item}</option>)}</select></label>}{filterMode === "time" && <><label>From<input type="datetime-local" value={from} onChange={(event) => setFrom(event.target.value)} /></label><label>To<input type="datetime-local" value={to} onChange={(event) => setTo(event.target.value)} /></label><label>Overview-only time point<select value={timeBucket} onChange={(event) => setTimeBucket(event.target.value)}><option value="">All times</option>{timeBuckets.map((item) => <option key={item}>{item}</option>)}</select></label></>}<span>{scopedReplay.events.length} replay events · {scopedReplay.endpointCount} endpoints</span></div>}
+    <ProtocolByteDistribution protocols={scopedReplay.protocol_distribution} activeProtocol={protocol} onProtocolSelect={selectProtocol} title="Replay-sample protocol lengths" description="Known returned-event lengths after the current filters. Events without sampled lengths are excluded, so these totals can differ from all-capture bytes above." expandByDefault sectionId="replay-sample-protocol-distribution" />
+    <TrafficReplay replay={data.traffic_replay} filters={replayFilters} onFilterChange={({ protocol: value }) => value !== undefined && selectProtocol(value || "All")} />
+    <TrafficOverview expanded data={data} activeProtocol={protocol} activeTime={timeBucket} onProtocolSelect={selectProtocol} onTimeSelect={(value) => { if (!value) return clearFilters(); setTimeBucket(value); setIpQuery(""); setProtocol("All"); setFrom(""); setTo(""); setFilterMode("time"); }} onClearFilters={clearFilters} filterTarget="workspace" contextMode="workspace" />
+    <EndpointRanking endpoints={scopedReplay.endpoint_ranking} onOpen={(nextIp) => { setIpQuery(nextIp); setProtocol("All"); setTimeBucket(""); setFrom(""); setTo(""); setFilterMode("ip"); }} description="Known returned-event lengths across the current replay sample; events without sampled lengths are excluded." />
+    <div className="three-card-grid">{shortcuts.map(([title, copy, Icon, target]) => <button className="mini-card" key={title} onClick={() => onChangeTab(target)} aria-label={`${title}: open ${target === "mitre" ? "MITRE ATT&CK" : target}`}><Icon size={24} weight="duotone" /><div><h3>{title}</h3><p>{copy}</p></div><ArrowRight size={18} /></button>)}</div>
+    <section className="panel" id="additional-traffic-views"><div className="panel-title compact"><div><h2>Additional traffic views</h2><p>Open the visualization that best answers your current question.</p></div></div><div className="tool-grid">{trafficViewTools.map((tool) => <button key={tool.target} onClick={() => onOpenTrafficView(tool.target)} aria-label={`Open ${tool.label} on the dashboard`}><ChartLine size={19} />{tool.label}<ArrowRight size={16} /></button>)}</div></section>
+  </div>;
 }
 
 function MitreWorkspace({ data, initialView = "findings" }) {
@@ -840,13 +945,22 @@ function downloadText(filename, content, type = "text/plain") {
 }
 
 function Reports({ workbench }) {
+  const [exportError, setExportError] = useState("");
+  const [exportBusy, setExportBusy] = useState(false);
+  const exportSaved = async (format) => {
+    setExportError(""); setExportBusy(true);
+    try {
+      const payload = await workbench.exportEvidence();
+      if (format === "json") downloadText("pcap-hunter-evidence.json", JSON.stringify(payload, null, 2), "application/json");
+      else downloadText("pcap-hunter-iocs.csv", buildIocCsv(payload.items.map((item) => ({ value: item.value, type: item.type, context: typeof item.context === "string" ? item.context : JSON.stringify(item.context), status: item.severity, source: item.source_artifact_sha256 || "Unknown" }))), "text/csv");
+    } catch (error) { setExportError(error.message); } finally { setExportBusy(false); }
+  };
   const [tab, setTab] = useState("report");
   const dashboard = workbench.dashboard;
   const config = workbench.config || {};
   const provider = config.cfg_llm_provider || "Not configured";
   const model = provider === "openai" ? config.cfg_openai_model : provider === "anthropic" ? config.cfg_anthropic_model : config.cfg_llm_model;
   const report = dashboard.report || "No AI narrative has been generated for the active analysis. Deterministic findings and exports remain available.";
-  const exportPayload = JSON.stringify({ case_id: workbench.active_case_id, analysis_id: workbench.active_analysis_id, dashboard }, null, 2);
   const downloadPdf = () => {
     if (!workbench.active_case_id) return;
     const link = document.createElement("a");
@@ -859,10 +973,10 @@ function Reports({ workbench }) {
   const exportItems = [
     ["PDF report with dashboard", "Download a polished report with the narrative, KPIs, protocol charts, OSINT, and detector summaries.", downloadPdf],
     ["Markdown investigation report", "Download the saved narrative exactly as generated.", () => downloadText("pcap-hunter-report.md", report, "text/markdown")],
-    ["Analysis evidence · JSON", "Export dashboard metrics, evidence, flows, and detector summaries.", () => downloadText("pcap-hunter-evidence.json", exportPayload, "application/json")],
-    ["IOC inventory · CSV", "Export the active evidence inventory for triage and handoff.", () => downloadText("pcap-hunter-iocs.csv", buildIocCsv(dashboard.evidence || []), "text/csv")],
+    ["Analysis evidence · JSON", "Export dashboard metrics, evidence, flows, and detector summaries.", () => exportSaved("json")],
+    ["IOC inventory · CSV", "Export the active evidence inventory for triage and handoff.", () => exportSaved("csv")],
   ];
-  return <div className="screen"><PageHeading title="Reports" description="Turn deterministic evidence into a narrative or machine-readable handoff." actions={<span className="provider-summary"><Sparkle size={17} /> {provider} · {model || "default model"} · {config.cfg_llm_language || "US English"}</span>} /><SegmentedTabs items={[{ id: "report", label: "AI threat report", icon: Brain }, { id: "exports", label: "Exports", icon: DownloadSimple }]} active={tab} onChange={setTab} label="Report workspace" />{tab === "report" ? <div className="report-layout"><article className="panel report-document"><div className="report-head"><div><span className="eyebrow">Saved with the active analysis</span><h2>PCAP analysis report</h2><p>{workbench.capture_count} captures · {dashboard.packets} packets · {dashboard.flows} flows · {(dashboard.evidence || []).length} indicators</p></div><div className="report-actions"><button className="button secondary" onClick={workbench.refresh}><ClockCounterClockwise size={17} /> Refresh</button><button className="button primary" disabled={!workbench.active_case_id} onClick={downloadPdf}><FileArrowDown size={17} /> Download PDF</button></div></div><div className="report-body actual-report"><ReactMarkdown remarkPlugins={[remarkGfm]}>{report}</ReactMarkdown></div></article><aside className="report-sidebar"><section className="panel"><h2>Evidence coverage</h2><div className="coverage-list">{["Traffic & flows", "DNS & TLS", "Beaconing", "YARA", "OSINT", "MITRE mapping"].map((item, index) => <div key={item}><span>{index < dashboard.stages.length ? <CheckCircle size={16} weight="fill" /> : <WarningCircle size={16} />}{item}</span><strong>{index < dashboard.stages.length ? "Included" : "Not recorded"}</strong></div>)}</div></section><section className="panel"><h2>Report configuration</h2><div className="setup-summary"><div><span>Provider</span><strong>{provider}</strong></div><div><span>Model</span><strong>{model || "Default"}</strong></div><div><span>Language</span><strong>{config.cfg_llm_language || "US English"}</strong></div><div><span>Context</span><strong>{config.cfg_llm_unlimited_context ? "Unlimited" : `${config.cfg_llm_context_window || 32000} tokens`}</strong></div></div></section></aside></div> : <div className="export-grid">{exportItems.map(([title, copy, action]) => <article className="panel export-card" key={title}><span><FileArrowDown size={25} weight="duotone" /></span><div><h2>{title}</h2><p>{copy}</p></div><button className="button secondary" onClick={action}>Download<DownloadSimple size={16} /></button></article>)}</div>}</div>;
+  return <div className="screen">{exportError && <div className="error-notice" role="alert">{exportError}</div>}{exportBusy && <div role="status">Preparing the complete saved evidence export…</div>}<PageHeading title="Reports" description="Turn deterministic evidence into a narrative or machine-readable handoff." actions={<span className="provider-summary"><Sparkle size={17} /> {provider} · {model || "default model"} · {config.cfg_llm_language || "US English"}</span>} /><SegmentedTabs items={[{ id: "report", label: "AI threat report", icon: Brain }, { id: "exports", label: "Exports", icon: DownloadSimple }]} active={tab} onChange={setTab} label="Report workspace" />{tab === "report" ? <div className="report-layout"><article className="panel report-document"><div className="report-head"><div><span className="eyebrow">Saved with the active analysis</span><h2>PCAP analysis report</h2><p>{workbench.capture_count} captures · {dashboard.packets} packets · {dashboard.flows} flows · {(dashboard.evidence || []).length} indicators</p></div><div className="report-actions"><button className="button secondary" onClick={workbench.refresh}><ClockCounterClockwise size={17} /> Refresh</button><button className="button primary" disabled={!workbench.active_case_id} onClick={downloadPdf}><FileArrowDown size={17} /> Download PDF</button></div></div><div className="report-body actual-report"><ReportMarkdown>{report}</ReportMarkdown></div></article><aside className="report-sidebar"><section className="panel"><h2>Evidence coverage</h2><div className="coverage-list">{["Traffic & flows", "DNS & TLS", "Beaconing", "YARA", "OSINT", "MITRE mapping"].map((item, index) => <div key={item}><span>{index < dashboard.stages.length ? <CheckCircle size={16} weight="fill" /> : <WarningCircle size={16} />}{item}</span><strong>{index < dashboard.stages.length ? "Included" : "Not recorded"}</strong></div>)}</div></section><section className="panel"><h2>Report configuration</h2><div className="setup-summary"><div><span>Provider</span><strong>{provider}</strong></div><div><span>Model</span><strong>{model || "Default"}</strong></div><div><span>Language</span><strong>{config.cfg_llm_language || "US English"}</strong></div><div><span>Context</span><strong>{config.cfg_llm_unlimited_context ? "Unlimited" : `${config.cfg_llm_context_window || 32000} tokens`}</strong></div></div></section></aside></div> : <div className="export-grid">{exportItems.map(([title, copy, action]) => <article className="panel export-card" key={title}><span><FileArrowDown size={25} weight="duotone" /></span><div><h2>{title}</h2><p>{copy}</p></div><button className="button secondary" onClick={action}>Download<DownloadSimple size={16} /></button></article>)}</div>}</div>;
 }
 
 function ExportCards({ items }) {
@@ -889,7 +1003,7 @@ function CaseDetail({ item, workbench, onBack }) {
   if (!item) return <div className="screen"><button className="back-button" onClick={onBack}><ArrowLeft size={16} /> Back to cases</button><Notice>This case is no longer available.</Notice></div>;
   const addNote = async () => { if (!note.trim()) return; await workbench.addNote(item.id, note.trim()); setNote(""); };
   const caseEvidence = item.id === workbench.active_case_id ? workbench.dashboard.evidence : [];
-  return <div className="screen"><button className="back-button upper-layer-back" onClick={onBack}><ArrowLeft size={16} /> Back to cases</button><PageHeading title={item.title} description={`${item.id} · ${item.status.replaceAll("_", " ")} · ${item.severity} severity · updated ${new Date(item.updated_at).toLocaleString()}`} /><div className="case-meta"><span><strong>{item.analysis_count}</strong> captures</span><span><strong>{item.ioc_count}</strong> IOCs</span><span><strong>{item.note_count}</strong> notes</span><span><strong>Tags</strong> {(item.tags || []).join(" · ") || "none"}</span></div><SegmentedTabs items={[{ id: "analyses", label: "Analyses" }, { id: "notes", label: "Notes" }, { id: "iocs", label: "IOCs" }]} active={tab} onChange={setTab} label="Case detail" />{tab === "analyses" && <section className="panel"><div className="panel-title"><div><h2>Saved analyses</h2><p>Every completed upload is autosaved here by the background worker.</p></div></div>{item.analyses.map((analysis) => <div className="analysis-row" key={analysis.id}><File size={21} /><div><strong>{analysis.name}</strong><span>{analysis.packet_count} packets · {analysis.flow_count} flows · analyzed {new Date(analysis.analyzed_at).toLocaleString()}</span></div><span>{analysis.ioc_count} IOCs</span></div>)}{!item.analyses.length && <div className="empty-state-note"><File size={17} /><span>No analyses have been added to this case.</span></div>}</section>}{tab === "notes" && <section className="panel notes-panel"><textarea value={note} onChange={(event) => setNote(event.target.value)} placeholder="Add an investigation note…" /><button className="button primary" disabled={!note.trim()} onClick={addNote}>Add note</button>{item.notes.map((entry) => <div className="note-item" key={entry.id}><strong>{new Date(entry.created_at).toLocaleString()}</strong><p>{entry.content}</p></div>)}</section>}{tab === "iocs" && <section className="panel table-panel"><div className="panel-title compact"><div><h2>Case IOCs</h2><p>{caseEvidence.length ? "Evidence from the active analysis." : "Open the active case to view its in-memory evidence inventory."}</p></div></div><div className="data-table"><div className="table-row table-head"><span>Value</span><span>Type</span><span>Context</span><span>Severity</span><span>Analysis</span></div>{caseEvidence.map((entry) => <div className="table-row" key={`${entry.type}-${entry.value}`}><strong>{entry.value}</strong><span>{entry.type}</span><span>{entry.context}</span><span>{entry.status}</span><span>{entry.source}</span></div>)}</div></section>}</div>;
+  return <div className="screen"><button className="back-button upper-layer-back" onClick={onBack}><ArrowLeft size={16} /> Back to cases</button><PageHeading title={item.title} description={`${item.id} · ${item.status.replaceAll("_", " ")} · ${item.severity} severity · updated ${new Date(item.updated_at).toLocaleString()}`} /><div className="case-meta"><span><strong>{item.analysis_count}</strong> captures</span><span><strong>{item.ioc_count}</strong> IOCs</span><span><strong>{item.note_count}</strong> notes</span><span><strong>Tags</strong> {(item.tags || []).join(" · ") || "none"}</span></div><SegmentedTabs items={[{ id: "analyses", label: "Analyses" }, { id: "notes", label: "Notes" }, { id: "iocs", label: "IOCs" }]} active={tab} onChange={setTab} label="Case detail" />{tab === "analyses" && <section className="panel"><div className="panel-title"><div><h2>Saved analyses</h2><p>Every completed upload is autosaved here by the background worker.</p></div></div>{item.analyses.map((analysis) => <div className="analysis-row" key={analysis.id}><File size={21} /><div><strong>{analysis.name}</strong><span>{analysis.packet_count} packets · {analysis.flow_count} flows · analyzed {new Date(analysis.analyzed_at).toLocaleString()}</span></div><span>{analysis.ioc_count} IOCs</span><button type="button" className="button secondary" disabled={isPrivacyMode(window.location.search)} onClick={async () => { await workbench.selectAnalysis(analysis.id); window.location.assign(`/investigate${window.location.search}`); }}>Open in Investigate</button></div>)}{!item.analyses.length && <div className="empty-state-note"><File size={17} /><span>No analyses have been added to this case.</span></div>}</section>}{tab === "notes" && <section className="panel notes-panel"><textarea value={note} onChange={(event) => setNote(event.target.value)} placeholder="Add an investigation note…" /><button className="button primary" disabled={!note.trim()} onClick={addNote}>Add note</button>{item.notes.map((entry) => <div className="note-item" key={entry.id}><strong>{new Date(entry.created_at).toLocaleString()}</strong><p>{entry.content}</p></div>)}</section>}{tab === "iocs" && <section className="panel table-panel"><div className="panel-title compact"><div><h2>Case IOCs</h2><p>{caseEvidence.length ? "Evidence from the active analysis." : "Open the active case to view its in-memory evidence inventory."}</p></div></div><div className="data-table"><div className="table-row table-head"><span>Value</span><span>Type</span><span>Context</span><span>Severity</span><span>Analysis</span></div>{caseEvidence.map((entry) => <div className="table-row" key={`${entry.type}-${entry.value}`}><strong>{entry.value}</strong><span>{entry.type}</span><span>{entry.context}</span><span>{entry.status}</span><span>{entry.source}</span></div>)}</div></section>}</div>;
 }
 
 function Settings({ workbench }) {
@@ -897,27 +1011,70 @@ function Settings({ workbench }) {
   const [saved, setSaved] = useState(false);
   const [saveError, setSaveError] = useState("");
   const [draft, setDraft] = useState(workbench.config || {});
-  useEffect(() => setDraft(workbench.config || {}), [workbench.config]);
-  const change = (key, value) => { setSaved(false); setDraft((current) => ({ ...current, [key]: value })); };
-  const save = async () => { setSaveError(""); try { await workbench.saveSettings(draft); setSaved(true); } catch (error) { setSaveError(error.message); } };
-  const loadSaved = () => { setDraft(workbench.config || {}); setSaved(false); setSaveError(""); };
-  return <div className="screen settings-screen"><PageHeading title="Settings" description="Configure analysis, enrichment, reports, integrations, and stored data in one place." actions={<><button className="button secondary" onClick={loadSaved}>Load saved</button><button className="button primary" onClick={save}>Save changes</button></>} />{saved && <Notice onClose={() => setSaved(false)}>Settings saved. Sensitive provider values remain encrypted at rest.</Notice>}{saveError && <div className="error-notice"><WarningCircle size={19} /><span>{saveError}</span></div>}<div className="settings-layout"><aside className="settings-nav">{settingsNavigation.map(({ id, label, icon: Icon }) => <button className={section === id ? "active" : ""} onClick={() => setSection(id)} key={id}><Icon size={19} />{label}<ArrowRight size={15} /></button>)}</aside><div className="settings-content">{section === "llm" && <LlmSettings config={draft} onChange={change} />}{section === "intel" && <IntelSettings config={draft} onChange={change} />}{section === "pipeline" && <PipelineSettings config={draft} onChange={change} />}{section === "tools" && <ToolSettings config={draft} onChange={change} system={workbench.system} />}{section === "map" && <MapSettings config={draft} onChange={change} getGeoItems={workbench.getGeoItems} resolveGeoLocation={workbench.resolveGeoLocation} />}{section === "api" && <ApiSettings />}{section === "data" && <DataSettings cases={workbench.cases} />}{section === "logs" && <LogsSettings jobs={workbench.jobs} />}</div></div></div>;
+  const [draftDirty, setDraftDirty] = useState(false);
+  const [llmDiscoveryReset, setLlmDiscoveryReset] = useState(0);
+  const savedConnectionSignature = useRef(getLlmConnectionSignature(workbench.config));
+  const resetLlmDiscovery = () => setLlmDiscoveryReset((current) => current + 1);
+  useEffect(() => {
+    const incomingConfig = workbench.config || {};
+    const nextSignature = getLlmConnectionSignature(incomingConfig);
+    const connectionChanged = shouldResetLlmDiscoveryForConfigSync(savedConnectionSignature.current, nextSignature);
+    savedConnectionSignature.current = nextSignature;
+    if (!shouldSyncSettingsDraft(draftDirty)) return;
+    setDraft(incomingConfig);
+    if (connectionChanged) resetLlmDiscovery();
+  }, [workbench.config, draftDirty]);
+  const change = (key, value) => { setSaved(false); setDraftDirty(true); setDraft((current) => ({ ...current, [key]: value })); };
+  const save = async () => { setSaveError(""); try { await workbench.saveSettings(draft); setSaved(true); setDraftDirty(false); } catch (error) { setSaveError(error.message); } };
+  const changeLlmSetting = (key, value) => {
+    change(key, value);
+    if (["cfg_llm_provider", "cfg_llm_endpoint", "cfg_openai_base_url", "cfg_openai_key", "cfg_openai_cloud_key", "cfg_anthropic_key"].includes(key)) resetLlmDiscovery();
+  };
+  const loadSaved = () => { setDraft(workbench.config || {}); setDraftDirty(false); setSaved(false); setSaveError(""); resetLlmDiscovery(); };
+  return <div className="screen settings-screen"><PageHeading title="Settings" description="Configure analysis, enrichment, reports, integrations, and stored data in one place." actions={<><button className="button secondary" onClick={loadSaved}>Load saved</button><button className="button primary" onClick={save}>Save changes</button></>} />{saved && <Notice onClose={() => setSaved(false)}>Settings saved. Sensitive provider values remain encrypted at rest.</Notice>}{saveError && <div className="error-notice"><WarningCircle size={19} /><span>{saveError}</span></div>}<div className="settings-layout"><aside className="settings-nav">{settingsNavigation.map(({ id, label, icon: Icon }) => <button className={section === id ? "active" : ""} onClick={() => setSection(id)} key={id}><Icon size={19} />{label}<ArrowRight size={15} /></button>)}</aside><div className="settings-content">{section === "llm" && <LlmSettings config={draft} onChange={changeLlmSetting} discoverModels={workbench.discoverLlmModels} discoveryReset={llmDiscoveryReset} />}{section === "intel" && <IntelSettings config={draft} onChange={change} />}{section === "pipeline" && <PipelineSettings config={draft} onChange={change} />}{section === "tools" && <ToolSettings config={draft} onChange={change} system={workbench.system} />}{section === "map" && <MapSettings config={draft} onChange={change} getGeoItems={workbench.getGeoItems} resolveGeoLocation={workbench.resolveGeoLocation} />}{section === "api" && <ApiSettings />}{section === "agents" && <AgentsSettings cases={workbench.cases} />}{section === "data" && <DataSettings cases={workbench.cases} preserveSavedData={workbench.system?.preserve_saved_data} />}{section === "logs" && <LogsSettings jobs={workbench.jobs} />}</div></div></div>;
 }
 
 function SettingsHeader({ title, description, badge }) {
   return <div className="settings-header"><div><h2>{title}</h2><p>{description}</p></div>{badge && <span className="settings-badge">{badge}</span>}</div>;
 }
 
-function LlmSettings({ config, onChange }) {
+function LlmSettings({ config, onChange, discoverModels, discoveryReset }) {
   const provider = config.cfg_llm_provider || "lmstudio";
   const providerLabel = { lmstudio: "LM Studio", openai: "OpenAI", anthropic: "Anthropic" }[provider] || "LM Studio";
   const unlimited = Boolean(config.cfg_llm_unlimited_context);
-  const [tested, setTested] = useState(false);
+  const [discovery, setDiscovery] = useState({ status: "idle", models: [] });
+  const [customModelMode, setCustomModelMode] = useState(false);
+  const discoveryRequest = useRef(0);
   const endpointKey = provider === "openai" ? "cfg_openai_base_url" : "cfg_llm_endpoint";
   const modelKey = provider === "openai" ? "cfg_openai_model" : provider === "anthropic" ? "cfg_anthropic_model" : "cfg_llm_model";
   const secretKey = provider === "openai" ? "cfg_openai_cloud_key" : provider === "anthropic" ? "cfg_anthropic_key" : "cfg_openai_key";
   const configured = Boolean(config.configured_providers?.[secretKey]);
-  return <div className="settings-stack"><SettingsHeader title="LLM & reports" description="Choose how the optional AI report is generated. Deterministic analysis remains available without an LLM." badge="Optional" /><section className="settings-card"><label className="field-label">Provider</label><div className="provider-choice">{[["LM Studio", "lmstudio"], ["OpenAI", "openai"], ["Anthropic", "anthropic"]].map(([label, value]) => <button className={provider === value ? "active" : ""} onClick={() => { onChange("cfg_llm_provider", value); setTested(false); }} key={value}><Brain size={20} /><span><strong>{label}</strong><small>{value === "lmstudio" ? "Local · air-gapped" : "Cloud · full context"}</small></span>{provider === value && <CheckCircle size={17} weight="fill" />}</button>)}</div><div className="form-grid two"><label>{provider === "lmstudio" ? "OpenAI-compatible base URL" : provider === "openai" ? "Base URL (optional)" : "Provider endpoint"}<input value={provider === "anthropic" ? "Managed by Anthropic SDK" : config[endpointKey] || ""} onChange={(event) => onChange(endpointKey, event.target.value)} disabled={provider === "anthropic"} /></label><label>API key<input type="password" value={config[secretKey] || ""} onChange={(event) => onChange(secretKey, event.target.value)} placeholder={configured ? "Configured · enter a new value to replace" : "Paste API key"} /></label><label>Model<input value={config[modelKey] || ""} onChange={(event) => onChange(modelKey, event.target.value)} placeholder="Model name" /></label><div className="field-actions"><button className="button secondary" onClick={() => setTested(true)}>Review configuration</button></div></div>{tested && <Notice>{providerLabel} configuration is ready to save. Connection testing occurs when a report run starts.</Notice>}</section><section className="settings-card"><h3>Report output</h3><div className="form-grid two"><label>Report language<select value={config.cfg_llm_language || "US English"} onChange={(event) => onChange("cfg_llm_language", event.target.value)}>{["US English", "Traditional Chinese (zh-tw)", "Simplified Chinese (zh-cn)", "Japanese", "Korean", "Italian", "Spanish", "French", "German"].map((lang) => <option key={lang}>{lang}</option>)}</select></label><label>Model context window<input type="number" min="10000" max="1000000" step="1000" value={config.cfg_llm_context_window || 32000} onChange={(event) => onChange("cfg_llm_context_window", Number(event.target.value))} disabled={unlimited} /></label></div><Toggle checked={unlimited} onChange={(value) => onChange("cfg_llm_unlimited_context", value)} label="No context window limit" hint="Send all available sanitized evidence in one request. The provider can still reject an oversized request." /><div className="budget-note"><ChartPieSlice size={20} /><span><strong>{unlimited ? "Unlimited sanitized input" : `${Math.round((config.cfg_llm_context_window || 32000) / 2).toLocaleString()}-token input budget`}</strong><small>{unlimited ? "Physical model limits still apply." : "Half of the selected context window is reserved for evidence."}</small></span></div></section></div>;
+  const baseUrl = provider === "anthropic" ? "" : config[endpointKey] || "";
+  const apiKey = config[secretKey] || "";
+  const selectedModel = config[modelKey] || "";
+  const picker = getLlmModelPickerState({ models: discovery.models, selectedModel, customModelMode });
+
+  useEffect(() => {
+    discoveryRequest.current = nextLlmDiscoveryGeneration(discoveryRequest.current);
+    setDiscovery({ status: "idle", models: [] });
+    setCustomModelMode(false);
+  }, [discoveryReset]);
+
+  const verifyAndDiscover = async () => {
+    const requestId = nextLlmDiscoveryGeneration(discoveryRequest.current);
+    discoveryRequest.current = requestId;
+    setDiscovery({ status: "loading", models: [] });
+    try {
+      const models = await discoverModels({ provider, baseUrl, apiKey });
+      if (!acceptsLlmDiscoveryResponse(requestId, discoveryRequest.current)) return;
+      setDiscovery({ status: models.length ? "success" : "empty", models });
+    } catch {
+      if (!acceptsLlmDiscoveryResponse(requestId, discoveryRequest.current)) return;
+      setDiscovery({ status: "error", models: [] });
+    }
+  };
+
+  return <div className="settings-stack"><SettingsHeader title="LLM & reports" description="Choose how the optional AI report is generated. Deterministic analysis remains available without an LLM." badge="Optional" /><section className="settings-card"><label className="field-label">Provider</label><div className="provider-choice">{[["LM Studio", "lmstudio"], ["OpenAI", "openai"], ["Anthropic", "anthropic"]].map(([label, value]) => <button type="button" className={provider === value ? "active" : ""} onClick={() => onChange("cfg_llm_provider", value)} key={value}><Brain size={20} /><span><strong>{label}</strong><small>{value === "lmstudio" ? "Local · air-gapped" : "Cloud · full context"}</small></span>{provider === value && <CheckCircle size={17} weight="fill" />}</button>)}</div><div className="form-grid two"><label>{provider === "lmstudio" ? "OpenAI-compatible base URL" : provider === "openai" ? "Base URL (optional)" : "Provider endpoint"}<input value={provider === "anthropic" ? "Managed by Anthropic SDK" : baseUrl} onChange={(event) => onChange(endpointKey, event.target.value)} disabled={provider === "anthropic"} /></label><label>API key<input type="password" value={apiKey} onChange={(event) => onChange(secretKey, event.target.value)} placeholder={configured ? "Configured · enter a new value to replace" : "Paste API key"} /></label><label>Model{discovery.models.length ? <select value={picker.pickerValue} onChange={(event) => { if (event.target.value === "__custom__") { setCustomModelMode(true); return; } setCustomModelMode(false); onChange(modelKey, event.target.value); }} aria-describedby="llm-model-discovery-status"><option value="">Select a discovered model</option>{discovery.models.map((model) => <option value={model} key={model}>{model}</option>)}<option value="__custom__">Custom model…</option></select> : <input value={selectedModel} onChange={(event) => onChange(modelKey, event.target.value)} placeholder="Model name" />}{discovery.models.length > 0 && picker.showCustomInput && <small>Choose a discovered model or enter a custom model name below.</small>}</label>{discovery.models.length > 0 && picker.showCustomInput && <label>Custom model name<input value={selectedModel} onChange={(event) => onChange(modelKey, event.target.value)} placeholder="Model name" /></label>}<div className="field-actions"><button type="button" className="button secondary" onClick={verifyAndDiscover} disabled={discovery.status === "loading"} aria-busy={discovery.status === "loading"}>{discovery.status === "loading" ? "Loading model list…" : "Load model list"}</button></div></div><div id="llm-model-discovery-status" className="llm-discovery-status" aria-live="polite">{discovery.status === "success" && <Notice>Model list loaded from {providerLabel}. Choose one of {discovery.models.length} available models or enter a custom model name.</Notice>}{discovery.status === "empty" && <div className="empty-state-note"><WarningCircle size={17} /><span>The provider responded but did not return any models. Enter a model name manually.</span></div>}{discovery.status === "error" && <div className="error-notice"><WarningCircle size={18} /><span>Could not load the provider model list. Check the endpoint and credentials, then try again.</span></div>}</div></section><section className="settings-card"><h3>Report output</h3><div className="form-grid two"><label>Report language<select value={config.cfg_llm_language || "US English"} onChange={(event) => onChange("cfg_llm_language", event.target.value)}>{["US English", "Traditional Chinese (zh-tw)", "Simplified Chinese (zh-cn)", "Japanese", "Korean", "Italian", "Spanish", "French", "German"].map((lang) => <option key={lang}>{lang}</option>)}</select></label><label>Model context window<input type="number" min="10000" max="1000000" step="1000" value={config.cfg_llm_context_window || 32000} onChange={(event) => onChange("cfg_llm_context_window", Number(event.target.value))} disabled={unlimited} /></label></div><Toggle checked={unlimited} onChange={(value) => onChange("cfg_llm_unlimited_context", value)} label="No context window limit" hint="Send all available sanitized evidence in one request. The provider can still reject an oversized request." /><div className="budget-note"><ChartPieSlice size={20} /><span><strong>{unlimited ? "Unlimited sanitized input" : `${Math.round((config.cfg_llm_context_window || 32000) / 2).toLocaleString()}-token input budget`}</strong><small>{unlimited ? "Physical model limits still apply." : "Half of the selected context window is reserved for evidence."}</small></span></div></section></div>;
 }
 
 function IntelSettings({ config, onChange }) {
@@ -1007,10 +1164,10 @@ function ApiSettings() {
   return <div className="settings-stack"><SettingsHeader title="API access" description="Programmatic access for PCAP submission, job polling, case retrieval, and IOC feeds." badge="Protected service · port 8000" /><section className="settings-card"><div className="retention-card"><Key size={25} weight="duotone" /><div><h3>Keys are managed by the authenticated integrations service</h3><p>Bootstrap full-scope and feed keys through the deployment environment. Secrets are never displayed or edited in this browser workbench.</p></div></div></section><section className="settings-card"><h3>Integration endpoints</h3><div className="endpoint-list"><code>POST /api/v1/pcaps</code><code>GET /api/v1/jobs/:job_id</code><code>GET /api/v1/iocs.json</code><code>GET /api/v1/iocs.csv</code><code>GET /api/v1/iocs.stix</code></div></section></div>;
 }
 
-function DataSettings({ cases = [] }) {
+function DataSettings({ cases = [], preserveSavedData = false }) {
   const analyses = cases.reduce((sum, item) => sum + item.analysis_count, 0);
   const iocs = cases.reduce((sum, item) => sum + item.ioc_count, 0);
-  return <div className="settings-stack"><SettingsHeader title="Data & retention" description="Understand what is retained by the analysis service." badge="7-day run retention" /><section className="settings-card"><div className="retention-card"><ClockCounterClockwise size={25} weight="duotone" /><div><h3>Run directories are pruned after 7 days</h3><p>Zeek logs and carved payloads live in per-run folders. Cases and cached summaries remain available in the persistent data volume.</p></div></div></section><div className="metric-grid three"><article><strong>{cases.length}</strong><span>Cases retained</span></article><article><strong>{analyses}</strong><span>Analyses retained</span></article><article><strong>{iocs}</strong><span>IOCs retained</span></article></div><section className="settings-card"><h3>Safe data management</h3><p>Destructive cleanup is intentionally kept out of the browser workbench. Use the authenticated administration API so deletion remains scoped and auditable.</p></section></div>;
+  return <div className="settings-stack"><SettingsHeader title="Data & retention" description="Understand what is retained by the analysis service." badge={preserveSavedData ? "Saved data preserved" : "7-day run retention"} /><section className="settings-card"><div className="retention-card"><ClockCounterClockwise size={25} weight="duotone" /><div><h3>{preserveSavedData ? "Automatic saved-data cleanup is disabled" : "Run directories are pruned after 7 days"}</h3><p>{preserveSavedData ? "Captures, case records, reports, and saved settings remain in their persistent volumes. Disposable worker storage and build cache are separate." : "Zeek logs and carved payloads live in per-run folders. Cases and cached summaries remain available in the persistent data volume."}</p></div></div></section><div className="metric-grid three"><article><strong>{cases.length}</strong><span>Cases retained</span></article><article><strong>{analyses}</strong><span>Analyses retained</span></article><article><strong>{iocs}</strong><span>IOCs retained</span></article></div><section className="settings-card"><h3>Safe data management</h3><p>Destructive cleanup is intentionally kept out of the browser workbench. Use the authenticated administration API so deletion remains scoped and auditable.</p></section></div>;
 }
 
 function LogsSettings({ jobs = [] }) {
@@ -1030,13 +1187,13 @@ export function App() {
   }, []);
   const navigate = (next, state = {}) => {
     if (!validScreens.includes(next)) return;
-    const nextPath = next === "analyze" ? "/" : `/${next}`;
-    if (window.location.pathname !== nextPath || Object.keys(state).length) window.history.pushState({ screen: next, ...state }, "", nextPath);
+    const nextPath = buildScreenRoute(next, window.location.search);
+    if (!isCurrentRoute(window.location.pathname, window.location.search, nextPath) || Object.keys(state).length) window.history.pushState({ screen: next, ...state }, "", nextPath);
     setScreen(next);
   };
   const openTrafficView = (target) => {
     if (!getTrafficViewTool(target)) return;
-    const nextPath = `/dashboard#${target}`;
+    const nextPath = buildDashboardViewRoute(target, window.location.search);
     window.history.pushState({ screen: "dashboard", trafficView: target }, "", nextPath);
     setScreen("dashboard");
   };
@@ -1049,5 +1206,5 @@ export function App() {
     if (screen === "settings") return <Settings workbench={workbench} />;
     return <Findings onNavigate={navigate} workbench={workbench} />;
   };
-  return <div className="app-shell"><Header onNavigate={navigate} workbench={workbench} /><Sidebar active={screen} onChange={navigate} system={workbench.system} version={workbench.version} /><main className="main-content">{workbench.error && <div className="global-error"><WarningCircle size={19} /><span>{workbench.error}</span><button onClick={workbench.refresh}>Retry</button></div>}{renderScreen()}</main></div>;
+  return <div className="app-shell"><Header onNavigate={navigate} workbench={workbench} /><Sidebar active={screen} onChange={navigate} system={workbench.system} version={workbench.version} /><main className="main-content">{workbench.error && <div className="global-error"><WarningCircle size={19} /><span>{workbench.error}</span><button onClick={workbench.refresh}>Retry</button></div>}<Suspense fallback={<div className="panel" role="status">Loading workspace…</div>}>{renderScreen()}</Suspense></main></div>;
 }

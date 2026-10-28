@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from enum import Enum
 
 
@@ -149,7 +149,7 @@ class Analysis:
     pcap_path: str = ""
     pcap_hash: str = ""
     packet_count: int = 0
-    analyzed_at: datetime = field(default_factory=datetime.now)
+    analyzed_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     features: dict = field(default_factory=dict)
     osint: dict = field(default_factory=dict)
     report: str = ""
@@ -164,6 +164,14 @@ class Analysis:
     # into the analysis/scoring contracts.
     session_artifacts: dict | None = None
     iocs: list[IOC] = field(default_factory=list)
+
+    @property
+    def sort_timestamp(self) -> float:
+        """Compare legacy naive UTC timestamps with new explicit UTC receipts."""
+        if self.analyzed_at is None:
+            return float("-inf")
+        value = self.analyzed_at
+        return (value if value.tzinfo else value.replace(tzinfo=timezone.utc)).timestamp()
 
     def to_dict(self) -> dict:
         return {
@@ -199,7 +207,7 @@ class Analysis:
             pcap_path=data.get("pcap_path", ""),
             pcap_hash=data.get("pcap_hash", ""),
             packet_count=data.get("packet_count", 0),
-            analyzed_at=analyzed_at or datetime.now(),
+            analyzed_at=analyzed_at or datetime.now(timezone.utc),
             features=data.get("features", {}),
             osint=data.get("osint", {}),
             report=data.get("report", ""),

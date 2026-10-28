@@ -23,6 +23,7 @@ failures (corrupt PCAP, disk full) raise ``RuntimeError``.
 from __future__ import annotations
 
 import logging
+import os
 import pathlib
 import re
 import shutil
@@ -81,6 +82,8 @@ def _prune_stale_run_dirs(base_dir: pathlib.Path, max_age_seconds: float) -> Non
     Only directories are touched — loose files from the old flat layout are left
     alone. Errors are swallowed: pruning must never break an analysis run.
     """
+    if os.getenv("PCAP_HUNTER_PRESERVE_SAVED_DATA") == "1":
+        return
     try:
         entries = list(base_dir.iterdir())
     except OSError:

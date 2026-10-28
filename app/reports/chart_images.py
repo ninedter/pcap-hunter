@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import base64
 from functools import lru_cache
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 from app.utils.logger import get_logger
@@ -21,6 +22,17 @@ if TYPE_CHECKING:
     import plotly.graph_objects as go
 
 logger = get_logger(__name__)
+
+
+def _configure_offline_rendering():
+    import plotly.io as pio
+
+    directory = Path(__file__).resolve().parents[1] / "assets" / "topojson"
+    pio.defaults.topojson = directory.as_uri() + "/"
+    pio.defaults.mathjax = None
+
+
+_configure_offline_rendering()
 
 
 # ---------------------------------------------------------------------------

@@ -13,7 +13,6 @@ import pytest
 import app.api.queue as queue_mod
 from app.api.queue import (
     WARNING_OSINT_NOT_CONFIGURED,
-    WARNING_PERSISTENCE_FAILED,
     WARNING_YARA_FAILED,
     InProcessJobQueue,
     JobQueue,
@@ -241,8 +240,8 @@ def test_rdns_is_persisted_without_osint_provider_keys(tmp_path, monkeypatch):
 
 
 @pytest.mark.skipif(not FIXTURE_PCAP.exists(), reason="tiny.pcap fixture missing")
-def test_worker_keeps_job_done_when_persistence_fails(tmp_path, monkeypatch):
-    """save_analysis raising must not fail the job: warn + analysis_id stays None."""
+def test_worker_fails_when_evidence_is_not_persisted(tmp_path, monkeypatch):
+    """A persistence failure must never be reported as completed evidence."""
 
     def boom(self, analysis):
         raise RuntimeError("disk full")
@@ -257,10 +256,9 @@ def test_worker_keeps_job_done_when_persistence_fails(tmp_path, monkeypatch):
     _worker_run(job_id, db, str(FIXTURE_PCAP), {"osint_enabled": False})
 
     job = repo.get_job(job_id)
-    assert job.status == JobStatus.DONE
-    result = json.loads(job.result_json)
-    assert result["analysis_id"] is None
-    assert WARNING_PERSISTENCE_FAILED in result["warnings"]
+    assert job.status == JobStatus.FAILED
+    assert job.error_code == "evidence_persistence_failed"
+    assert job.result_json is None
 
 
 def test_worker_beacon_records_round_trip(tmp_path, monkeypatch):

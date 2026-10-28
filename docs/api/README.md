@@ -21,7 +21,7 @@ Browse the auto-generated docs:
 
 ## Authentication
 
-Wire format: `Authorization: Bearer <key>`. **At least one auth source must exist** (an env-var key or a database-backed key) or the API refuses to start.
+Wire format: `Authorization: Bearer <key>`. Without agent mode, **at least one auth source must exist** (an env-var key or a database-backed key) or the API refuses to start. The local compose stack enables agent mode so an analyst can create the first case-scoped credential; protected endpoints remain closed until authorized.
 
 | Source | Scope | Allows |
 |---|---|---|
@@ -129,3 +129,7 @@ See the [error code reference](../API.md#error-code-reference) for every code.
 - [Splunk](integrations/splunk.md)
 - [Elastic](integrations/elastic.md)
 - [Wazuh](integrations/wazuh.md)
+
+## Case-scoped agent access
+
+Dedicated `pha_` credentials provide explicit case grants and operation permissions without legacy administration/deletion access. The default compose stack can start in agent mode with zero keys; protected endpoints still deny requests until an analyst creates a credential locally. See the [agent API and MCP guide](../AGENT_USAGE.md).

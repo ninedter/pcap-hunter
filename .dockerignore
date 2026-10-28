@@ -22,3 +22,5 @@ prototype-friendly-ui/reference/
 prototype-friendly-ui/tests/
 prototype-friendly-ui/worker/
 prototype-friendly-ui/scripts/
+
+.codex/

@@ -69,9 +69,12 @@ generate an AI report, and follow durable background progress from the run queue
 
 ### 2. Dashboard — connected geographic overview
 
-Risk, flows, alerts, beacon candidates, and capture health lead into a larger,
-proportioned world map. Destinations group by continent, country, and city while
-the expandable region tree preserves every underlying endpoint.
+The capture scope shows packet count, parsed traffic bytes, flow count, unique
+IP endpoints, and the observed time span. Byte-weighted protocol and endpoint
+rankings sit alongside risk and detector status. Coverage labels distinguish
+parsed flow totals from the original capture and the replay sample. The world
+map still groups destinations by continent, country, and city, with the
+expandable region tree preserving each underlying endpoint.
 
 ![Dashboard workspace in PCAP Hunter v3](docs/images/workbench-v3/02-dashboard.png)
 
@@ -93,9 +96,12 @@ stay together in one inventory.
 
 ### 5. Traffic — linked visual analysis
 
-Protocol, top-talker, timeline, IP, and time-range selections share one filter
-state. The same investigation can continue in the world map, Sankey flow, network
-graph, attack timeline, histograms, or heatmap without losing context.
+Investigate → Traffic adds a chronological replay of retained packet samples.
+Analysts can filter by IP, protocol, or time range; play, pause, step, seek, and
+inspect the full source and destination addresses, ports, protocol, and capture
+timestamp. Internal, external, and special-address lanes show direction without
+claiming geographic location. The replay shows its sample and truncation limits;
+the existing flow timeline and deeper Dashboard visualizations remain available.
 
 ![Traffic workspace in PCAP Hunter v3](docs/images/workbench-v3/05-traffic.png)
 
@@ -515,10 +521,34 @@ Use **Settings → Data & retention** to independently manage PCAP data, OSINT c
 make verify     # format check + lint + full test suite
 ```
 
-Required before every commit. CI (GitHub Actions, Python 3.11) runs the same
-checks on every push/PR to `main`. For build-shaped verification (dependency
+Required before every commit. CI runs the canonical Python 3.13 Docker
+checks on native amd64 and arm64 runners on every push/PR to `main`. For build-shaped verification (dependency
 changes, install paths, release checks) use `make docker-verify` — it runs the
 identical gate inside the runtime image, independent of the host Python setup.
+
+### Container security maintenance
+
+The runtime uses signed packages from the public Wolfi repository. Debian is
+used only in isolated Node/browser build stages; those operating systems are
+not copied into the runtime. TShark 4.6.9 and Zeek 9.0.1 LTS are compiled from
+checksum-pinned upstream sources. Offline chart export uses a checksum-pinned
+Chrome Headless Shell bundle. Native versions, source URLs and hashes are in
+[`docker/native-components.json`](docker/native-components.json).
+
+`lxml` is compiled against the patched system XML library. Its upstream binary
+wheel would embed a separate older XML library. The image build checks both
+Python and TShark linkage, component minimum versions and removed package
+families with `docker/verify_runtime.py`. Runtime Python/test/build dependencies
+have separate hash locks. Compilers and test dependencies stay outside runtime.
+
+CI scans the resolved runtime and retains a full scan, SBOM and native component
+manifest. **All HIGH and CRITICAL matches, including unfixed matches, fail the
+gate**; no blanket distribution exception is configured. Wolfi is a rolling
+container distribution, so rebuild and rescan before each release. A successful
+scan covers known advisories in its feeds, not every possible vulnerability.
+First native builds can take tens of minutes; BuildKit retains Zeek objects
+across interrupted builds. Local Docker instructions and the agent trust
+boundary are in [the agent guide](docs/AGENT_USAGE.md). Agent submissions use a fresh, bounded, networkless container with only its own read-only input. A separate trusted launcher owns the Docker socket; packet parsers, UI and API never receive it. Containers share the host kernel, and the launcher remains a Docker administrator.
 
 ### Make targets
 
@@ -580,3 +610,9 @@ PCAP Hunter uses **production-shape test data**, not simplified inputs. See `tes
 ## License
 
 [MIT License](LICENSE) — see file for details.
+
+### Agent threat hunting access
+
+Use **Settings → Agent access** to create an expiring credential limited to selected cases and actions. Agents can query the complete saved evidence/flow inventory, cite immutable snapshots, submit captures to an isolated offline worker, and append reviewable investigation drafts. Agent credentials cannot administer keys, change settings, delete cases, or choose external model endpoints.
+
+The local stdio MCP adapter uses the official SDK and the same authenticated API. See [Agent usage and setup](docs/AGENT_USAGE.md), [繁體中文操作說明](docs/zh-TW/AGENT_USAGE.md), and the [implementation/release plan](docs/AGENTIC_RELEASE_PLAN.md). Keep the workbench and API on loopback. The compose deployment preserves saved data and separates offline agent parsing from application credentials.

@@ -97,13 +97,19 @@ jobs:
           docker run --rm -v /var/run/docker.sock:/var/run/docker.sock -v "${{ runner.temp }}/trivy-cache:/root/.cache/trivy" -v "$PWD/.ci-evidence:/results" "$TRIVY_IMAGE" image --format cyclonedx --output /results/sbom.json pcap-hunter:candidate
           docker run --rm -v /var/run/docker.sock:/var/run/docker.sock -v "${{ runner.temp }}/trivy-cache:/root/.cache/trivy" "$TRIVY_IMAGE" image --scanners vuln --severity HIGH,CRITICAL --exit-code 1 pcap-hunter:candidate
           docker run --rm -v /var/run/docker.sock:/var/run/docker.sock -v "${{ runner.temp }}/trivy-cache:/root/.cache/trivy" "$TRIVY_IMAGE" image --scanners secret --exit-code 1 pcap-hunter:candidate
+      - name: Require complete release evidence
+        run: |
+          for file in runner.txt tested-commit.txt runtime-image.txt native-runtime.json native-controls.json runtime-scan.json sbom.json native-components.json; do
+            test -s ".ci-evidence/$file"
+          done
       - name: Retain complete scan results including unfixed advisories
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: candidate-security-evidence-${{ matrix.arch }}
           path: .ci-evidence/
-          if-no-files-found: ignore
+          include-hidden-files: true
+          if-no-files-found: error
           retention-days: 14
 
   # Preserve the required check name while requiring both native platform jobs.

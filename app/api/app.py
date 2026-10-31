@@ -20,6 +20,9 @@ from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from app import __version__
+from app.agents import routes as agent_routes
+from app.agents import submission as agent_submission  # noqa: F401
+from app.agents.middleware import AgentBoundaryMiddleware
 from app.api.auth import Scope
 from app.api.deps import get_key_repo, get_settings, get_usage_tracker
 from app.api.queue import recover_stale_running_jobs
@@ -44,7 +47,11 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     # Schedule usage tracker flush every 60 seconds
     flush_task = asyncio.create_task(_usage_flush_loop())
 
+    from app.agents.spool import broker_loop
+
+    broker_task = asyncio.create_task(broker_loop(get_repo()))
     yield
+    broker_task.cancel()
 
     # Shutdown: final flush before stopping
     flush_task.cancel()
@@ -82,6 +89,9 @@ async def _gc_loop() -> None:
     )
 
     while True:
+        if os.getenv("PCAP_HUNTER_PRESERVE_SAVED_DATA") == "1":
+            await asyncio.sleep(3600)
+            continue
         try:
             gc_sweep(
                 repo=get_repo(), settings=settings, uploads_dir=uploads, artifacts_dir=artifacts, reports_dir=reports
@@ -146,7 +156,12 @@ def create_app() -> FastAPI:
 
     # Ensure at least one auth source exists (env vars OR DB keys).
     key_repo = get_key_repo()
-    if not settings.main_key and not settings.feed_key and key_repo.count_active_keys() == 0:
+    if (
+        not settings.main_key
+        and not settings.feed_key
+        and key_repo.count_active_keys() == 0
+        and os.getenv("PCAP_HUNTER_AGENT_MODE") != "1"
+    ):
         raise NoKeysConfiguredError(
             "No auth keys configured. Set PCAP_HUNTER_API_KEY / PCAP_HUNTER_FEED_KEY "
             "env vars, or create at least one DB-backed key before starting."
@@ -179,6 +194,10 @@ def create_app() -> FastAPI:
         openapi_url="/api/v1/openapi.json",
         lifespan=_lifespan,
     )
+
+    app.add_middleware(AgentBoundaryMiddleware)
+    app.include_router(agent_routes.router)
+    app.include_router(agent_routes.admin_router)
 
     # Conditional CORS middleware
     if settings.cors_origins:

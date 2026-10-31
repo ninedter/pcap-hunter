@@ -80,7 +80,7 @@ class TestConfigEncryption:
         # Secret should not appear in plaintext
         assert "my_secret_api_key" not in raw_content
         # Should be encrypted
-        assert "ENC[" in raw_content
+        assert "ENC2[" in raw_content
 
     def test_api_keys_decrypted_on_load(self, config_manager):
         """API keys should be decrypted when loaded."""

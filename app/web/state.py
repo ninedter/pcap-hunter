@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import ipaddress
 import json
 import math
+import os
 import shutil
 from collections import Counter, defaultdict
 from datetime import datetime
@@ -19,6 +21,7 @@ from app.utils.common import is_public_ipv4
 from app.utils.config_manager import get_config_manager
 
 _SERIES_COLORS = ["#2b8de0", "#7d46c8", "#2fac55", "#f3aa35", "#5f6f89"]
+_TRAFFIC_REPLAY_MAX_EVENTS = 2_000
 
 
 def _as_number(value: Any, default: float = 0) -> float:
@@ -33,11 +36,298 @@ def _flow_weight(flow: dict[str, Any]) -> int:
     return max(1, int(_as_number(flow.get("count"), 1)))
 
 
+def _sample_sequence(value: Any) -> list[Any] | tuple[Any, ...]:
+    return value if isinstance(value, (list, tuple)) else []
+
+
 def _flow_bytes(flow: dict[str, Any]) -> int:
-    packet_lengths = flow.get("pkt_lens") or []
+    scalar_bytes = _nonnegative_int(flow.get("bytes"))
+    if scalar_bytes is not None:
+        return scalar_bytes
+    packet_lengths = _sample_sequence(flow.get("pkt_lens"))
     if packet_lengths:
         return max(0, int(sum(_as_number(value) for value in packet_lengths)))
     return _flow_weight(flow)
+
+
+def _nonnegative_int(value: Any) -> int | None:
+    number = _as_number(value, default=float("nan"))
+    if not math.isfinite(number) or number < 0:
+        return None
+    return int(number)
+
+
+def _finite_timestamp(value: Any) -> float | None:
+    number = _as_number(value, default=float("nan"))
+    return number if math.isfinite(number) else None
+
+
+def _metric_timestamp(value: Any) -> float | None:
+    timestamp = _finite_timestamp(value)
+    if timestamp is not None:
+        return timestamp
+    if not isinstance(value, str):
+        return None
+    try:
+        timestamp = datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        return None
+    return timestamp if math.isfinite(timestamp) else None
+
+
+def _flow_packet_count(flow: dict[str, Any]) -> int:
+    return _nonnegative_int(flow.get("count")) or 0
+
+
+def _flow_stat_bytes(flow: dict[str, Any]) -> tuple[int | None, bool]:
+    """Return bytes for analyst statistics and whether the flow is complete."""
+    scalar_bytes = _nonnegative_int(flow.get("bytes"))
+    if scalar_bytes is not None:
+        return scalar_bytes, True
+    lengths = _sample_sequence(flow.get("pkt_lens"))
+    valid_lengths = [_nonnegative_int(value) for value in lengths]
+    if lengths and all(value is not None for value in valid_lengths):
+        measured = sum(value for value in valid_lengths if value is not None)
+        # Packet samples are useful measurements but do not establish that the
+        # persisted flow-byte total is complete, even when their count matches.
+        return measured, False
+    return None, False
+
+
+def _ip_scope(value: Any) -> str:
+    try:
+        address = ipaddress.ip_address(str(value))
+    except ValueError:
+        return "special"
+    if address.is_multicast or address.is_unspecified:
+        return "special"
+    if address.is_loopback or address.is_link_local:
+        return "internal"
+    if isinstance(address, ipaddress.IPv4Address) and address in ipaddress.ip_network("10.0.0.0/8"):
+        return "internal"
+    if isinstance(address, ipaddress.IPv4Address) and address in ipaddress.ip_network("172.16.0.0/12"):
+        return "internal"
+    if isinstance(address, ipaddress.IPv4Address) and address in ipaddress.ip_network("192.168.0.0/16"):
+        return "internal"
+    if isinstance(address, ipaddress.IPv6Address) and address in ipaddress.ip_network("fc00::/7"):
+        return "internal"
+    if address.is_reserved:
+        return "special"
+    return "external" if address.is_global else "special"
+
+
+def _canonical_ip(value: Any) -> str | None:
+    try:
+        return str(ipaddress.ip_address(str(value)))
+    except ValueError:
+        return None
+
+
+def _capture_file_bytes(path: str) -> int | None:
+    try:
+        capture_path = Path(path)
+        if not path or not capture_path.is_file():
+            return None
+        return capture_path.stat().st_size
+    except (OSError, TypeError, ValueError):
+        return None
+
+
+def _capture_summary(analysis: Analysis, flows: list[dict[str, Any]]) -> dict[str, Any]:
+    metrics = analysis.capture_metrics or {}
+    analysis_packet_count = _nonnegative_int(analysis.packet_count) or 0
+    metrics_packet_count = _nonnegative_int(metrics.get("packet_count")) or 0
+    packet_count = analysis_packet_count if analysis_packet_count > 0 else metrics_packet_count
+    parsed_packet_count = sum(_flow_packet_count(flow) for flow in flows)
+    byte_rows = [_flow_stat_bytes(flow) for flow in flows]
+    measured_bytes = [value for value, _ in byte_rows if value is not None]
+    parsed_traffic_bytes = sum(measured_bytes)
+    all_flow_bytes_complete = bool(flows) and all(complete for _, complete in byte_rows)
+    packets_complete = packet_count > 0 and parsed_packet_count == packet_count
+    if measured_bytes and all_flow_bytes_complete and packets_complete:
+        byte_coverage = "complete"
+    elif measured_bytes:
+        byte_coverage = "partial"
+    else:
+        byte_coverage = "unknown"
+    first_seen = _metric_timestamp(metrics.get("first_seen"))
+    last_seen = _metric_timestamp(metrics.get("last_seen"))
+    sample_timestamps = [
+        timestamp
+        for flow in flows
+        for timestamp in (_finite_timestamp(value) for value in _sample_sequence(flow.get("pkt_times")))
+        if timestamp is not None
+    ]
+    if first_seen is None or last_seen is None:
+        first_candidates = [_finite_timestamp(flow.get("first_ts")) for flow in flows]
+        last_candidates = [_finite_timestamp(flow.get("last_ts")) for flow in flows]
+        first_seen = (
+            first_seen
+            if first_seen is not None
+            else min((value for value in first_candidates if value is not None), default=None)
+        )
+        last_seen = (
+            last_seen
+            if last_seen is not None
+            else max((value for value in last_candidates if value is not None), default=None)
+        )
+    if (first_seen is None or last_seen is None) and sample_timestamps:
+        first_seen = first_seen if first_seen is not None else min(sample_timestamps)
+        last_seen = last_seen if last_seen is not None else max(sample_timestamps)
+    return {
+        "packet_count": packet_count,
+        "flow_count": len(flows),
+        "endpoint_count": len(
+            {
+                canonical
+                for flow in flows
+                for field in ("src", "dst")
+                if (canonical := _canonical_ip(flow.get(field))) is not None
+            }
+        ),
+        "parsed_traffic_bytes": parsed_traffic_bytes,
+        "parsed_packet_count": parsed_packet_count,
+        "capture_file_bytes": _capture_file_bytes(analysis.pcap_path),
+        "first_seen": first_seen,
+        "last_seen": last_seen,
+        "duration_seconds": (
+            round(max(0, last_seen - first_seen), 3) if first_seen is not None and last_seen is not None else None
+        ),
+        "byte_coverage": byte_coverage,
+    }
+
+
+def _protocol_distribution(flows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    rows: dict[str, dict[str, int]] = defaultdict(lambda: {"bytes": 0, "packets": 0, "flow_count": 0})
+    for flow in flows:
+        row = rows[str(flow.get("proto") or "Unknown").upper()]
+        byte_count, _ = _flow_stat_bytes(flow)
+        row["bytes"] += byte_count or 0
+        row["packets"] += _flow_packet_count(flow)
+        row["flow_count"] += 1
+    total_bytes = sum(row["bytes"] for row in rows.values())
+    return [
+        {"name": name, **row, "percent": round(row["bytes"] / total_bytes * 100, 2) if total_bytes else 0}
+        for name, row in sorted(rows.items(), key=lambda item: (-item[1]["bytes"], item[0]))
+    ]
+
+
+def _endpoint_ranking(flows: list[dict[str, Any]], limit: int = 10) -> list[dict[str, Any]]:
+    rows: dict[str, dict[str, int]] = defaultdict(
+        lambda: {"bytes": 0, "packets": 0, "flow_count": 0, "sent_bytes": 0, "received_bytes": 0}
+    )
+    for flow in flows:
+        byte_count, _ = _flow_stat_bytes(flow)
+        packets = _flow_packet_count(flow)
+        for field, direction in (("src", "sent_bytes"), ("dst", "received_bytes")):
+            ip = _canonical_ip(flow.get(field))
+            if ip is None:
+                continue
+            row = rows[ip]
+            row["bytes"] += byte_count or 0
+            row["packets"] += packets
+            row["flow_count"] += 1
+            row[direction] += byte_count or 0
+    return [
+        {"ip": ip, **row} for ip, row in sorted(rows.items(), key=lambda item: (-item[1]["bytes"], item[0]))[:limit]
+    ]
+
+
+def _traffic_replay(flows: list[dict[str, Any]], summary: dict[str, Any]) -> dict[str, Any]:
+    sampled: list[tuple[float, int, int]] = []
+    represented_packet_count = 0
+    sampled_flow_ids: set[int] = set()
+    for flow_index, flow in enumerate(flows):
+        timestamps = _sample_sequence(flow.get("pkt_times"))
+        has_valid_timestamp = False
+        for packet_index, timestamp_value in enumerate(timestamps):
+            timestamp = _finite_timestamp(timestamp_value)
+            if timestamp is None:
+                continue
+            has_valid_timestamp = True
+            sampled_flow_ids.add(flow_index)
+            sampled.append((timestamp, flow_index, packet_index))
+        if has_valid_timestamp:
+            represented_packet_count += _flow_packet_count(flow)
+    sampled.sort()
+    sampled_event_count = len(sampled)
+    truncated = sampled_event_count > _TRAFFIC_REPLAY_MAX_EVENTS
+    if truncated:
+        first_timestamp, last_timestamp = sampled[0][0], sampled[-1][0]
+        span = last_timestamp - first_timestamp
+        bucket_representatives: dict[int, int] = {}
+        for index, (timestamp, _, _) in enumerate(sampled):
+            bucket = (
+                min(
+                    _TRAFFIC_REPLAY_MAX_EVENTS - 1,
+                    int((timestamp - first_timestamp) / span * _TRAFFIC_REPLAY_MAX_EVENTS),
+                )
+                if span > 0
+                else 0
+            )
+            if bucket == 0:
+                bucket_representatives.setdefault(bucket, index)
+            else:
+                # Keep the final event for each later bucket so the final
+                # capture event remains visible when its bucket is occupied.
+                bucket_representatives[bucket] = index
+        selected_indices = set(bucket_representatives.values())
+        for rank in range(_TRAFFIC_REPLAY_MAX_EVENTS):
+            if len(selected_indices) >= _TRAFFIC_REPLAY_MAX_EVENTS:
+                break
+            selected_indices.add(rank * (sampled_event_count - 1) // (_TRAFFIC_REPLAY_MAX_EVENTS - 1))
+        if len(selected_indices) < _TRAFFIC_REPLAY_MAX_EVENTS:
+            for index in range(sampled_event_count):
+                if len(selected_indices) >= _TRAFFIC_REPLAY_MAX_EVENTS:
+                    break
+                selected_indices.add(index)
+        returned = [sampled[index] for index in sorted(selected_indices)]
+    else:
+        returned = sampled
+    first_seen = sampled[0][0] if sampled else None
+    events: list[dict[str, Any]] = []
+    if first_seen is not None:
+        for timestamp, flow_index, packet_index in returned:
+            flow = flows[flow_index]
+            lengths = _sample_sequence(flow.get("pkt_lens"))
+            # A timestamp sample is evidence of an observed packet even when
+            # the corresponding packet length was not retained.
+            events.append(
+                {
+                    "timestamp": timestamp,
+                    "offset_seconds": round(timestamp - first_seen, 6),
+                    "flow_id": f"flow-{flow_index + 1}",
+                    "src": str(flow.get("src") or ""),
+                    "dst": str(flow.get("dst") or ""),
+                    "sport": flow.get("sport"),
+                    "dport": flow.get("dport"),
+                    "protocol": str(flow.get("proto") or "Unknown").upper(),
+                    "sampled_length": _nonnegative_int(lengths[packet_index]) if packet_index < len(lengths) else None,
+                    "src_scope": _ip_scope(flow.get("src")),
+                    "dst_scope": _ip_scope(flow.get("dst")),
+                }
+            )
+    complete = (
+        bool(sampled)
+        and not truncated
+        and represented_packet_count == sampled_event_count
+        and summary["packet_count"] > 0
+        and represented_packet_count == summary["packet_count"]
+    )
+    return {
+        "events": events,
+        "sampled_event_count": sampled_event_count,
+        "returned_event_count": len(events),
+        "max_events": _TRAFFIC_REPLAY_MAX_EVENTS,
+        "truncated": truncated,
+        "sampled_flow_count": len(sampled_flow_ids),
+        "total_flow_count": len(flows),
+        "represented_packet_count": represented_packet_count,
+        "total_packet_count": summary["packet_count"],
+        "first_seen": first_seen,
+        "last_seen": sampled[-1][0] if sampled else None,
+        "coverage": "complete" if complete else "sampled" if sampled else "unavailable",
+    }
 
 
 def _latest_case_and_analysis(repo: CaseRepository) -> tuple[Case | None, Analysis | None]:
@@ -50,7 +340,7 @@ def _latest_case_and_analysis(repo: CaseRepository) -> tuple[Case | None, Analys
         if latest_case is None:
             latest_case = case
         for analysis in case.analyses:
-            if latest_analysis is None or analysis.analyzed_at > latest_analysis.analyzed_at:
+            if latest_analysis is None or analysis.sort_timestamp > latest_analysis.sort_timestamp:
                 latest_case = case
                 latest_analysis = analysis
     return latest_case, latest_analysis
@@ -136,7 +426,7 @@ def _protocol_rows(flows: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 
 def _flow_time_label(flow: dict[str, Any]) -> str | None:
-    times = flow.get("pkt_times") or []
+    times = _sample_sequence(flow.get("pkt_times"))
     timestamp = flow.get("first_ts") or (times[0] if times else None)
     if timestamp is None:
         return None
@@ -339,7 +629,10 @@ def _evidence_rows(analysis: Analysis | None) -> list[dict[str, Any]]:
                 "status": ioc.severity.value.title(),
                 "source": source,
             }
-            for ioc in analysis.iocs[:100]
+            for ioc in sorted(
+                analysis.iocs,
+                key=lambda item: {"critical": 0, "high": 1, "medium": 2, "low": 3}.get(item.severity.value, 4),
+            )[:100]
         ]
 
     artifacts = (analysis.features or {}).get("artifacts") or {}
@@ -363,7 +656,7 @@ def _evidence_rows(analysis: Analysis | None) -> list[dict[str, Any]]:
 def _raw_flow_rows(flows: list[dict[str, Any]], limit: int = 250) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     for flow in flows[:limit]:
-        times = flow.get("pkt_times") or []
+        times = _sample_sequence(flow.get("pkt_times"))
         timestamp = flow.get("first_ts") or (times[0] if times else None)
         try:
             first_seen = datetime.utcfromtimestamp(float(timestamp)).strftime("%H:%M:%S")
@@ -457,6 +750,34 @@ def _dashboard_state(analysis: Analysis | None) -> dict[str, Any]:
             "dns_analysis": {},
             "tls_analysis": {},
             "yara_results": {},
+            "capture_summary": {
+                "packet_count": 0,
+                "flow_count": 0,
+                "endpoint_count": 0,
+                "parsed_traffic_bytes": 0,
+                "parsed_packet_count": 0,
+                "capture_file_bytes": None,
+                "first_seen": None,
+                "last_seen": None,
+                "duration_seconds": None,
+                "byte_coverage": "unknown",
+            },
+            "protocol_distribution": [],
+            "endpoint_ranking": [],
+            "traffic_replay": {
+                "events": [],
+                "sampled_event_count": 0,
+                "returned_event_count": 0,
+                "max_events": _TRAFFIC_REPLAY_MAX_EVENTS,
+                "truncated": False,
+                "sampled_flow_count": 0,
+                "total_flow_count": 0,
+                "represented_packet_count": 0,
+                "total_packet_count": 0,
+                "first_seen": None,
+                "last_seen": None,
+                "coverage": "unavailable",
+            },
             "home": home,
         }
 
@@ -470,7 +791,7 @@ def _dashboard_state(analysis: Analysis | None) -> dict[str, Any]:
     tls = analysis.tls_analysis or {}
     cert_issues = int(_as_number(tls.get("self_signed"), 0) + _as_number(tls.get("expired"), 0))
     evidence = _evidence_rows(analysis)
-    alerts = sum(1 for item in evidence if str(item.get("status", "")).lower() in {"high", "critical"})
+    alerts = sum(1 for item in analysis.iocs if item.severity.value in {"high", "critical"})
     risk = "HIGH" if alerts or yara_issues else "MEDIUM" if beacons >= 3 or cert_issues else "LOW"
 
     packet_lengths: list[float] = []
@@ -478,8 +799,8 @@ def _dashboard_state(analysis: Analysis | None) -> dict[str, Any]:
     heatmap_buckets = [0] * 48
     timestamps: list[float] = []
     for flow in flows:
-        packet_lengths.extend(_as_number(value) for value in flow.get("pkt_lens") or [])
-        times = sorted(_as_number(value) for value in flow.get("pkt_times") or [])
+        packet_lengths.extend(_as_number(value) for value in _sample_sequence(flow.get("pkt_lens")))
+        times = sorted(_as_number(value) for value in _sample_sequence(flow.get("pkt_times")))
         timestamps.extend(times)
         inter_arrivals.extend(max(0, b - a) for a, b in zip(times, times[1:]))
     if timestamps:
@@ -493,6 +814,7 @@ def _dashboard_state(analysis: Analysis | None) -> dict[str, Any]:
         heatmap = []
 
     domains = Counter(str(value) for value in (features.get("artifacts") or {}).get("domains") or [])
+    capture_summary = _capture_summary(analysis, flows)
     return {
         "risk": risk,
         "packets": analysis.packet_count,
@@ -508,6 +830,9 @@ def _dashboard_state(analysis: Analysis | None) -> dict[str, Any]:
         "top_domains": [{"name": name, "value": value} for name, value in domains.most_common(10)],
         "map_flows": _map_flows(flows, analysis.osint or {}),
         "evidence": evidence,
+        "evidence_total": len(analysis.iocs)
+        if analysis.iocs
+        else sum(len(values) for values in ((features.get("artifacts") or {}).values()) if isinstance(values, list)),
         "packet_sizes": _histogram(packet_lengths),
         "inter_arrivals": _histogram(inter_arrivals, buckets=6),
         "heatmap": heatmap,
@@ -523,6 +848,10 @@ def _dashboard_state(analysis: Analysis | None) -> dict[str, Any]:
         "dns_analysis": analysis.dns_analysis or {},
         "tls_analysis": analysis.tls_analysis or {},
         "yara_results": analysis.yara_results or {},
+        "capture_summary": capture_summary,
+        "protocol_distribution": _protocol_distribution(flows),
+        "endpoint_ranking": _endpoint_ranking(flows),
+        "traffic_replay": _traffic_replay(flows, capture_summary),
         "home": home,
     }
 
@@ -545,9 +874,17 @@ def public_config() -> dict[str, Any]:
     return result
 
 
-def build_workbench_state(repo: CaseRepository) -> dict[str, Any]:
+def build_workbench_state(repo: CaseRepository, analysis_id: str | None = None) -> dict[str, Any]:
     """Create the single bootstrap payload used by the production workbench."""
     latest_case, latest_analysis = _latest_case_and_analysis(repo)
+    if analysis_id:
+        from fastapi import HTTPException
+
+        selected = repo.get_analysis(analysis_id)
+        if selected is None:
+            raise HTTPException(status_code=404, detail="analysis_not_found")
+        latest_analysis = selected
+        latest_case = repo.get_case(selected.case_id)
     cases = _serialize_cases(repo)
     jobs = _serialize_jobs(repo, {row["id"]: row["title"] for row in cases})
     dashboard = _dashboard_state(latest_analysis)
@@ -567,5 +904,9 @@ def build_workbench_state(repo: CaseRepository) -> dict[str, Any]:
         "cases": cases,
         "jobs": jobs,
         "config": public_config(),
-        "system": {"healthy": all(tool["ready"] for tool in tools), "tools": tools},
+        "system": {
+            "healthy": all(tool["ready"] for tool in tools),
+            "tools": tools,
+            "preserve_saved_data": os.getenv("PCAP_HUNTER_PRESERVE_SAVED_DATA") == "1",
+        },
     }

@@ -6,7 +6,7 @@ import gzip
 import json
 import sqlite3
 import uuid
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -372,6 +372,9 @@ class CaseRepository:
         Returns:
             True if the case existed and was deleted.
         """
+        from app.agents.evidence import EvidenceService
+
+        EvidenceService(self)  # Ensure the trusted deletion policy is current.
         conn = self._get_conn()
         try:
             # FK pragma is off (INSERT OR REPLACE in save_analysis would
@@ -389,6 +392,13 @@ class CaseRepository:
             conn.execute("DELETE FROM case_tags WHERE case_id = ?", (case_id,))
             conn.execute("DELETE FROM jobs WHERE case_id = ?", (case_id,))
             cur = conn.execute("DELETE FROM cases WHERE id = ?", (case_id,))
+            conn.execute(
+                "DELETE FROM evidence_records WHERE (analysis_id,snapshot_id) IN "
+                "(SELECT analysis_id,snapshot_id FROM evidence_snapshots WHERE case_id=?)",
+                (case_id,),
+            )
+            conn.execute("DELETE FROM evidence_snapshots WHERE case_id=?", (case_id,))
+            conn.execute("DELETE FROM agent_retries WHERE json_extract(response,'$.case_id')=?", (case_id,))
             conn.commit()
             logger.info("Deleted case and related data: %s", case_id)
             return cur.rowcount > 0
@@ -405,6 +415,9 @@ class CaseRepository:
         Returns:
             True if cleared successfully.
         """
+        from app.agents.evidence import EvidenceService
+
+        EvidenceService(self)
         conn = self._get_conn()
         try:
             conn.execute("DELETE FROM notes")
@@ -414,6 +427,10 @@ class CaseRepository:
             conn.execute("DELETE FROM tags")
             conn.execute("DELETE FROM jobs")
             conn.execute("DELETE FROM cases")
+            conn.execute("DELETE FROM evidence_records")
+            conn.execute("DELETE FROM evidence_snapshots")
+            conn.execute("DELETE FROM agent_retries")
+            conn.execute("UPDATE agent_keys SET cases='[]'")
             conn.commit()
             logger.info("Cleared all case data from database")
             return True
@@ -438,6 +455,9 @@ class CaseRepository:
         if not analysis.id:
             analysis.id = str(uuid.uuid4())[:12]
 
+        from app.agents.evidence import EvidenceService
+
+        evidence = EvidenceService(self)
         conn = self._get_conn()
         try:
             # Compress JSON fields
@@ -508,6 +528,9 @@ class CaseRepository:
                 ],
             )
 
+            evidence.capture(
+                analysis, provenance=(analysis.session_artifacts or {}).get("evidence_provenance"), connection=conn
+            )
             conn.commit()
             logger.info("Saved analysis: %s", analysis.id)
             return analysis.id
@@ -796,7 +819,7 @@ class CaseRepository:
             pcap_path=row.get("pcap_path") or "",
             pcap_hash=row.get("pcap_hash") or "",
             packet_count=row.get("packet_count") or 0,
-            analyzed_at=analyzed_at or datetime.now(),
+            analyzed_at=analyzed_at or datetime.now(timezone.utc),
             features=features,
             osint=osint,
             report=row.get("report_md") or "",
@@ -1012,7 +1035,7 @@ class CaseRepository:
         finally:
             conn.close()
 
-    def complete_job(self, job_id: str, result_json: bytes) -> None:
+    def complete_job(self, job_id: str, result_json: bytes, *, only_active: bool = False) -> bool:
         """Mark a job done and reconcile its progress in one atomic write.
 
         Skipped stages never emit progress events, so a finished job would
@@ -1021,14 +1044,15 @@ class CaseRepository:
         now = datetime.now().isoformat()
         conn = self._get_conn()
         try:
-            conn.execute(
+            cur = conn.execute(
                 "UPDATE jobs SET status='done', finished_at=?, heartbeat_at=?, error_code=NULL, "
                 "error_detail=NULL, result_json=?, progress_stage='Complete', progress_done=progress_total, "
                 "progress_percent=100, progress_message='All stages completed' "
-                "WHERE id=?",
+                "WHERE id=?" + (" AND status IN ('queued','running')" if only_active else ""),
                 (now, now, result_json, job_id),
             )
             conn.commit()
+            return cur.rowcount > 0
         finally:
             conn.close()
 

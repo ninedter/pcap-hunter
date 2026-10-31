@@ -1,60 +1,125 @@
 name: CI
-
 on:
   push:
     branches: [main]
   pull_request:
     branches: [main]
-
 permissions:
   contents: read
-
-# Superseded runs on the same ref are cancelled — saves runner minutes on
-# rapid successive pushes to a PR branch.
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
-
 jobs:
-  test:
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
+  platform-test:
+    name: Native ${{ matrix.arch }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-latest
+            platform: linux/amd64
+            arch: amd64
+            machine: x86_64
+          - runner: ubuntu-24.04-arm
+            platform: linux/arm64
+            arch: arm64
+            machine: aarch64
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
     steps:
-      - name: Check out repository
-        uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
-          # No later step needs git credentials — don't leave the token in
-          # .git/config while pip build hooks and the test suite execute.
           persist-credentials: false
-
-      - name: Set up Python 3.11
-        uses: actions/setup-python@v6
-        with:
-          python-version: "3.11"
-          cache: pip
-
-      # Mirrors the Dockerfile runtime apt set, minus zeek (external OBS repo;
-      # zeek-dependent e2e tests also need pcap samples that aren't checked in,
-      # so they skip in CI either way):
-      # - tshark: packet parsing (pulls wireshark-common + libpcap)
-      # - libpango/cairo/gdk-pixbuf/mime/fonts: WeasyPrint PDF test suite
-      # (kaleido 0.2.1 bundles its own headless Chromium — no system browser)
-      - name: Install system dependencies
+      - name: Reclaim unused hosted-runner SDK space for native builds
         run: |
-          sudo apt-get update
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-            tshark \
-            libpango-1.0-0 libpangocairo-1.0-0 libcairo2 libgdk-pixbuf-2.0-0 \
-            shared-mime-info fonts-dejavu-core
+          # These preinstalled SDKs are not used by this Linux container project.
+          sudo rm -rf /usr/local/lib/android /opt/ghc /usr/share/dotnet
+          df -h /
+      - name: Record native runner identity
+        run: |
+          mkdir -p .ci-evidence
+          test "$(uname -m)" = "${{ matrix.machine }}"
+          uname -a > .ci-evidence/runner.txt
+          docker version >> .ci-evidence/runner.txt
+          git rev-parse HEAD > .ci-evidence/tested-commit.txt
+      - name: Set up native Buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4
+      - name: Build canonical test image
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
+        with:
+          context: .
+          platforms: ${{ matrix.platform }}
+          target: test
+          tags: pcap-hunter:test
+          load: true
+          cache-from: type=gha,scope=pcap-hunter-${{ matrix.arch }}
+          cache-to: type=gha,scope=pcap-hunter-${{ matrix.arch }},mode=max
+      - name: Python checks and offline PDF/security tests
+        run: docker run --rm --network none --no-healthcheck pcap-hunter:test
+      - name: Build frontend and test browser logic
+        run: |
+          docker buildx build --load --platform ${{ matrix.platform }} --target web-builder -t pcap-hunter:web-test .
+          docker run --rm \
+            -v "$GITHUB_WORKSPACE/prototype-friendly-ui/tests:/web/tests:ro" \
+            -v "$GITHUB_WORKSPACE/prototype-friendly-ui/scripts:/web/scripts:ro" \
+            -v "$GITHUB_WORKSPACE/prototype-friendly-ui/worker:/web/worker:ro" \
+            -v "$GITHUB_WORKSPACE/prototype-friendly-ui/.openai:/web/.openai:ro" \
+            --entrypoint sh pcap-hunter:web-test -c 'npm run build && npm run test:ui && npm audit --omit=dev'
+      - name: Build runtime candidate
+        run: docker buildx build --load --platform ${{ matrix.platform }} --target runtime -t pcap-hunter:candidate .
+      - name: Real per-job filesystem, process and network isolation controls
+        run: |
+          socket_gid=$(stat -c '%g' /var/run/docker.sock)
+          docker run --rm --network none --group-add "$socket_gid" \
+            -v /var/run/docker.sock:/var/run/docker.sock:ro \
+            -e PCAP_HUNTER_TEST_IMAGE=pcap-hunter:candidate \
+            --entrypoint python pcap-hunter:test tests/acceptance/worker_isolation.py
+      - name: Verify patched native and bundled components
+        run: |
+          test "$(docker image inspect pcap-hunter:candidate --format '{{.Os}}/{{.Architecture}}')" = "${{ matrix.platform }}"
+          docker image inspect pcap-hunter:candidate --format '{{.Id}}' > .ci-evidence/runtime-image.txt
+          docker run --rm --network none pcap-hunter:candidate python /usr/share/pcap-hunter/verify_runtime.py > .ci-evidence/native-runtime.json
+          cat .ci-evidence/native-runtime.json
+      - name: Actual offline parser, chart and PDF controls
+        run: |
+          docker run --rm --network none --read-only --tmpfs /tmp:rw,nosuid,nodev,size=1g,mode=1777 \
+            --cap-drop ALL --security-opt no-new-privileges:true \
+            -v "$GITHUB_WORKSPACE/tests/fixtures:/fixtures:ro" \
+            -v "$GITHUB_WORKSPACE/tests/acceptance/native_runtime.py:/native-runtime.py:ro" \
+            --entrypoint python pcap-hunter:candidate /native-runtime.py > .ci-evidence/native-controls.json
+          cat .ci-evidence/native-controls.json
+      - name: Scan resolved runtime and generate SBOM
+        run: |
+          mkdir -p .ci-evidence
+          cp docker/native-components.json .ci-evidence/
+          TRIVY_IMAGE=aquasec/trivy:0.76.1@sha256:790fd66d1697395d8693d1acaa1ea702406a20f109b6fc7bac8db623eca6c06c
+          docker run --rm -v /var/run/docker.sock:/var/run/docker.sock -v "${{ runner.temp }}/trivy-cache:/root/.cache/trivy" -v "$PWD/.ci-evidence:/results" "$TRIVY_IMAGE" image --scanners vuln,secret,misconfig --image-config-scanners misconfig,secret --format json --output /results/runtime-scan.json pcap-hunter:candidate
+          docker run --rm -v /var/run/docker.sock:/var/run/docker.sock -v "${{ runner.temp }}/trivy-cache:/root/.cache/trivy" -v "$PWD/.ci-evidence:/results" "$TRIVY_IMAGE" image --format cyclonedx --output /results/sbom.json pcap-hunter:candidate
+          docker run --rm -v /var/run/docker.sock:/var/run/docker.sock -v "${{ runner.temp }}/trivy-cache:/root/.cache/trivy" "$TRIVY_IMAGE" image --scanners vuln --severity HIGH,CRITICAL --exit-code 1 pcap-hunter:candidate
+          docker run --rm -v /var/run/docker.sock:/var/run/docker.sock -v "${{ runner.temp }}/trivy-cache:/root/.cache/trivy" "$TRIVY_IMAGE" image --scanners secret --exit-code 1 pcap-hunter:candidate
+      - name: Require complete release evidence
+        run: |
+          for file in runner.txt tested-commit.txt runtime-image.txt native-runtime.json native-controls.json runtime-scan.json sbom.json native-components.json; do
+            test -s ".ci-evidence/$file"
+          done
+      - name: Retain complete scan results including unfixed advisories
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: candidate-security-evidence-${{ matrix.arch }}
+          path: .ci-evidence/
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 14
 
-      - name: Install Python dependencies
-        run: pip install -r requirements.txt
-
-      - name: Run tests with coverage
-        run: PYTHONPATH=. pytest tests/ -v --cov=app
-
-      - name: Ruff lint
-        run: ruff check .
-
-      - name: Ruff format check
-        run: ruff format --check .
+  # Preserve the required check name while requiring both native platform jobs.
+  test:
+    needs: platform-test
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Require every platform gate
+        env:
+          PLATFORM_RESULT: ${{ needs.platform-test.result }}
+        run: test "$PLATFORM_RESULT" = success

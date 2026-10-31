@@ -318,3 +318,7 @@ Programmatic keys for the Integrations API are managed in the separate **API Key
 | OSINT pill ➖ *no data* | Provider has no records for these indicators | Nothing to fix — that's an honest negative, not an error |
 | PDF generation error (standalone macOS/Linux) | WeasyPrint system libraries missing | macOS: `brew install pango glib cairo`; Linux: install the `libpango`/`libcairo` set (the installer does this). Docker images include them |
 | Dashboard panel shows 📭 after loading a case | That artifact isn't persisted in cases | Re-run the original PCAP to regenerate it |
+
+## Agent-assisted investigations
+
+Use **Settings → Agent access** to grant expiring access to selected cases. Investigate now provides saved-analysis selection, complete paginated evidence and flows, and cited-record details. Read the [agent setup and safety limits](../AGENT_USAGE.md) before enabling offline submissions or draft notes. The browser workbench remains local-only.

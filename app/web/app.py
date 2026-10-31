@@ -7,16 +7,20 @@ approved prototype can become the real product without browser-side API keys.
 from __future__ import annotations
 
 import ipaddress
+import logging
 import os
 import pathlib
 import uuid
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import date, datetime
+from itertools import islice
 from typing import Any
+from urllib.parse import urlparse
 
 from fastapi import FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, JSONResponse
+from starlette.concurrency import run_in_threadpool
 
 from app import config as C
 from app.api.deps import get_queue, get_repo, get_settings
@@ -27,7 +31,11 @@ from app.database.models import Case, CaseStatus, Severity
 from app.utils.config_manager import SENSITIVE_KEYS, get_config_manager
 from app.utils.geo_data import get_cities, get_continents, get_countries, get_location_details
 from app.utils.network_utils import _validate_domain, get_whois_info, is_public_ipv4
+from app.web.agent_routes import router as local_agent_router
+from app.web.security import LocalWorkbenchMiddleware
 from app.web.state import build_workbench_state
+
+logger = logging.getLogger(__name__)
 
 STATIC_DIR = pathlib.Path(__file__).with_name("static")
 UPLOADS_DIR_DEFAULT = pathlib.Path("data/api_uploads")
@@ -54,6 +62,119 @@ CONFIG_KEYS = {
     "cfg_home_city",
     *SENSITIVE_KEYS,
 }
+
+_LLM_PROVIDERS = {"lmstudio", "openai", "anthropic"}
+_LLM_PROVIDER_LABELS = {
+    "lmstudio": "LM Studio",
+    "openai": "OpenAI",
+    "anthropic": "Anthropic",
+}
+_LLM_MODEL_LIMIT = 100
+
+
+def _draft_value(payload: dict[str, Any], key: str, saved_value: Any) -> str:
+    """Use a non-empty browser draft, otherwise the saved value.
+
+    Connection checks must be useful before users save settings.  Draft values
+    are deliberately kept request-local and never passed to the config manager.
+    """
+    if key in payload and payload[key] is not None:
+        if not isinstance(payload[key], str):
+            raise HTTPException(status_code=422, detail=f"{key}_must_be_a_string")
+        value = payload[key].strip()
+        if value:
+            return value
+    return str(saved_value or "").strip()
+
+
+def _model_ids(response: Any) -> list[str]:
+    """Extract a bounded, stable list of model IDs from either provider SDK."""
+    items = getattr(response, "data", response)
+    ids: set[str] = set()
+    for item in islice(items, _LLM_MODEL_LIMIT):
+        value = item if isinstance(item, str) else getattr(item, "id", "")
+        model_id = str(value).strip()
+        if model_id:
+            ids.add(model_id)
+    return sorted(ids)[:_LLM_MODEL_LIMIT]
+
+
+def _validated_model_base_url(value: str) -> str:
+    """Accept only normal HTTP(S) API URLs before an SDK opens a connection."""
+    try:
+        parsed = urlparse(value)
+        port = parsed.port
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail="invalid_model_api_url") from exc
+    hostname = parsed.hostname or ""
+    if (
+        parsed.scheme not in {"http", "https"}
+        or not parsed.netloc
+        or not hostname
+        or hostname != hostname.strip()
+        or parsed.username is not None
+        or parsed.password is not None
+        or port is not None
+        and not 1 <= port <= 65535
+    ):
+        raise HTTPException(status_code=422, detail="invalid_model_api_url")
+    if parsed.query or parsed.fragment:
+        raise HTTPException(status_code=422, detail="invalid_model_api_url")
+    try:
+        address = ipaddress.ip_address(hostname)
+    except ValueError:
+        pass
+    else:
+        if address.is_link_local or address.is_unspecified or address.is_multicast:
+            raise HTTPException(status_code=422, detail="invalid_model_api_url")
+    return value
+
+
+def _destination_key(payload, saved_key, base_url, saved_url):
+    explicit = _draft_value(payload, "api_key", "")
+    if explicit:
+        return explicit
+    # A stored key belongs only to its saved destination, never a new draft URL.
+    return str(saved_key or "") if base_url.rstrip("/") == saved_url.rstrip("/") else ""
+
+
+def _discover_llm_models(provider: str, *, base_url: str, api_key: str) -> list[str]:
+    """Call a provider's official model-list API without persisting secrets."""
+    import httpx
+
+    transport = httpx.Client(follow_redirects=False, trust_env=False, timeout=C.LLM_PROBE_TIMEOUT_SECONDS)
+    if provider == "anthropic":
+        import anthropic
+
+        client = anthropic.Anthropic(
+            api_key=api_key,
+            base_url="https://api.anthropic.com",
+            http_client=transport,
+            timeout=C.LLM_PROBE_TIMEOUT_SECONDS,
+        )
+        try:
+            return _model_ids(client.models.list(limit=_LLM_MODEL_LIMIT))
+        finally:
+            client.close()
+
+    from app.llm import client as llm_client
+
+    normalized_url = llm_client._normalize_base_url(
+        base_url,
+        local_compatible=provider == "lmstudio",
+    )
+    client = llm_client.OpenAI(
+        base_url=normalized_url,
+        # LM Studio accepts an arbitrary key, but cloud OpenAI must receive
+        # only an actual configured key. The route rejects its empty-key case.
+        api_key=(api_key or "lm-studio") if provider == "lmstudio" else api_key,
+        timeout=C.LLM_PROBE_TIMEOUT_SECONDS,
+        http_client=transport,
+    )
+    try:
+        return _model_ids(client.models.list())
+    finally:
+        client.close()
 
 
 @asynccontextmanager
@@ -145,14 +266,16 @@ def _create_batch_case(names: list[str], *, path_submission: bool = False) -> Ca
 
 def create_app() -> FastAPI:
     app = FastAPI(title="PCAP Threat Hunting Workbench", docs_url=None, redoc_url=None, lifespan=_lifespan)
+    app.add_middleware(LocalWorkbenchMiddleware)
+    app.include_router(local_agent_router)
 
     @app.get("/healthz")
     def health() -> dict[str, str]:
         return {"status": "ok"}
 
     @app.get("/api/ui/bootstrap")
-    def bootstrap() -> JSONResponse:
-        return JSONResponse(build_workbench_state(get_repo()))
+    def bootstrap(analysis_id: str | None = None) -> JSONResponse:
+        return JSONResponse(build_workbench_state(get_repo(), analysis_id=analysis_id))
 
     @app.get("/api/ui/cases/{case_id}")
     def case_detail(case_id: str) -> JSONResponse:
@@ -334,6 +457,81 @@ def create_app() -> FastAPI:
             current[key] = value
         manager.save({key: value for key, value in current.items() if key in CONFIG_KEYS})
         return JSONResponse({"saved": True})
+
+    @app.post("/api/ui/llm/models")
+    async def discover_llm_models(request: Request) -> JSONResponse:
+        """Fetch a provider's model list for the settings form.
+
+        The client may supply unsaved values while editing settings.  They are
+        used for this single request only and are never returned or persisted.
+        """
+        try:
+            payload = await request.json()
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(status_code=422, detail="llm_model_request_required") from exc
+        if not isinstance(payload, dict):
+            raise HTTPException(status_code=422, detail="llm_model_request_required")
+
+        raw_provider = payload.get("provider")
+        if not isinstance(raw_provider, str) or raw_provider not in _LLM_PROVIDERS:
+            raise HTTPException(status_code=422, detail="unsupported_llm_provider")
+        provider = raw_provider
+        saved = get_config_manager().load()
+
+        if provider == "lmstudio":
+            base_url = _draft_value(payload, "base_url", saved.get("cfg_llm_endpoint"))
+            api_key = _destination_key(
+                payload, saved.get("cfg_openai_key"), base_url, str(saved.get("cfg_llm_endpoint") or "")
+            )
+            if not base_url:
+                raise HTTPException(status_code=422, detail="llm_base_url_required")
+            base_url = _validated_model_base_url(base_url)
+        elif provider == "openai":
+            base_url = _draft_value(payload, "base_url", saved.get("cfg_openai_base_url"))
+            base_url = _validated_model_base_url(base_url or "https://api.openai.com/v1")
+            api_key = _destination_key(
+                payload,
+                saved.get("cfg_openai_cloud_key"),
+                base_url,
+                str(saved.get("cfg_openai_base_url") or "https://api.openai.com/v1"),
+            )
+            if not api_key:
+                raise HTTPException(status_code=422, detail="openai_api_key_required")
+        else:
+            # Anthropic's official SDK does not accept a user supplied base URL.
+            base_url = ""
+            api_key = _draft_value(payload, "api_key", saved.get("cfg_anthropic_key"))
+            if not api_key:
+                raise HTTPException(status_code=422, detail="anthropic_api_key_required")
+
+        try:
+            models = _model_ids(
+                await run_in_threadpool(
+                    _discover_llm_models,
+                    provider,
+                    base_url=base_url,
+                    api_key=api_key,
+                )
+            )
+        except HTTPException:
+            raise
+        except Exception:
+            # Provider SDK errors can include request URLs and authorization
+            # details; do not expose or log them from this UI endpoint.
+            logger.warning("Model discovery failed for LLM provider %s", provider)
+            return JSONResponse(
+                {
+                    "models": [],
+                    "message": "Could not retrieve models. Check the provider settings and try again.",
+                },
+                status_code=502,
+            )
+
+        label = _LLM_PROVIDER_LABELS[provider]
+        message = f"{label} returned {len(models)} model{'s' if len(models) != 1 else ''}."
+        if not models:
+            message = f"{label} returned no models."
+        return JSONResponse({"models": models, "message": message})
 
     @app.get("/{asset_path:path}")
     def frontend(asset_path: str) -> FileResponse:

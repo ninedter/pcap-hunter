@@ -149,6 +149,13 @@ class TestFlattenDict:
 class TestCSVInjectionProtection:
     """Test CSV injection protection for security."""
 
+    @pytest.mark.parametrize("value", [" =1+1", "\ufeff\t@SUM(A1)", "\x00 +1", "＝1+1", "\rdata"])
+    def test_spreadsheet_ignored_prefixes(self, value):
+        from app.api.routers.iocs import _csv_safe
+
+        assert _sanitize_csv_value(value) == "'" + value
+        assert _csv_safe(value) == "'" + value
+
     def test_sanitize_formula_equals(self):
         """Sanitize values starting with equals sign."""
         result = _sanitize_csv_value("=cmd|'/c calc'!A1")

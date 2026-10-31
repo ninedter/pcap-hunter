@@ -1,0 +1,3 @@
+# Used only while compiling the pinned XML binding; removed from runtime.
+setuptools>=80.9,<100
+wheel>=0.45,<1

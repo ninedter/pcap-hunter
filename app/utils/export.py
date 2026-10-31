@@ -5,11 +5,12 @@ from __future__ import annotations
 import csv
 import io
 import json
+import re
 from datetime import datetime
 from typing import Any
 
 # Characters that trigger formula execution in spreadsheet apps
-_CSV_DANGEROUS_PREFIXES = ("=", "+", "-", "@", "\t", "\r", "\n")
+_CSV_FORMULA = re.compile(r"^[\s\x00-\x1f\ufeff]*[=+\-@＝＋－＠]")
 _MAX_EXPORT_ROWS = 100000  # Prevent memory exhaustion
 
 
@@ -32,7 +33,7 @@ def _sanitize_csv_value(value: Any) -> str:
     str_value = str(value)
 
     # Neutralize dangerous prefixes by prepending a single quote
-    if str_value and str_value[0] in _CSV_DANGEROUS_PREFIXES:
+    if str_value.startswith(("\t", "\r", "\n")) or _CSV_FORMULA.match(str_value):
         return f"'{str_value}"
 
     return str_value

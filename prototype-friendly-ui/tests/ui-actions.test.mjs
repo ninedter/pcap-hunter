@@ -46,3 +46,10 @@ test("ATT&CK Navigator export carries confidence, evidence, and limitations", ()
   assert.match(layer.techniques[0].comment, /Network-only hypothesis/);
   assert.equal(layer.metadata[0].value, "case-1");
 });
+
+
+test("IOC CSV cannot activate formulas or tab-prefixed spreadsheet input", () => {
+  const csv = buildIocCsv([{ value: "=HYPERLINK(\"https://example.invalid\")", type: "URL", context: "\t=1+1", status: "Observed", source: "sample" }]);
+  assert.ok(csv.includes("\"'=HYPERLINK"));
+  assert.ok(csv.includes("\"'\t=1+1\""));
+});

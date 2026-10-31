@@ -295,9 +295,7 @@ def restore_analyses_to_session(analyses: list[Analysis]) -> None:
         logger.warning("Could not rebuild restored ATT&CK state: %s", exc)
         st.session_state["attack_mapping"] = None
         st.session_state["capture_metrics"] = build_capture_metrics(st.session_state)
-    st.session_state["restored_analysis_id"] = max(
-        analyses, key=lambda analysis: analysis.analyzed_at or datetime.min
-    ).id
+    st.session_state["restored_analysis_id"] = max(analyses, key=lambda analysis: analysis.sort_timestamp).id
     st.session_state["restored_analysis_ids"] = [analysis.id for analysis in analyses]
 
 
@@ -464,7 +462,7 @@ def _render_case_detail(case_id: str):
     # The rerun is needed because the Dashboard tab renders earlier in the
     # script pass and would otherwise show stale data until the next rerun.
     if case.analyses:
-        latest = max(case.analyses, key=lambda a: a.analyzed_at or datetime.min)
+        latest = max(case.analyses, key=lambda a: a.sort_timestamp)
         if st.session_state.get("restored_analysis_id") != latest.id:
             _restore_analysis_to_session(latest)
             st.rerun()

@@ -1,0 +1,50 @@
+{
+  "schema_version": 1,
+  "reviewed_at": "2026-10-28",
+  "runtime_distribution": {
+    "id": "wolfi",
+    "repository": "https://packages.wolfi.dev/os",
+    "signing_key_sha256": "f0031424cf46f7db780ce63a45f0fd6aa6f85f601e6bb3b7a91fe3d4d5b7d2cc"
+  },
+  "components": [
+    {
+      "name": "zeek",
+      "version": "9.0.1",
+      "source": "https://download.zeek.org/zeek-9.0.1.tar.gz",
+      "sha256": "fbee2eb5ee6ebd64ef0db830fbb9fa1d702d58807643c719e8338a59329197f2",
+      "license": "BSD-3-Clause",
+      "external_components": [
+        {
+          "name": "c-ares",
+          "minimum_version": "1.34.9",
+          "linkage": "System shared library; bundled 1.34.8 is not compiled or shipped",
+          "license": "MIT"
+        }
+      ]
+    },
+    {
+      "name": "tshark",
+      "version": "4.6.9",
+      "source": "https://www.wireshark.org/download/src/wireshark-4.6.9.tar.xz",
+      "sha256": "d062d416a1ab3a49975aafe3a671c882dde0562ccd71b078808ceb59d465fc0f",
+      "license": "GPL-2.0-or-later"
+    },
+    {
+      "name": "chrome-headless-shell",
+      "version": "156.0.8078.73",
+      "source": "https://storage.googleapis.com/chrome-for-testing-public/156.0.8078.73/{platform}/chrome-headless-shell-{platform}.zip",
+      "bundles": {
+        "linux-arm64": "98c084708f0f1fa4ed589ad601cc79b437f0cebe60ffc9794af78a085c01a2a7",
+        "linux64": "77eb8d52798efc7a857ab61abcc62a456d8ea9635b02341d06dffee2761768c8"
+      },
+      "license": "See LICENSE.headless_shell in browser bundle"
+    },
+    {
+      "name": "lxml",
+      "version": "6.1.3",
+      "source": "https://pypi.org/project/lxml/6.1.3/",
+      "hashes": "requirements.lock",
+      "linkage": "Built from source against runtime libxml2 >= 2.15.4; upstream binary wheels are intentionally not used."
+    }
+  ]
+}

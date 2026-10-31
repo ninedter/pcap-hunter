@@ -315,3 +315,7 @@ PCAP Hunter 執行 10 階段管道：
 | OSINT 標籤 ➖ *no data* | 供應商沒有這些指標的紀錄 | 不需處理——這是誠實的陰性結果，不是錯誤 |
 | PDF 產生錯誤（獨立安裝的 macOS/Linux） | 缺少 WeasyPrint 系統函式庫 | macOS：`brew install pango glib cairo`；Linux：安裝 `libpango`/`libcairo` 系列（安裝程式會處理）。Docker 映像檔已內含 |
 | 載入案件後儀表板面板顯示 📭 | 該產物未保存在案件中 | 重新分析原始 PCAP 即可重新產生 |
+
+## 代理協助調查
+
+在 **Settings → Agent access** 指定案件、權限及到期時間。Investigate 支援選擇已儲存的分析、分頁檢視完整證據與流量，以及開啟引用證據。啟用離線擷取提交或草稿筆記前，請先閱讀[代理使用說明與限制](AGENT_USAGE.md)。瀏覽器工作台僅供本機使用。

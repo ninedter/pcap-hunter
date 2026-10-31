@@ -1,6 +1,6 @@
 {
   "name": "prototype-friendly-ui",
-  "version": "3.0.0",
+  "version": "3.1.0",
   "private": true,
   "type": "module",
   "scripts": {
@@ -20,10 +20,10 @@
     "react-markdown": "^10.1.0",
     "recharts": "^3.10.1",
     "remark-gfm": "^4.0.1",
-    "vite": "6.4.3",
+    "vite": "6.4.5",
     "world-atlas": "^2.0.2"
   },
   "overrides": {
-    "postcss": "8.5.18"
+    "postcss": "8.5.23"
   }
 }

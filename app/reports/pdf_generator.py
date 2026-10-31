@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import html
 import os
 import re
@@ -53,7 +54,8 @@ _ensure_dyld_path()
 # because system libs like libgobject aren't discoverable). Either way we
 # fall back to graceful degradation instead of crashing the app.
 try:
-    from weasyprint import CSS, HTML
+    from weasyprint import CSS, HTML, URLFetcher
+    from weasyprint.urls import URLFetcherResponse
 
     WEASYPRINT_AVAILABLE = True
     WEASYPRINT_ERROR: str | None = None
@@ -61,6 +63,24 @@ except (ImportError, OSError) as _e:
     WEASYPRINT_AVAILABLE = False
     WEASYPRINT_ERROR = str(_e)
     logger.warning("WeasyPrint unavailable — PDF generation disabled: %s", _e)
+
+
+if WEASYPRINT_AVAILABLE:
+
+    class _ReportURLFetcher(URLFetcher):
+        """Decode embedded PNGs directly; never invoke a network/file handler."""
+
+        def fetch(self, url, headers=None):
+            prefix = "data:image/png;base64,"
+            if not url.startswith(prefix) or len(url) > 10 * 1024 * 1024:
+                raise ValueError("External report resources are disabled")
+            body = base64.b64decode(url[len(prefix) :], validate=True)
+            return URLFetcherResponse(url, body, {"Content-Type": "image/png"})
+
+    _report_url_fetcher = _ReportURLFetcher(allowed_protocols={"data"}, allow_redirects=False)
+else:
+    _report_url_fetcher = None
+
 
 try:
     import markdown
@@ -221,8 +241,8 @@ class PDFReportGenerator:
             )
 
             # Generate PDF with accurate page count
-            html = HTML(string=html_content)
-            css = CSS(string=self._get_styles())
+            html = HTML(string=html_content, url_fetcher=_report_url_fetcher)
+            css = CSS(string=self._get_styles(), url_fetcher=_report_url_fetcher)
 
             # Render to get accurate page count
             document = html.render(stylesheets=[css])

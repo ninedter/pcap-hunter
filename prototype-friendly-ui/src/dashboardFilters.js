@@ -1,7 +1,26 @@
 export function formatTrafficBytes(value) {
   const bytes = Math.max(0, Number(value) || 0);
-  if (bytes >= 1_048_576) return `${(bytes / 1_048_576).toFixed(1)} MB`;
-  return `${Math.max(1, Math.floor(bytes / 1024))} KB`;
+  if (bytes === 0) return "0 B";
+  if (bytes < 1024) return `${Math.floor(bytes)} B`;
+  if (bytes >= 1_048_576) return `${(bytes / 1_048_576).toFixed(1)} MiB`;
+  return `${(bytes / 1024).toFixed(1)} KiB`;
+}
+
+function normalizedSearch(search = "") {
+  if (!search) return "";
+  return search.startsWith("?") ? search : `?${search}`;
+}
+
+export function buildScreenRoute(screen, search = "") {
+  return `${screen === "analyze" ? "/" : `/${screen}`}${normalizedSearch(search)}`;
+}
+
+export function buildDashboardViewRoute(target, search = "") {
+  return `/dashboard${normalizedSearch(search)}#${target}`;
+}
+
+export function isCurrentRoute(pathname = "", search = "", target = "") {
+  return `${pathname}${normalizedSearch(search)}` === target;
 }
 
 export function filterDashboardMapFlows(flows, { query = "", protocol = "All", time = "" } = {}) {

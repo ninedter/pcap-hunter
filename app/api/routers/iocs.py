@@ -15,6 +15,7 @@ from fastapi.responses import Response
 
 from app.api.deps import get_repo, require_feed_scope
 from app.api.feed import IOCFilter, query_iocs
+from app.utils.export import _sanitize_csv_value
 
 router = APIRouter(prefix="/api/v1", tags=["egress"])
 
@@ -122,9 +123,7 @@ CSV_HEADER = [
 
 def _csv_safe(value: str) -> str:
     """Prefix values that would be interpreted as a formula by Excel/Sheets."""
-    if value and value[0] in ("=", "+", "-", "@"):
-        return "'" + value
-    return value
+    return _sanitize_csv_value(value)
 
 
 @router.get("/iocs.csv")

@@ -82,6 +82,10 @@ class JobQueue(ABC):
         """Cleanly stop accepting new jobs and optionally wait for in-flight to finish."""
 
 
+class EvidencePersistenceError(RuntimeError):
+    """The job produced data but its evidence receipt was not safely stored."""
+
+
 class QueueFullError(Exception):
     """Raised when the queue's depth cap is exceeded."""
 
@@ -439,6 +443,8 @@ def _persist_analysis(
                 "pipeline_warnings": result.warnings,
             }
         )
+        from app.agents.provenance import capture_provenance
+
         analysis = Analysis(
             case_id=job.case_id,
             pcap_path=pcap_path,
@@ -453,6 +459,7 @@ def _persist_analysis(
             attack_mapping=result.attack_mapping,
             capture_metrics=result.capture_metrics,
             session_artifacts={
+                "evidence_provenance": capture_provenance(job, json.loads(job.options_json or "{}")),
                 "zeek_tables": {name: _json_safe_records(table) for name, table in (result.zeek_tables or {}).items()},
                 "zeek_log_paths": dict(result.zeek_log_paths or {}),
                 "carved": list(result.carved_items or []),
@@ -575,6 +582,8 @@ def _worker_run(job_id: str, db_path: str, pcap_path: str, options_dict: dict) -
         _run_llm_stage(result, opts, job_id, repo, osint_data, yara_results)
 
         _persist_analysis(result, job, pcap_path, osint_data, yara_results, repo)
+        if result.analysis_id is None:
+            raise EvidencePersistenceError("Evidence persistence did not complete; the job cannot be marked done.")
 
         result_blob = json.dumps(result.to_dict()).encode("utf-8")
         repo.complete_job(job_id, result_blob)
@@ -583,7 +592,7 @@ def _worker_run(job_id: str, db_path: str, pcap_path: str, options_dict: dict) -
         repo.update_job_status(
             job_id,
             JS.FAILED,
-            error_code="pipeline_error",
+            error_code="evidence_persistence_failed" if isinstance(exc, EvidencePersistenceError) else "pipeline_error",
             error_detail=str(exc)[:500],
         )
 
@@ -608,14 +617,21 @@ class InProcessJobQueue(JobQueue):
         )
         job_id = self._repo.create_job(job)
 
-        self._executor.submit(
-            _worker_run,
-            job_id,
-            str(self._repo._db_path),
-            submission.pcap_path,
-            submission.options,
-        )
+        self.dispatch(job_id)
         return job_id
+
+    def dispatch(self, job_id: str) -> None:
+        """Schedule an already persisted job; atomic worker claim prevents duplicates."""
+        job = self._repo.get_job(job_id)
+        if job is not None and job.status.value == "queued":
+            if json.loads(job.options_json or "{}").get("_agent_id"):
+                from app.agents.spool import dispatch
+
+                dispatch(job)
+                return
+            self._executor.submit(
+                _worker_run, job_id, str(self._repo._db_path), job.pcap_path, json.loads(job.options_json or "{}")
+            )
 
     def shutdown(self, wait: bool = True) -> None:
         self._executor.shutdown(wait=wait)
@@ -625,6 +641,8 @@ def recover_stale_running_jobs(repo: CaseRepository, stale_after_seconds: int = 
     """Mark any RUNNING jobs with stale heartbeats as FAILED. Call at API startup."""
     stale = repo.find_stale_running_jobs(stale_after_seconds=stale_after_seconds)
     for job in stale:
+        if json.loads(job.options_json or "{}").get("_agent_id"):
+            continue  # Its offline worker and persisted spool survive API restarts.
         repo.update_job_status(
             job.id,
             JobStatus.FAILED,

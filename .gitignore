@@ -56,3 +56,12 @@ prototype-friendly-ui/full-application-audit.md
 
 # Superpowers auto-generated specs and plans (session artifacts, not source)
 docs/superpowers/
+
+# Protected operational backups must never be committed.
+.codex/backups/
+
+# Disposable local container image archives.
+.codex/build/
+
+# Local operational state, test screenshots, receipts and backups.
+/.codex/

@@ -46,10 +46,10 @@ def build_case_report_response(case_id: str, repo) -> FileResponse:
     if not case:
         raise HTTPException(status_code=404, detail="case_not_found")
 
-    latest = max(case.analyses, key=lambda a: a.analyzed_at) if case.analyses else None
+    latest = max(case.analyses, key=lambda a: a.sort_timestamp) if case.analyses else None
     reports_dir = _reports_dir()
     pdf_path = reports_dir / f"{case_id}.pdf"
-    cache_fresh = pdf_path.exists() and (latest is None or pdf_path.stat().st_mtime >= latest.analyzed_at.timestamp())
+    cache_fresh = pdf_path.exists() and (latest is None or pdf_path.stat().st_mtime >= latest.sort_timestamp)
     if not cache_fresh:
         if latest is None:
             # No analysis to render. A pre-existing cached file (orphaned by

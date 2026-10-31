@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { filterDashboardMapFlows, formatTrafficBytes } from "../src/dashboardFilters.js";
+import { buildDashboardViewRoute, buildScreenRoute, filterDashboardMapFlows, formatTrafficBytes, isCurrentRoute } from "../src/dashboardFilters.js";
 
 const flows = [
   {
@@ -38,7 +38,7 @@ test("protocol selections recalculate map traffic instead of only hiding endpoin
   assert.equal(filtered.length, 1);
   assert.equal(filtered[0].ip, "8.8.8.8");
   assert.equal(filtered[0].packets, 10);
-  assert.equal(filtered[0].bytes, "2 KB");
+  assert.equal(filtered[0].bytes, "2.0 KiB");
   assert.deepEqual(filtered[0].protocols, ["DNS"]);
 });
 
@@ -47,7 +47,7 @@ test("timeline and protocol selections share one intersection for the map", () =
 
   assert.equal(filtered.length, 1);
   assert.equal(filtered[0].packets, 6);
-  assert.equal(filtered[0].bytes, "1 KB");
+  assert.equal(filtered[0].bytes, "1.0 KiB");
 });
 
 test("search remains combined with visualization filters", () => {
@@ -56,6 +56,15 @@ test("search remains combined with visualization filters", () => {
 });
 
 test("traffic byte labels remain readable at map scale", () => {
-  assert.equal(formatTrafficBytes(512), "1 KB");
-  assert.equal(formatTrafficBytes(2_621_440), "2.5 MB");
+  assert.equal(formatTrafficBytes(0), "0 B");
+  assert.equal(formatTrafficBytes(512), "512 B");
+  assert.equal(formatTrafficBytes(2_621_440), "2.5 MiB");
+});
+
+test("SPA routes preserve searches and avoid duplicate same-screen targets", () => {
+  assert.equal(buildScreenRoute("dashboard", "?privacy=1"), "/dashboard?privacy=1");
+  assert.equal(buildScreenRoute("investigate", "privacy=1&case=abc"), "/investigate?privacy=1&case=abc");
+  assert.equal(buildDashboardViewRoute("traffic-replay", "?privacy=1"), "/dashboard?privacy=1#traffic-replay");
+  assert.equal(isCurrentRoute("/dashboard", "?privacy=1", "/dashboard?privacy=1"), true);
+  assert.equal(isCurrentRoute("/dashboard", "?privacy=1", "/dashboard"), false);
 });

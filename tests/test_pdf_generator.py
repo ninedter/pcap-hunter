@@ -1,7 +1,10 @@
 """Tests for PDF report generation module."""
 
 import re
+from base64 import b64decode
 from datetime import datetime
+from http.server import BaseHTTPRequestHandler, HTTPServer
+from threading import Thread
 
 import pytest
 
@@ -14,7 +17,53 @@ from app.reports.pdf_generator import (
     PDFReport,
     PDFReportGenerator,
     ReportConfig,
+    _report_url_fetcher,
 )
+
+
+@pytest.mark.skipif(not WEASYPRINT_AVAILABLE, reason="WeasyPrint is unavailable")
+def test_report_resource_policy_allows_embedded_png_only():
+    png = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/aU8AAAAASUVORK5CYII="
+    resource = _report_url_fetcher(f"data:image/png;base64,{png}")
+    try:
+        assert resource.read() == b64decode(png)
+    finally:
+        resource.close()
+    for url in ("http://127.0.0.1/private", "file:///tmp/private", "data:text/html;base64,PGgxPkJvb208L2gxPg=="):
+        with pytest.raises(ValueError, match="External report resources are disabled"):
+            _report_url_fetcher(url)
+
+
+@pytest.mark.skipif(not WEASYPRINT_AVAILABLE, reason="WeasyPrint is unavailable")
+def test_report_markdown_image_cannot_trigger_network_request():
+    requested = []
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            requested.append(self.path)
+            self.send_response(200)
+            self.end_headers()
+
+        def log_message(self, *_args):
+            pass
+
+    server = HTTPServer(("127.0.0.1", 0), Handler)
+    thread = Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        generator = PDFReportGenerator(ReportConfig(include_charts=False))
+        report = generator.generate(
+            report_md=f"![untrusted](http://127.0.0.1:{server.server_port}/probe.png)",
+            features={},
+        )
+        assert report is not None
+        assert report.content.startswith(b"%PDF")
+        assert requested == []
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+
 
 # Keep MODULE_WEASYPRINT as an alias for any legacy test code that uses it.
 MODULE_WEASYPRINT = WEASYPRINT_AVAILABLE

@@ -4,6 +4,8 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [3.1.0] - 2026-10-31
+
 ### Added
 
 - Case-scoped, expiring agent credentials with evidence/flow pagination, immutable analysis citations, request budgets and audit records.
@@ -19,6 +21,8 @@ All notable changes to this project will be documented in this file.
 
 ### Security
 
+- Refresh signed runtime packages for the release and require patched Python and pip-wheel package revisions, including advisories published after the initial candidate acceptance.
+
 - Run every agent capture in a new restricted container with only its own read-only input and private scratch storage. Keep the Docker socket exclusively in a trusted launcher; remove job containers before publishing worker results or timeout acknowledgements, and stop cancelled jobs as a whole.
 - Bound parser-controlled result bytes, JSON depth and allocation before API persistence; retain trusted isolation receipts separately from parser output.
 - Require native amd64 and arm64 CI jobs, including real cross-job filesystem/process/network controls, packaged tests and image scans.
@@ -31,6 +35,12 @@ All notable changes to this project will be documented in this file.
 - Check native versions and actual XML linkage during every image build. Fail
   CI on all high/critical runtime advisories, including unfixed advisories, and
   retain the raw scan, SBOM and supplementary native component manifest.
+
+### Deployment and review limits
+
+- This release supports trusted local users with loopback-bound services and local stdio MCP. Remote MCP transport, multi-user authentication, per-stage checkpoint/resume and externally anchored attempt history remain follow-up work.
+- The managed deep security scan was retried on release day but could not start: its read-only workers require a managed filesystem permission profile unavailable in this session. Completed source review, regression, native isolation and image/dependency scans are separate evidence; no completed deep scan is claimed.
+- Back up the protected random encryption key together with saved configuration. Rolling back to a legacy image requires separate volumes restored from pre-migration backups.
 
 ## [3.0.0] - 2026-08-03
 

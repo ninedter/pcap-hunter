@@ -54,7 +54,7 @@ def test_empty_workbench_state_is_complete(tmp_path):
 
     state = build_workbench_state(repo)
 
-    assert state["version"] == "3.0.0"
+    assert state["version"] == "3.1.0"
     assert state["analysis_complete"] is False
     assert state["dashboard"]["map_flows"] == []
     assert state["dashboard"]["raw_flows"] == []

@@ -1,6 +1,6 @@
 # Agent integration and release status
 
-Updated 2026-10-28. The case-scoped REST service, local stdio MCP adapter, controlled offline submissions, and cited draft workflow are implemented for a **local test candidate**. The distribution advisory gate is cleared for the verified arm64 and amd64 candidates, and agent submissions now run in separate per-job containers. The shared-kernel, trusted-launcher and review limits below still apply. This is not a claim that the software is vulnerability-free.
+Updated 2026-10-31. The case-scoped REST service, local stdio MCP adapter, controlled offline submissions, and cited draft workflow are implemented for the **v3.1.0 local deployment release**. The distribution advisory gate is cleared for the verified arm64 and amd64 candidates, and agent submissions now run in separate per-job containers. The shared-kernel, trusted-launcher and review limits below still apply. This is not a claim that the software is vulnerability-free.
 
 ## Implemented workflow
 
@@ -59,7 +59,7 @@ The operator’s local acceptance packet records test totals, image identity/arc
 - **Recovery:** durable request/result collection and idempotency survive API interruption. A restarted worker repeats an interrupted native stage; full per-stage checkpoint/resume and externally anchored attempt history are deferred.
 - **Evidence limits:** complete saved inventory does not mean every original packet was parsed. Responses are bounded; browser export is limited to 20 MiB per inventory. Append-only storage is protected through the application, not against its operating-system/database owner. Trusted deletion removes case evidence; minimal audit metadata is retained.
 - **Remote access:** the browser workbench trusts local users and binds to loopback. Remote MCP authorization/HTTP transport and multi-user UI authentication are outside this local candidate.
-- **Security review coverage:** source review, targeted regressions, dependency/image/secret scans and isolated runtime probes were performed. The managed deep scan could not start because its required permission profile was unavailable; that gate remains uncovered.
+- **Security review coverage:** source review, targeted regressions, dependency/image/secret scans and isolated runtime probes were performed. The managed deep scan was retried on 2026-10-31 and still could not start: read-only workers require a managed filesystem permission profile unavailable in the session. That coverage remains uncovered; no deep-scan completion is claimed.
 
 ## Data preservation and rollback
 
@@ -70,3 +70,13 @@ Saved credentials now use a random key file or an explicitly supplied protected 
 ## Development and review workflow
 
 Codex owns implementation, review, testing and final integration. Jev and Claude have no worker, reviewer, approval or signoff role. Anthropic remains an available product provider. The main Codex agent performs a separate read-only acceptance pass. No global vendor definitions are edited. Release preparation uses a feature branch and reviewable pull request; creating a release/tag or merging requires the corresponding publication decision.
+
+## Follow-up backlog
+
+These items are outside v3.1.0 and are not completed by publishing it:
+
+| ID | Intended outcome | Next concrete work | Acceptance |
+| --- | --- | --- | --- |
+| NEXT-1 | Complete managed deep security review | Run the Codex Security deep scan from a host session providing a managed filesystem permission profile; retain and triage its completed report | Completed canonical report and disposition for each validated finding |
+| NEXT-2 | Resume interrupted analysis stages | Design immutable stage outputs, input/tool/rule identity checks and attempt records before enabling resume | Interruption/restart tests prove valid reuse and reject stale or tampered checkpoints |
+| NEXT-3 | Support remote multi-user deployments | Define authentication, user/case authorization and remote MCP transport together with a platform threat assessment | Cross-user denial, revocation, transport and hostile deployment tests pass before exposure |

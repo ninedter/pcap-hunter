@@ -83,7 +83,9 @@ COPY --from=zeek-builder /tmp/zeek-9.0.1/COPYING /usr/share/licenses/pcap-hunter
 FROM native-runtime AS runtime
 USER root
 # Replacing the application also supports a previously verified native image context.
-RUN rm -rf /app/app
+RUN apk update && apk upgrade \
+ && apk add --no-cache 'python-3.13>=3.13.18_git20261030-r0' 'py3-pip-wheel>=26.2.2-r2' \
+ && rm -rf /app/app
 WORKDIR /app
 COPY app/ ./app/
 COPY .streamlit/ ./.streamlit/

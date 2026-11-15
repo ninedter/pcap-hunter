@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/ninedter/pcap-hunter/actions/workflows/ci.yml/badge.svg)](https://github.com/ninedter/pcap-hunter/actions/workflows/ci.yml)
 [![Version: v3.1.0](https://img.shields.io/badge/version-v3.1.0-2563eb.svg)](../../CHANGELOG.md#310---2026-10-31)
-[![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue.svg)](https://www.python.org/downloads/)
+[![Python 3.13](https://img.shields.io/badge/python-3.13-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](../../LICENSE)
 
 > **[English README](../../README.md)**
@@ -325,7 +325,7 @@ prototype-friendly-ui/
 ```bash
 git clone https://github.com/ninedter/pcap-hunter.git
 cd pcap-hunter
-make docker-up        # 建置 + 啟動 UI → http://localhost:8501
+make docker-up        # 建置 + 啟動 v3 工作台 → http://localhost:8501
 make docker-verify    # 在映像檔內執行格式檢查 + lint + 完整測試套件
 make docker-down      # 停止 compose 服務
 ```
@@ -333,11 +333,15 @@ make docker-down      # 停止 compose 服務
 Compose 注意事項：
 
 - `./data` 會掛載進容器，因此 PCAP、提取的檔案、Zeek log 與案件資料庫都存放在主機上。YARA 規則請放在 `./data/yara_rules`；可設定 `PCAP_HUNTER_DATA_BIND` 改用其他主機資料目錄。
-- 在 UI 中儲存的 API 金鑰會保存在 `pcap-hunter-home` volume；compose 檔固定了 `hostname:`，確保設定加密金鑰在容器重建後維持穩定。
+- 在 UI 中儲存的 API 金鑰會保存在 `pcap-hunter-home` volume，並以存放在同一個 volume 的隨機金鑰檔加密。compose 檔仍固定 `hostname:`，只是為了讓舊版寫入的設定（其金鑰由主機名稱衍生）能在首次啟動時完成轉換。
 - 主機上執行的 LM Studio 從容器內即可連線——`LM_BASE_URL` 預設為 `http://host.docker.internal:1234/v1`。
 - 第二個 compose 服務（`pcap-hunter-api`）使用同一個映像檔，在 8000 連接埠提供整合 API。
 
-### 方案 B — 獨立安裝
+### 方案 B — 獨立安裝（舊版 Streamlit 介面）
+
+> **這不是 v3 工作台。** `make run` 啟動的是**舊版 Streamlit 介面**（`app/main.py`）。視覺導覽中的 React 工作台由 `uvicorn app.web.app:create_app` 提供，**Docker（方案 A）才是執行 v3 工作台的支援方式**。需要在主機上執行工作台的開發者可使用 `make run-web`（除了本節的安裝之外還需要 Node.js/npm；請見 [Make 目標](#make-目標)）。
+>
+> **Python：** 支援且經過測試的版本是 3.13——Docker 映像檔、CI 與含雜湊的 `requirements*.lock` 鎖定檔都以它為目標。獨立安裝程式是依 `requirements.txt` 中未鎖定的版本範圍安裝，而不是使用鎖定檔；CI 不會驗證其他直譯器版本。
 
 所有安裝邏輯都集中在單一跨平台腳本（`scripts/install.py`），它會偵測你的作業系統與套件管理器、安裝系統執行檔與 Python 套件，最後驗證一切就緒。
 
@@ -345,7 +349,7 @@ Compose 注意事項：
 git clone https://github.com/ninedter/pcap-hunter.git
 cd pcap-hunter
 python3 scripts/install.py
-make run              # → http://localhost:8501
+make run              # 舊版 Streamlit 介面 → http://localhost:8501
 ```
 
 各平台安裝內容：
@@ -356,7 +360,11 @@ make run              # → http://localhost:8501
 | Linux | `apt-get` | `tshark`、`zeek`、`yara`、`libpcap0.8`，以及 WeasyPrint 執行階段函式庫（`libpango-1.0-0`、`libpangocairo-1.0-0`、`libpangoft2-1.0-0`、`libharfbuzz0b`、`libcairo2`、`libgdk-pixbuf-2.0-0`、`shared-mime-info`、`fonts-dejavu-core`）；非 apt 發行版會提供手動安裝提示（dnf/pacman） |
 | Windows | `winget` → `choco` → `scoop` | Wireshark（winget/choco/scoop）、YARA（choco/scoop）；Zeek 沒有原生 Windows 版本——安裝程式會引導你改用 WSL2 或 Docker |
 
-接著它會以 pip 安裝 `requirements.txt`（不需另外安裝 Chromium——鎖定版本的 `kaleido==0.2.1` 自帶無介面渲染器），並執行相依性檢查。必要的 Python 套件會逐一驗證（streamlit、pandas、numpy、pyshark、scapy、openai、anthropic、requests、cryptography、plotly、kaleido、markdown、jinja2、fastapi、uvicorn）；`weasyprint` 與 `yara-python` 列為選用——缺少時應用程式會優雅降級。
+接著它會以 pip 安裝 `requirements.txt`，並執行相依性檢查。
+
+PDF 圖表影像由 `kaleido>=1.5,<2` 產生，這個版本**不再內建瀏覽器**——它需要主機上已有 Chrome 或 Chromium。安裝程式會試著產生一張測試圖表，找不到瀏覽器時會顯示警告。解決方式有兩種：執行 `plotly_get_chrome`（隨 Plotly 安裝，會下載一份專用的 Chrome）；或自行安裝 Chrome/Chromium，若未被自動偵測到，再將 `BROWSER_PATH` 設為其執行檔路徑。沒有瀏覽器時，除了 PDF 報告中的圖表影像之外，其餘功能都能正常運作。（Docker 映像檔已內建經校驗碼固定的 Chrome Headless Shell，因此這只影響獨立安裝。）
+
+必要的 Python 套件會逐一驗證（streamlit、pandas、numpy、pyshark、scapy、openai、anthropic、requests、cryptography、plotly、kaleido、markdown、jinja2、fastapi、uvicorn）；`weasyprint` 與 `yara-python` 列為選用——缺少時應用程式會優雅降級。
 
 偏好平台慣用的工作流程？以下包裝指令全都委派給同一個 `install.py`：
 
@@ -398,12 +406,17 @@ python3 scripts/install.py --check-only  # 任何作業系統（含 Windows）
 ## 快速開始
 
 ```bash
-make docker-up   # Docker（建議）→ http://localhost:8501
-# — 或 —
-make run         # 獨立安裝（先執行 python3 scripts/install.py）
+make docker-up   # 以 Docker 執行 v3 工作台（支援的方式）→ http://localhost:8501
 ```
 
-在瀏覽器中開啟 `http://localhost:8501`。
+在瀏覽器中開啟 `http://localhost:8501`。Docker 是執行本文件所述 v3 工作台的支援方式。
+
+以下兩種主機端做法與它**並不等同**：
+
+```bash
+make run         # 舊版 Streamlit 介面（先執行 python3 scripts/install.py）
+make run-web     # 在主機上執行 v3 工作台，供開發使用（另需 Node.js/npm）
+```
 
 ---
 
@@ -458,7 +471,15 @@ make run         # 獨立安裝（先執行 python3 scripts/install.py）
 make verify     # 格式檢查 + lint + 完整測試套件
 ```
 
-每次提交前都必須執行。CI（GitHub Actions、Python 3.11）會對每次推送 / PR 至 `main` 執行相同檢查。涉及建置的驗證（相依套件變更、安裝路徑、發佈檢查）請使用 `make docker-verify`——它會在執行階段映像檔內執行完全相同的檢查，不受主機 Python 環境影響。
+每次提交前都必須執行。CI 會在原生 amd64 與 arm64 執行器上，對每次推送 / PR 至 `main` 執行標準的 Python 3.13 Docker 檢查（另外每週兩次在 `main` 上執行，即使沒有推送也會重新建置並重新掃描映像檔）；獨立的 `quick` 工作不必等待映像檔建置，幾分鐘內就會回報 Ruff 與前端單元測試的失敗。涉及建置的驗證（相依套件變更、安裝路徑、發佈檢查）請使用 `make docker-verify`——它會在執行階段映像檔內執行完全相同的檢查，不受主機 Python 環境影響。
+
+### 容器安全維護
+
+執行階段使用公開 Wolfi 套件庫的已簽署套件。Debian 只用於隔離的 Node／瀏覽器建置階段，這些作業系統不會被複製進執行階段。TShark 4.6.9 與 Zeek 9.0.1 LTS 是從以校驗碼固定的上游原始碼編譯而成。離線圖表匯出使用以校驗碼固定的 Chrome Headless Shell 套件。原生元件的版本、原始碼網址與雜湊記錄在 [`docker/native-components.json`](../../docker/native-components.json)。
+
+`lxml` 是針對已修補的系統 XML 函式庫編譯；上游的二進位 wheel 會內嵌另一份較舊的 XML 函式庫。映像檔建置時會以 `docker/verify_runtime.py` 檢查 Python 與 TShark 的連結、元件最低版本，以及已移除的套件家族。執行階段的 Python／測試／建置相依套件各有獨立的雜湊鎖定檔。編譯器與測試相依套件不會進入執行階段。
+
+CI 會掃描解析後的執行階段，並保留完整掃描結果、SBOM 與原生元件清單。**所有 HIGH 與 CRITICAL 的比對結果（包含尚無修補的項目）都會讓檢查失敗**；沒有設定任何概括性的發行版例外。Wolfi 是滾動式更新的容器發行版，因此每次發佈前都要重新建置並重新掃描。掃描通過只代表涵蓋其資料來源中的已知公告，不代表不存在任何漏洞。第一次原生建置可能需要數十分鐘；BuildKit 會在建置中斷後保留 Zeek 的目的檔。本機 Docker 操作說明與代理程式的信任邊界請見[代理程式操作說明](AGENT_USAGE.md)。代理程式提交的擷取檔會在全新、受限、無網路的容器中處理，容器只掛載該工作自己的唯讀輸入。Docker socket 由另一個受信任的啟動器獨佔；封包解析器、UI 與 API 都不會取得它。容器仍共用主機核心，而啟動器本身仍具有 Docker 管理權限。
 
 ### Make 目標
 
@@ -467,19 +488,40 @@ make verify     # 格式檢查 + lint + 完整測試套件
 | `make install` | 完整安裝（系統 + Python）+ 驗證 |
 | `make install-system` / `make install-python` | 僅系統執行檔 / 僅 Python 套件 |
 | `make check-deps` / `make doctor` | 驗證所有相依套件已就緒 |
-| `make run` | 啟動應用程式（先檢查相依套件） |
+| `make run` | 啟動**舊版 Streamlit** 介面（先檢查相依套件） |
+| `make web-build` | 執行 `npm ci` + `npm run build:web`，再將 `prototype-friendly-ui/dist/client/` 複製到 `app/web/static/`（與 Dockerfile 的做法相同） |
+| `make run-web` | 先執行 `web-build`，再以 `uvicorn app.web.app:create_app --factory` 在 `127.0.0.1:8501` 提供 v3 工作台（開發用） |
 | `make test` | 執行測試套件並產生覆蓋率報告 |
 | `make test-pdf` | 聚焦 PDF + 圖表的測試套件 |
 | `make verify` | 提交前檢查：格式 + lint + 完整測試 |
 | `make lint` / `make format` | Ruff 檢查 / Ruff 格式化 |
 | `make clean` | 清除快取 |
 | `make docker-build` | 建置執行階段映像檔（`pcap-hunter:latest`） |
-| `make docker-up` | 建置 + 啟動 UI 容器於 :8501 |
+| `make docker-up` | 建置 + 啟動 v3 工作台容器於 :8501（支援的方式） |
 | `make docker-down` | 停止 compose 服務 |
 | `make docker-verify` | 在映像檔內執行格式 + lint + 完整測試 |
 | `make run-api` / `make run-api-dev` | 啟動整合 API 於 :8000（dev 模式加上 --reload） |
 | `make smoke-api` | 對本地 API 執行端對端冒煙測試 |
+| `make lock` | 以 `uv` 重新編譯三個含雜湊的鎖定檔 |
+| `make lock-check` | 在暫存副本中重新編譯，只要有差異就失敗 |
 | `make fix-permissions` | 授予 macOS BPF 擷取權限 |
+
+### 相依套件鎖定檔
+
+容器建置只會從三個含雜湊的鎖定檔安裝套件，這些鎖定檔由 [`uv`](https://docs.astral.sh/uv/) 針對 Python 3.13 編譯：
+
+| 鎖定檔 | 編譯來源 | 使用者 |
+|--------|----------|--------|
+| `requirements.lock` | `requirements-runtime.txt` | 執行階段映像檔 |
+| `requirements-test.lock` | `requirements-runtime.txt` + `requirements-dev.txt` | 測試映像檔、CI 快速檢查（Ruff） |
+| `requirements-build.lock` | `requirements-build.txt` | 僅建置階段（編譯 `lxml`） |
+
+```bash
+make lock         # 修改 requirements-*.txt 的版本範圍後：重新編譯三個鎖定檔
+make lock-check   # 已提交的鎖定檔與重新編譯的結果不同時，以結束碼 1 結束
+```
+
+兩者都需要 `PATH` 中有 `uv`。只要輸入的版本範圍仍然允許，`uv` 會保留鎖定檔中既有的版本，因此 `make lock` 產生的差異最小；若要刻意更新某個套件，請執行鎖定檔標頭中的指令並加上 `--upgrade-package <name>`。修改鎖定檔屬於涉及建置的變更，請以 `make docker-verify` 驗證。`make lock-check` 只在 `tmp/lock-check/`（已被 git 忽略）中作業，不會動到已提交的檔案。
 
 ### 重新產生文件截圖
 

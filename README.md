@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/ninedter/pcap-hunter/actions/workflows/ci.yml/badge.svg)](https://github.com/ninedter/pcap-hunter/actions/workflows/ci.yml)
 [![Version: v3.1.0](https://img.shields.io/badge/version-v3.1.0-2563eb.svg)](CHANGELOG.md#310---2026-10-31)
-[![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue.svg)](https://www.python.org/downloads/)
+[![Python 3.13](https://img.shields.io/badge/python-3.13-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 
 > **[繁體中文版 README (Traditional Chinese)](docs/zh-TW/README.md)**
@@ -370,7 +370,7 @@ Docker itself.
 ```bash
 git clone https://github.com/ninedter/pcap-hunter.git
 cd pcap-hunter
-make docker-up        # build + start the UI → http://localhost:8501
+make docker-up        # build + start the v3 workbench → http://localhost:8501
 make docker-verify    # format + lint + full test suite INSIDE the image
 make docker-down      # stop compose services
 ```
@@ -380,15 +380,28 @@ Compose notes:
 - `./data` is mounted into the container, so PCAPs, carved files, Zeek logs, and
   the case database live on the host. Put YARA rules under `./data/yara_rules`.
   Set `PCAP_HUNTER_DATA_BIND` to use a different host data directory.
-- API keys saved in the UI persist in the `pcap-hunter-home` volume; the compose
-  file pins `hostname:` so the config encryption key stays stable across
-  container recreation.
+- API keys saved in the UI persist in the `pcap-hunter-home` volume, encrypted
+  with a random key file stored in the same volume. The compose file still pins
+  `hostname:` only so that configs written by older releases (whose key was
+  derived from the hostname) can be migrated on first start.
 - LM Studio running on the host is reachable from the container —
   `LM_BASE_URL` defaults to `http://host.docker.internal:1234/v1`.
 - A second compose service (`pcap-hunter-api`) serves the Integrations API on
   port 8000 from the same image.
 
-### Option B — Standalone install
+### Option B — Standalone install (legacy Streamlit interface)
+
+> **This is not the v3 workbench.** `make run` starts the **legacy Streamlit
+> interface** (`app/main.py`). The React workbench shown in the visual tour is
+> served by `uvicorn app.web.app:create_app`, and **Docker (Option A) is the
+> supported way to run it**. Developers who need the workbench on the host can
+> use `make run-web` (needs Node.js/npm on top of this install; see
+> [Make targets](#make-targets)).
+>
+> **Python:** 3.13 is the supported, tested version — the Docker image, CI and
+> the hash-pinned `requirements*.lock` files all target it. The standalone
+> installer installs from the unpinned ranges in `requirements.txt` instead of
+> the locks, and no other interpreter version is exercised by CI.
 
 All install logic lives in a single cross-platform script
 (`scripts/install.py`) that detects your OS and package manager, installs
@@ -398,7 +411,7 @@ system binaries and Python packages, then verifies everything.
 git clone https://github.com/ninedter/pcap-hunter.git
 cd pcap-hunter
 python3 scripts/install.py
-make run              # → http://localhost:8501
+make run              # legacy Streamlit UI → http://localhost:8501
 ```
 
 What it installs per platform:
@@ -409,9 +422,19 @@ What it installs per platform:
 | Linux | `apt-get` | `tshark`, `zeek`, `yara`, `libpcap0.8`, and the WeasyPrint runtime libs (`libpango-1.0-0`, `libpangocairo-1.0-0`, `libpangoft2-1.0-0`, `libharfbuzz0b`, `libcairo2`, `libgdk-pixbuf-2.0-0`, `shared-mime-info`, `fonts-dejavu-core`); non-apt distros get manual hints (dnf/pacman) |
 | Windows | `winget` → `choco` → `scoop` | Wireshark (winget/choco/scoop), YARA (choco/scoop); Zeek has no native Windows build — the installer points you to WSL2 or Docker |
 
-It then pip-installs `requirements.txt` (no separate Chromium needed — the
-pinned `kaleido==0.2.1` bundles its own headless renderer) and runs the
-dependency checker. Required Python packages are verified by name (streamlit,
+It then pip-installs `requirements.txt` and runs the dependency checker.
+
+PDF chart images are rendered by `kaleido>=1.5,<2`, which **does not bundle a
+browser** — it drives a Chrome or Chromium that must already be on the host.
+The installer renders a test chart and prints a warning if none is found. To
+fix it, either run `plotly_get_chrome` (installed with Plotly; downloads a
+private Chrome), or install Chrome/Chromium yourself and, if it is not
+detected automatically, set `BROWSER_PATH` to its executable. Without a
+browser everything still works except chart images in PDF reports. (The Docker
+image ships a checksum-pinned Chrome Headless Shell, so this only concerns
+standalone installs.)
+
+Required Python packages are verified by name (streamlit,
 pandas, numpy, pyshark, scapy, openai, anthropic, requests, cryptography,
 plotly, kaleido, markdown, jinja2, fastapi, uvicorn); `weasyprint` and
 `yara-python` are checked as optional — the app degrades gracefully without
@@ -461,12 +484,18 @@ page if any required binary is missing — you'll never get a silently empty das
 ## Quick Start
 
 ```bash
-make docker-up   # Docker (recommended) → http://localhost:8501
-# — or —
-make run         # standalone, after python3 scripts/install.py
+make docker-up   # v3 workbench in Docker (supported path) → http://localhost:8501
 ```
 
-Open `http://localhost:8501` in your browser.
+Open `http://localhost:8501` in your browser. Docker is the supported way to run
+the v3 workbench described in this README.
+
+The two host-side alternatives are **not equivalent** to it:
+
+```bash
+make run         # LEGACY Streamlit interface, after python3 scripts/install.py
+make run-web     # v3 workbench on the host, for development (also needs Node.js/npm)
+```
 
 ---
 
@@ -522,7 +551,10 @@ make verify     # format check + lint + full test suite
 ```
 
 Required before every commit. CI runs the canonical Python 3.13 Docker
-checks on native amd64 and arm64 runners on every push/PR to `main`. For build-shaped verification (dependency
+checks on native amd64 and arm64 runners on every push/PR to `main` (and twice a
+week on `main`, so the image is rebuilt and rescanned even without a push); a
+separate `quick` job reports Ruff and frontend unit-test failures within
+minutes, without waiting for the image build. For build-shaped verification (dependency
 changes, install paths, release checks) use `make docker-verify` — it runs the
 identical gate inside the runtime image, independent of the host Python setup.
 
@@ -557,19 +589,46 @@ boundary are in [the agent guide](docs/AGENT_USAGE.md). Agent submissions use a 
 | `make install` | Full install (system + python) + verification |
 | `make install-system` / `make install-python` | System binaries only / Python packages only |
 | `make check-deps` / `make doctor` | Verify all dependencies are present |
-| `make run` | Start the app (checks deps first) |
+| `make run` | Start the **legacy Streamlit** interface (checks deps first) |
+| `make web-build` | `npm ci` + `npm run build:web`, then copy `prototype-friendly-ui/dist/client/` into `app/web/static/` (what the Dockerfile does) |
+| `make run-web` | `web-build`, then serve the v3 workbench with `uvicorn app.web.app:create_app --factory` on `127.0.0.1:8501` (development) |
 | `make test` | Run the test suite with coverage |
 | `make test-pdf` | Focused PDF + charts test suite |
 | `make verify` | Pre-commit gate: format + lint + full tests |
 | `make lint` / `make format` | Ruff check / Ruff format |
 | `make clean` | Remove caches |
 | `make docker-build` | Build the runtime image (`pcap-hunter:latest`) |
-| `make docker-up` | Build + start the UI container on :8501 |
+| `make docker-up` | Build + start the v3 workbench container on :8501 (supported path) |
 | `make docker-down` | Stop compose services |
 | `make docker-verify` | Format + lint + full tests inside the image |
 | `make run-api` / `make run-api-dev` | Start the Integrations API on :8000 (dev adds --reload) |
 | `make smoke-api` | End-to-end smoke test against the local API |
+| `make lock` | Recompile the three hash-pinned lock files with `uv` |
+| `make lock-check` | Recompile into a scratch copy and fail on any difference |
 | `make fix-permissions` | Grant macOS BPF capture permissions |
+
+### Dependency locks
+
+Container builds install only from three hash-pinned locks compiled by
+[`uv`](https://docs.astral.sh/uv/) for Python 3.13:
+
+| Lock | Compiled from | Used by |
+|------|---------------|---------|
+| `requirements.lock` | `requirements-runtime.txt` | runtime image |
+| `requirements-test.lock` | `requirements-runtime.txt` + `requirements-dev.txt` | test image, CI quick checks (Ruff) |
+| `requirements-build.lock` | `requirements-build.txt` | build stage only (compiling `lxml`) |
+
+```bash
+make lock         # after editing a requirements-*.txt range: recompile all three
+make lock-check   # exit 1 if the committed locks differ from a fresh compile
+```
+
+Both need `uv` on `PATH`. `uv` keeps the versions already pinned in a lock
+unless the input ranges no longer allow them, so `make lock` gives a minimal
+diff; to deliberately move one package, run the command from the lock's header
+with `--upgrade-package <name>` added. Changing a lock is a build-shaped change —
+verify it with `make docker-verify`. `make lock-check` works in `tmp/lock-check/`
+(gitignored) and never touches the committed files.
 
 ### Regenerating doc screenshots
 

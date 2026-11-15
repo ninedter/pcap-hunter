@@ -1,5 +1,7 @@
 # PCAP Hunter User Manual
 
+> ⚠️ **This manual documents the legacy Streamlit interface** (`make run`, tab-based layout). It has not been rewritten for the version 3 React workbench that `make docker-up` serves. For the current workbench, follow the [visual tour](../../README.md#visual-tour) and [usage guide](../../README.md#usage-guide) in the README. The pipeline, detections, thresholds and export formats described below are the same in both interfaces; the screens, tab names and navigation are not.
+
 **PCAP Hunter** is an AI-enhanced threat hunting workbench that bridges the gap between manual packet analysis and automated security monitoring. It combines industry-standard tools (**Zeek**, **Tshark**, **PyShark**) with **LLMs** and **OSINT** threat intelligence to rapidly ingest, analyze, and extract actionable intelligence from network traffic.
 
 This manual walks through the application the way a new SOC analyst would: install, load a capture, watch the pipeline, then work the results tab by tab.

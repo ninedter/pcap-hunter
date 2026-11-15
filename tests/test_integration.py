@@ -148,8 +148,30 @@ class TestBeaconScoringIntegration:
             # Score should be heavily penalized (infra allowlist + port 53)
             assert df.iloc[0]["score"] < 0.1
 
-    def test_https_cdn_not_flagged(self):
-        """Regular HTTPS keep-alives to port 443 should score low."""
+    def test_periodic_https_flow_surfaces_with_mild_web_prior(self):
+        """A strongly periodic flow on 443 must stay above every consumer threshold.
+
+        Previously asserted ``score <= 0.15`` (port 443 multiplied by 0.15), which
+        hid all web C2 below the correlation (0.5), LLM (0.6) and ATT&CK (0.7)
+        thresholds. Port 443 now carries a mild prior instead.
+        """
+        flow = {
+            "src": "10.0.0.1",
+            "dst": "13.224.0.1",
+            "sport": "54321",
+            "dport": "443",
+            "proto": "tcp",
+            "pkt_times": [i * 30.0 for i in range(20)],
+            "pkt_lens": [1200] * 20,
+        }
+        web = rank_beaconing([flow])
+        other = rank_beaconing([{**flow, "dport": "4444"}])
+        assert web.iloc[0]["score"] >= 0.7
+        # ...but the prior still ranks it below the same pattern on an unusual port
+        assert web.iloc[0]["score"] < other.iloc[0]["score"]
+
+    def test_irregular_https_traffic_not_flagged(self):
+        """Ordinary bursty HTTPS traffic to port 443 should still score low."""
         flows = [
             {
                 "src": "10.0.0.1",
@@ -157,14 +179,12 @@ class TestBeaconScoringIntegration:
                 "sport": "54321",
                 "dport": "443",
                 "proto": "tcp",
-                "pkt_times": [i * 30.0 for i in range(20)],
-                "pkt_lens": [1200] * 20,
+                "pkt_times": [0.0, 0.02, 0.05, 0.4, 0.41, 3.0, 3.01, 3.3, 9.5, 9.52, 9.6, 21.0, 21.4, 40.2, 40.21],
+                "pkt_lens": [1200] * 15,
             }
         ]
         df = rank_beaconing(flows)
-        if not df.empty:
-            # Port 443 multiplier + large packets → low score
-            assert df.iloc[0]["score"] <= 0.15
+        assert df.empty or df.iloc[0]["score"] < 0.5
 
     def test_suspicious_port_scores_higher(self):
         """Beaconing to suspicious C2 port should retain higher score."""

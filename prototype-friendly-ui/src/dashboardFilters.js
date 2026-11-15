@@ -59,3 +59,21 @@ export function filterDashboardMapFlows(flows, { query = "", protocol = "All", t
     }];
   });
 }
+
+const DATED_TIME_LABEL = /^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}:\d{2})/;
+
+/** True when timeline labels carry a date (the capture spans more than one UTC day). */
+export function isMultiDayTimeline(rows) {
+  return (rows || []).some((row) => DATED_TIME_LABEL.test(String(row?.time || "")));
+}
+
+/**
+ * Axis tick text for a timeline bucket label. Single-day labels ("12:02") are
+ * unchanged; dated labels ("2026-03-01 12:02") drop the year so ticks stay
+ * short. Display only: selection and map filtering use the full label.
+ */
+export function formatTimelineTick(label) {
+  const text = String(label ?? "");
+  const match = DATED_TIME_LABEL.exec(text);
+  return match ? `${match[2]}-${match[3]} ${match[4]}` : text;
+}

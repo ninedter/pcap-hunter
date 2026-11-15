@@ -16,7 +16,7 @@ from urllib.parse import urlencode
 
 from fastapi import HTTPException
 
-from app.agents.registry import AgentRegistry, canonical, digest, utcnow
+from app.agents.registry import AgentRegistry, canonical, digest, ensure_once, utcnow
 
 _FLOW_FIELDS = ("src", "dst", "sport", "dport", "proto", "count", "bytes", "first_ts", "last_ts")
 _ARTIFACT_TYPES = {"ips": "ip", "domains": "domain", "hashes": "hash", "ja3": "ja3", "urls": "url", "macs": "mac"}
@@ -85,6 +85,22 @@ class EvidenceService:
     def __init__(self, repo):
         self.repo = repo
         self.registry = AgentRegistry(repo)
+        ensure_once(repo, "evidence_service", self._initialise, self._schema_present)
+
+    def _schema_present(self, _cached):
+        """Return whether the evidence tables and cancel trigger still exist in this database."""
+        try:
+            with self.registry.connection() as conn:
+                found = conn.execute(
+                    "SELECT count(*) FROM sqlite_master WHERE name IN "
+                    "('evidence_snapshots','evidence_records','agent_cancelled_job_no_analysis')"
+                ).fetchone()[0]
+        except sqlite3.Error:
+            return False
+        return found == 3
+
+    def _initialise(self):
+        """Create the evidence tables and their immutability triggers."""
         with self.registry.connection() as conn:
             conn.executescript("""
                 CREATE TABLE IF NOT EXISTS evidence_snapshots (
@@ -106,6 +122,16 @@ class EvidenceService:
                     BEGIN SELECT RAISE(ABORT,'snapshot_is_immutable'); END;
                 CREATE TRIGGER IF NOT EXISTS evidence_no_update BEFORE UPDATE ON evidence_records
                     BEGIN SELECT RAISE(ABORT,'evidence_is_immutable'); END;
+                -- The broker saves an agent job's analysis as '<job id>_analysis'. Checking the
+                -- job inside the same write transaction means a cancellation that committed
+                -- first always wins: a cancelled job can never gain an analysis or a snapshot.
+                -- Re-saving an analysis that already exists is not affected.
+                CREATE TRIGGER IF NOT EXISTS agent_cancelled_job_no_analysis BEFORE INSERT ON analyses
+                    WHEN NEW.id LIKE 'j!_%!_analysis' ESCAPE '!'
+                        AND EXISTS(SELECT 1 FROM jobs
+                            WHERE id=substr(NEW.id,1,length(NEW.id)-9) AND status='cancelled')
+                        AND NOT EXISTS(SELECT 1 FROM analyses WHERE id=NEW.id)
+                    BEGIN SELECT RAISE(ABORT,'agent_job_cancelled'); END;
             """)
             if not conn.execute("SELECT 1 FROM sqlite_master WHERE name='snapshots_no_delete_v2'").fetchone():
                 # Permit only the trusted case-deletion transaction to purge

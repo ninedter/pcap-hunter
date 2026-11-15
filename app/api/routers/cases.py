@@ -40,6 +40,23 @@ def get_case_report(case_id: str, _scope=Depends(require_full_scope), repo=Depen
     return build_case_report_response(case_id, repo)
 
 
+def _report_source_timestamp(analysis) -> float:
+    """Newest moment the PDF's inputs changed: the analysis itself or its narrative.
+
+    A report-only LLM job rewrites the narrative without touching
+    ``analyzed_at``; the repository stamps ``report_updated_at`` when that
+    happens, so a PDF rendered before the rewrite is no longer fresh.
+    """
+    stamp = analysis.sort_timestamp
+    updated = getattr(analysis, "report_updated_at", None)
+    if updated is not None:
+        try:
+            stamp = max(stamp, updated.timestamp())
+        except (OverflowError, OSError, ValueError):
+            pass
+    return stamp
+
+
 def build_case_report_response(case_id: str, repo) -> FileResponse:
     """Build or return the cached PDF for any trusted local/API caller."""
     case = repo.get_case(case_id)
@@ -49,7 +66,7 @@ def build_case_report_response(case_id: str, repo) -> FileResponse:
     latest = max(case.analyses, key=lambda a: a.sort_timestamp) if case.analyses else None
     reports_dir = _reports_dir()
     pdf_path = reports_dir / f"{case_id}.pdf"
-    cache_fresh = pdf_path.exists() and (latest is None or pdf_path.stat().st_mtime >= latest.sort_timestamp)
+    cache_fresh = pdf_path.exists() and (latest is None or pdf_path.stat().st_mtime >= _report_source_timestamp(latest))
     if not cache_fresh:
         if latest is None:
             # No analysis to render. A pre-existing cached file (orphaned by

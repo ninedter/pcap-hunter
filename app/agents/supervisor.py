@@ -16,13 +16,17 @@ import time
 from pathlib import Path
 from urllib.parse import quote, urlencode
 
-from app.agents.spool import atomic_json, input_root, output_root
+from app.agents.spool import LAUNCHER_FAILED, LAUNCHER_HEARTBEAT, atomic_json, input_root, output_root
 
 JOB = re.compile(r"j_[a-f0-9]{16}")
 OWNER = "org.pcap-hunter.runner"
 MANAGED = "org.pcap-hunter.agent-job"
 JOB_LABEL = "org.pcap-hunter.job"
 MAX_RESULT = 32 * 1024 * 1024
+# Docker refusing one job (create/start) is retried this many times, then reported.
+MAX_JOB_ATTEMPTS = 3
+JOB_RETRY_SECONDS = 5.0
+JOB_RETRY_LIMIT_SECONDS = 60.0
 logger = logging.getLogger(__name__)
 
 
@@ -32,8 +36,20 @@ class DockerError(RuntimeError):
         self.status = status
 
 
+class DockerUnavailable(RuntimeError):
+    """The Docker daemon could not be reached or did not answer in HTTP."""
+
+
 class CleanupError(RuntimeError):
     """A parser may still be alive; never publish a terminal acknowledgement."""
+
+
+class StartedJobFailed(RuntimeError):
+    """Docker failed a request for a job whose parser container had already started.
+
+    Such a job is failed once instead of retried: a hostile parser that starves the
+    exec/inspect calls must not earn further full runs of the serial launcher.
+    """
 
 
 class UnixConnection(http.client.HTTPConnection):
@@ -52,21 +68,24 @@ class Docker:
         self.path = path
 
     def request(self, method, path, payload=None, maximum=512 * 1024, missing=False):
+        body = None if payload is None else json.dumps(payload).encode()
         connection = UnixConnection(self.path)
         try:
-            body = None if payload is None else json.dumps(payload).encode()
             connection.request(method, "/v1.47" + path, body, {"Content-Type": "application/json"})
             response = connection.getresponse()
             raw = response.read(maximum + 1)
-            if response.status == 404 and missing:
-                return None
-            if not 200 <= response.status < 300:
-                raise DockerError(response.status)
-            if len(raw) > maximum:
-                raise ValueError("Docker response exceeds its limit")
-            return raw
+        except (OSError, http.client.HTTPException) as error:
+            # Socket missing, refused, reset or timed out: a daemon problem, not a job problem.
+            raise DockerUnavailable("Docker daemon is unreachable") from error
         finally:
             connection.close()
+        if response.status == 404 and missing:
+            return None
+        if not 200 <= response.status < 300:
+            raise DockerError(response.status)
+        if len(raw) > maximum:
+            raise ValueError("Docker response exceeds its limit")
+        return raw
 
     def json(self, method, path, payload=None, **kwargs):
         raw = self.request(method, path, payload, **kwargs)
@@ -191,13 +210,15 @@ def job_spec(job_id, image, volume, owner):
 
 
 class Supervisor:
-    def __init__(self, docker, image, volume, owner, *, budget=600, stopping=None):
+    def __init__(self, docker, image, volume, owner, *, budget=600, stopping=None, retry_delay=JOB_RETRY_SECONDS):
         if not re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,62}", owner):
             raise ValueError("Invalid runner owner")
         if not re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}", volume):
             raise ValueError("Invalid input volume")
         self.docker, self.volume, self.owner = docker, volume, owner
         self.budget, self.stopping = budget, stopping or threading.Event()
+        self.retry_delay, self.poll = retry_delay, 1.0
+        self.failures = {}  # job id -> (failed attempts, monotonic time of the next attempt)
         inspected = docker.json("GET", "/images/" + quote(image, safe="") + "/json")
         self.image, self.platform = inspected["Id"], "linux/" + inspected["Architecture"]
         if inspected["Os"] != "linux" or inspected["Architecture"] not in {"amd64", "arm64"}:
@@ -222,10 +243,16 @@ class Supervisor:
             and expected in container.get("Names", [])
         )
 
-    def recover(self):
+    def recover(self, job_id=None):
+        """Remove this launcher's job containers; only correctly named and labelled ones.
+
+        Args:
+            job_id: Limit removal to one job, e.g. before retrying a create whose
+                first attempt may have left a container behind.
+        """
         query = urlencode({"all": "1", "filters": json.dumps({"label": [OWNER + "=" + self.owner, MANAGED + "=1"]})})
         for container in self.docker.json("GET", "/containers/json?" + query):
-            if self.owned(container):
+            if self.owned(container) and job_id in (None, container["Labels"][JOB_LABEL]):
                 self.docker.request("DELETE", "/containers/" + container["Id"] + "?force=1&v=0")
 
     def run_job(self, job_id):
@@ -257,42 +284,72 @@ class Supervisor:
         container = created["Id"]
         if not re.fullmatch(r"[a-f0-9]{64}", container):
             raise ValueError("Invalid container identity")
+        started = False
         try:
-            self.docker.request("POST", f"/containers/{container}/start")
-            deadline = time.monotonic() + self.budget
-            while not self.stopping.is_set():
-                if (folder / "cancel.json").exists():
-                    return {"ok": False, "error_code": "cancelled"}
-                if time.monotonic() >= deadline:
-                    return {"ok": False, "error_code": "agent_time_budget_exceeded"}
-                inspected = self.docker.json("GET", f"/containers/{container}/json")
-                if not inspected["State"]["Running"]:
-                    return {"ok": False, "error_code": "offline_worker_failed"}
-                Path("/tmp/agent-worker-heartbeat").touch()
-                atomic_json(output_root() / (job_id + ".heartbeat"), {"heartbeat": time.time()})
-                try:
-                    result = self.docker.read_file(container, "/job/results/" + job_id + ".json", MAX_RESULT)
-                except DockerError as error:
-                    raise ValueError("Unreadable parser output") from error
-                if result is not None:
-                    receipt = {
-                        "job_id": job_id,
-                        "backend": "docker-per-job",
-                        "image_id": self.image,
-                        "container_id": container,
-                        "network": "none",
-                        "input_scope": "single-read-only-job",
-                        "scratch": "private-tmpfs",
-                    }
-                    return result, receipt
-                self.stopping.wait(1)
-            return None  # A restart replays this job; never acknowledge a live parser.
+            try:
+                self.docker.request("POST", f"/containers/{container}/start")
+                started = True
+                deadline = time.monotonic() + self.budget
+                while not self.stopping.is_set():
+                    # The broker retires the whole input directory once it has closed a job.
+                    if (folder / "cancel.json").exists() or not folder.exists():
+                        return {"ok": False, "error_code": "cancelled"}
+                    if time.monotonic() >= deadline:
+                        return {"ok": False, "error_code": "agent_time_budget_exceeded"}
+                    inspected = self.docker.json("GET", f"/containers/{container}/json")
+                    if not inspected["State"]["Running"]:
+                        return {"ok": False, "error_code": "offline_worker_failed"}
+                    Path("/tmp/agent-worker-heartbeat").touch()
+                    atomic_json(output_root() / (job_id + ".heartbeat"), {"heartbeat": time.time()})
+                    try:
+                        result = self.docker.read_file(container, "/job/results/" + job_id + ".json", MAX_RESULT)
+                    except DockerError as error:
+                        raise ValueError("Unreadable parser output") from error
+                    if result is not None:
+                        receipt = {
+                            "job_id": job_id,
+                            "backend": "docker-per-job",
+                            "image_id": self.image,
+                            "container_id": container,
+                            "network": "none",
+                            "input_scope": "single-read-only-job",
+                            "scratch": "private-tmpfs",
+                        }
+                        return result, receipt
+                    self.stopping.wait(1)
+                return None  # A restart replays this job; never acknowledge a live parser.
+            except (DockerError, DockerUnavailable, KeyError, TypeError) as error:
+                if not started:
+                    raise  # Nothing ran yet: serve() retries create/start with a backoff.
+                raise StartedJobFailed("Docker failed a running job") from error
         finally:
             # Publishing a terminal result happens only after all job processes are gone.
             try:
                 self.docker.request("DELETE", f"/containers/{container}?force=1&v=0")
-            except (DockerError, OSError) as error:
+            except (DockerError, DockerUnavailable, OSError) as error:
                 raise CleanupError("Unable to confirm parser removal") from error
+
+    def job_failed(self, job_id, attempts):
+        """Record one Docker failure for a job; give up after a bounded number.
+
+        Returns:
+            A trusted failure payload once the attempts are exhausted, otherwise
+            None so the job is retried after a backoff while other jobs proceed.
+        """
+        if attempts >= MAX_JOB_ATTEMPTS:
+            self.failures.pop(job_id, None)
+            logger.exception("Docker failed isolated job %s %d times; reporting a launcher failure", job_id, attempts)
+            return {"ok": False, "error_code": LAUNCHER_FAILED}
+        delay = min(self.retry_delay * 2 ** (attempts - 1), JOB_RETRY_LIMIT_SECONDS)
+        self.failures[job_id] = (attempts, time.monotonic() + delay)
+        logger.exception(
+            "Docker failed isolated job %s (attempt %d of %d); retrying in %.0f s",
+            job_id,
+            attempts,
+            MAX_JOB_ATTEMPTS,
+            delay,
+        )
+        return None
 
     def serve(self):
         output_root().mkdir(parents=True, exist_ok=True)
@@ -300,20 +357,41 @@ class Supervisor:
         while not self.stopping.is_set():
             self.docker.request("GET", "/_ping")
             Path("/tmp/agent-worker-heartbeat").touch()
+            # Trusted liveness for the broker's deadline: Docker answered this pass.
+            atomic_json(output_root() / LAUNCHER_HEARTBEAT, {"heartbeat": time.time()})
+            present = set()
             for folder in sorted(input_root().glob("j_*")):
                 if self.stopping.is_set():
                     break
                 job_id = folder.name
                 if not JOB.fullmatch(job_id) or folder.is_symlink():
                     continue
+                present.add(job_id)
                 output = output_root() / (job_id + ".json")
                 if output.exists() or not (folder / "request.json").exists():
                     continue
+                attempts, retry_at = self.failures.get(job_id, (0, 0.0))
+                if time.monotonic() < retry_at:
+                    continue  # Backing off; later jobs are not held up.
                 try:
+                    if attempts:
+                        self.recover(job_id)  # A failed create may still have left a container.
                     payload = self.run_job(job_id)
+                    self.failures.pop(job_id, None)
                 except (ValueError, OSError, RecursionError):
                     payload = {"ok": False, "error_code": "offline_worker_failed"}
+                    self.failures.pop(job_id, None)
                     logger.exception("Invalid isolated job %s", job_id)
+                except StartedJobFailed:
+                    # The parser had started and its container is confirmed removed (else
+                    # CleanupError). It already consumed a run, so it is failed once.
+                    payload = {"ok": False, "error_code": LAUNCHER_FAILED}
+                    self.failures.pop(job_id, None)
+                    logger.exception("Docker failed isolated job %s after its parser started; not retrying", job_id)
+                except (DockerError, DockerUnavailable, KeyError, TypeError):
+                    # Docker refused, dropped or mangled a create/start request for this job.
+                    # The container, if any, is already confirmed removed (else CleanupError).
+                    payload = self.job_failed(job_id, attempts + 1)
                 if isinstance(payload, tuple):
                     data, receipt = payload
                     atomic_json(output_root() / (job_id + ".isolation"), receipt)
@@ -330,7 +408,47 @@ class Supervisor:
                 if JOB.fullmatch(job_id) and not (input_root() / job_id).exists():
                     if time.time() - cached.lstat().st_mtime > 60:
                         cached.unlink(missing_ok=True)
-            self.stopping.wait(1)
+            if not self.stopping.is_set():
+                self.failures = {job_id: state for job_id, state in self.failures.items() if job_id in present}
+            self.stopping.wait(self.poll)
+
+
+def run(create, stopping, *, first_delay=1.0, limit=60.0):
+    """Keep one launcher serving, backing off while Docker is unavailable.
+
+    Exiting on a Docker outage would make the orchestrator restart the launcher
+    in a tight loop. Daemon-level failures are retried here with exponential
+    backoff instead; every retry re-enters ``serve()``, which first removes any
+    job container left behind, so a parser is never acknowledged while alive.
+    Configuration errors and programming errors still propagate and stop the
+    launcher (fail closed).
+
+    Args:
+        create: Zero-argument factory for the ``Supervisor`` (it validates the
+            image, volume and seccomp policy against the daemon).
+        stopping: Event set on shutdown.
+        first_delay: Initial backoff in seconds.
+        limit: Maximum backoff in seconds.
+    """
+    supervisor, delay = None, first_delay
+    while not stopping.is_set():
+        began = time.monotonic()
+        try:
+            if supervisor is None:
+                supervisor = create()
+            supervisor.serve()
+            continue
+        except (DockerUnavailable, CleanupError) as error:
+            failure = error
+        except DockerError as error:
+            if supervisor is None:
+                raise  # The daemon rejected the configured image or volume.
+            failure = error
+        if time.monotonic() - began > limit:
+            delay = first_delay  # It served healthily for a while; start the backoff afresh.
+        logger.error("Docker is unavailable or refused the launcher; retrying in %.1f s", delay, exc_info=failure)
+        stopping.wait(delay)
+        delay = min(delay * 2, limit)
 
 
 def main():
@@ -338,14 +456,10 @@ def main():
     stopping = threading.Event()
     for signum in (signal.SIGTERM, signal.SIGINT):
         signal.signal(signum, lambda *_: stopping.set())
-    supervisor = Supervisor(
-        Docker(os.getenv("PCAP_HUNTER_DOCKER_SOCKET", "/var/run/docker.sock")),
-        os.environ["PCAP_HUNTER_JOB_IMAGE"],
-        os.environ["PCAP_HUNTER_AGENT_INPUT_VOLUME"],
-        os.environ["PCAP_HUNTER_RUNNER_OWNER"],
-        stopping=stopping,
-    )
-    supervisor.serve()
+    docker = Docker(os.getenv("PCAP_HUNTER_DOCKER_SOCKET", "/var/run/docker.sock"))
+    image, volume = os.environ["PCAP_HUNTER_JOB_IMAGE"], os.environ["PCAP_HUNTER_AGENT_INPUT_VOLUME"]
+    owner = os.environ["PCAP_HUNTER_RUNNER_OWNER"]
+    run(lambda: Supervisor(docker, image, volume, owner, stopping=stopping), stopping)
 
 
 if __name__ == "__main__":

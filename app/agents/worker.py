@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import os
 import re
 import time
@@ -13,6 +14,17 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from app.agents.spool import atomic_json, input_root, output_root
+
+
+def _finite(value):
+    """Return ``value`` with non-finite floats replaced by ``None``, recursively."""
+    if isinstance(value, float):
+        return value if math.isfinite(value) else None
+    if isinstance(value, dict):
+        return {key: _finite(child) for key, child in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_finite(child) for child in value]
+    return value
 
 
 def process(job_id):
@@ -30,13 +42,10 @@ def process(job_id):
         raise ValueError("invalid capture")
     options = {"osint_enabled": False, "llm_enabled": False, "pyshark_packet_limit": 200000}
 
-    def on_progress(event):
-        atomic_json(
-            output_root() / (job_id + ".progress"),
-            {"stage": event.title[:100], "kind": event.kind, "heartbeat": time.time()},
-        )
-
-    result = run_pipeline(str(capture), request["case_id"], PipelineOptions(**options), CallbackProgress(on_progress))
+    # Stage progress stays inside the container: the trusted launcher publishes only
+    # its own heartbeat, so a parser cannot influence what the job status reports.
+    progress = CallbackProgress(lambda event: None)
+    result = run_pipeline(str(capture), request["case_id"], PipelineOptions(**options), progress)
     data = result.to_dict() | {"features": result.features}
     if result.carved_items:
         data["yara_results"] = scan_carved_files(result.carved_items)
@@ -44,7 +53,8 @@ def process(job_id):
     provenance["completed_at"] = datetime.now(timezone.utc).isoformat()
     with capture.open("rb") as source:
         input_hash = hashlib.file_digest(source, "sha256").hexdigest()
-    payload = {"ok": True, "input_sha256": input_hash, "provenance": provenance, "result": data}
+    # Strict JSON has no NaN/Infinity; a stray non-finite metric must not fail the whole job.
+    payload = _finite({"ok": True, "input_sha256": input_hash, "provenance": provenance, "result": data})
     output = output_root() / (job_id + ".json")
     if len(json.dumps(payload)) > 32 * 1024 * 1024:
         raise ValueError("result too large")

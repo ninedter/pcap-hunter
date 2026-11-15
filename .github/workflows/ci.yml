@@ -4,12 +4,55 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  # Rebuild and rescan the default branch when nobody pushes, so new advisories
+  # against the pinned native components surface without a code change. Twice a
+  # week rather than once: GitHub evicts Actions caches that go unread for 7 days,
+  # and an exactly-weekly run would race that eviction of the native build cache.
+  schedule:
+    - cron: "17 3 * * 1,4"
+  workflow_dispatch:
 permissions:
   contents: read
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  # Scheduled runs get their own group so they never cancel (or get cancelled by)
+  # the gate run for a push to main, which shares the same ref.
+  group: ${{ github.workflow }}-${{ github.event_name == 'schedule' && 'schedule' || github.ref }}
   cancel-in-progress: true
 jobs:
+  # Minutes-scale feedback that does not wait for the native image build. The
+  # canonical image still runs Ruff and the frontend tests itself; this job only
+  # reports the cheap failures early and additionally lints scripts/.
+  quick:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+      - name: Install the lock-pinned Ruff
+        run: |
+          # Take the exact version and hashes from the reviewed test lock, so this
+          # job can never lint with a different Ruff than the canonical image.
+          awk '/^ruff==/{found=1} found{print} found && !/\\$/{exit}' requirements-test.lock > "$RUNNER_TEMP/ruff.lock"
+          grep -q '^ruff==' "$RUNNER_TEMP/ruff.lock"
+          python3 -m venv "$RUNNER_TEMP/ruff-venv"
+          "$RUNNER_TEMP/ruff-venv/bin/python" -m pip install --disable-pip-version-check --no-deps --require-hashes -r "$RUNNER_TEMP/ruff.lock"
+          "$RUNNER_TEMP/ruff-venv/bin/ruff" --version
+      - name: Ruff format check
+        run: |
+          "$RUNNER_TEMP/ruff-venv/bin/ruff" format --check .
+      - name: Ruff lint
+        run: |
+          "$RUNNER_TEMP/ruff-venv/bin/ruff" check .
+      - name: Frontend build and unit tests
+        working-directory: prototype-friendly-ui
+        run: |
+          node --version
+          npm ci
+          # sites-worker.test.mjs asserts on the build output, so build first.
+          npm run build
+          npm run test:ui
+
   platform-test:
     name: Native ${{ matrix.arch }}
     strategy:
@@ -44,6 +87,11 @@ jobs:
           git rev-parse HEAD > .ci-evidence/tested-commit.txt
       - name: Set up native Buildx
         uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4
+      - name: Size the Zeek source build to the runner
+        id: build-jobs
+        run: |
+          # The Dockerfile default (2) suits small local machines; hosted runners have more cores.
+          echo "zeek=$(nproc)" >> "$GITHUB_OUTPUT"
       - name: Build canonical test image
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
         with:
@@ -52,6 +100,8 @@ jobs:
           target: test
           tags: pcap-hunter:test
           load: true
+          build-args: |
+            ZEEK_BUILD_JOBS=${{ steps.build-jobs.outputs.zeek }}
           cache-from: type=gha,scope=pcap-hunter-${{ matrix.arch }}
           cache-to: type=gha,scope=pcap-hunter-${{ matrix.arch }},mode=max
       - name: Python checks and offline PDF/security tests
@@ -66,7 +116,13 @@ jobs:
             -v "$GITHUB_WORKSPACE/prototype-friendly-ui/.openai:/web/.openai:ro" \
             --entrypoint sh pcap-hunter:web-test -c 'npm run build && npm run test:ui && npm audit --omit=dev'
       - name: Build runtime candidate
-        run: docker buildx build --load --platform ${{ matrix.platform }} --target runtime -t pcap-hunter:candidate .
+        env:
+          ZEEK_BUILD_JOBS: ${{ steps.build-jobs.outputs.zeek }}
+        run: |
+          # The build arg is part of the Zeek layer's cache key: it must match the
+          # test-image build above or this step recompiles Zeek from source.
+          docker buildx build --load --platform ${{ matrix.platform }} --target runtime \
+            --build-arg "ZEEK_BUILD_JOBS=$ZEEK_BUILD_JOBS" -t pcap-hunter:candidate .
       - name: Real per-job filesystem, process and network isolation controls
         run: |
           socket_gid=$(stat -c '%g' /var/run/docker.sock)
@@ -112,14 +168,18 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
-  # Preserve the required check name while requiring both native platform jobs.
+  # Preserve the required check name while requiring both native platform jobs
+  # (and the quick checks, which cover paths the image does not lint).
   test:
-    needs: platform-test
+    needs: [quick, platform-test]
     if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
       - name: Require every platform gate
         env:
+          QUICK_RESULT: ${{ needs.quick.result }}
           PLATFORM_RESULT: ${{ needs.platform-test.result }}
-        run: test "$PLATFORM_RESULT" = success
+        run: |
+          test "$QUICK_RESULT" = success
+          test "$PLATFORM_RESULT" = success

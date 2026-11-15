@@ -6,13 +6,17 @@ approved prototype can become the real product without browser-side API keys.
 
 from __future__ import annotations
 
+import asyncio
 import ipaddress
 import logging
+import math
 import os
 import pathlib
+import re
+import threading
 import uuid
 from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, nullcontext
 from datetime import date, datetime
 from itertools import islice
 from typing import Any
@@ -24,7 +28,17 @@ from starlette.concurrency import run_in_threadpool
 
 from app import config as C
 from app.api.deps import get_queue, get_repo, get_settings
-from app.api.queue import JobSubmission, QueueFullError, recover_stale_running_jobs
+from app.api.queue import (
+    LMSTUDIO_PLACEHOLDER_KEY,
+    OPENAI_DEFAULT_BASE_URL,
+    JobSubmission,
+    QueueFullError,
+    default_llm_base_url,
+    job_sweep_loop,
+    recover_jobs_at_boot,
+    resolve_llm_api_key,
+    url_origin,
+)
 from app.api.routers.cases import build_case_report_response
 from app.api.validation import is_valid_pcap_magic
 from app.database.models import Case, CaseStatus, Severity
@@ -33,7 +47,7 @@ from app.utils.geo_data import get_cities, get_continents, get_countries, get_lo
 from app.utils.network_utils import _validate_domain, get_whois_info, is_public_ipv4
 from app.web.agent_routes import router as local_agent_router
 from app.web.security import LocalWorkbenchMiddleware
-from app.web.state import build_workbench_state
+from app.web.state import build_workbench_state, public_config, serialize_jobs
 
 logger = logging.getLogger(__name__)
 
@@ -99,8 +113,17 @@ def _model_ids(response: Any) -> list[str]:
     return sorted(ids)[:_LLM_MODEL_LIMIT]
 
 
+_NUMERIC_HOST_PART = re.compile(r"0[xX][0-9a-fA-F]*|[0-9]*")
+
+
 def _validated_model_base_url(value: str) -> str:
-    """Accept only normal HTTP(S) API URLs before an SDK opens a connection."""
+    """Accept only normal HTTP(S) API URLs before an SDK opens a connection.
+
+    Loopback and private addresses stay allowed (LM Studio on localhost, a LAN host or
+    ``host.docker.internal``). Link-local (cloud metadata), unspecified and multicast
+    addresses are refused, including when written as an IPv4-mapped IPv6 literal or in
+    a non-canonical numeric form.
+    """
     try:
         parsed = urlparse(value)
         port = parsed.port
@@ -123,8 +146,16 @@ def _validated_model_base_url(value: str) -> str:
     try:
         address = ipaddress.ip_address(hostname)
     except ValueError:
-        pass
+        # Not a canonical IP literal. Resolvers still read bare integers, hex/octal parts
+        # and short dotted forms as IPv4 (``2852039166``, ``0xa9fea9fe``, ``169.254.43518``),
+        # which would slip past the address checks below, so a host made only of numeric
+        # parts must be a canonical dotted quad. No DNS resolution is performed.
+        parts = hostname.rstrip(".").split(".")
+        if all(_NUMERIC_HOST_PART.fullmatch(part) for part in parts):
+            raise HTTPException(status_code=422, detail="invalid_model_api_url") from None
     else:
+        # ``::ffff:169.254.169.254`` reaches the IPv4 address it wraps.
+        address = getattr(address, "ipv4_mapped", None) or address
         if address.is_link_local or address.is_unspecified or address.is_multicast:
             raise HTTPException(status_code=422, detail="invalid_model_api_url")
     return value
@@ -136,6 +167,159 @@ def _destination_key(payload, saved_key, base_url, saved_url):
         return explicit
     # A stored key belongs only to its saved destination, never a new draft URL.
     return str(saved_key or "") if base_url.rstrip("/") == saved_url.rstrip("/") else ""
+
+
+# ---- Settings validation -------------------------------------------------
+
+_SETTINGS_TEXT_MAX = 2048
+_INT_SETTINGS: dict[str, tuple[int, int]] = {
+    "cfg_pyshark_limit": (0, 1_000_000_000),
+    "cfg_osint_top_ips": (0, 1000),
+    "cfg_llm_context_window": (C.LLM_CONTEXT_WINDOW_MIN, C.LLM_CONTEXT_WINDOW_MAX),
+}
+_FLOAT_SETTINGS: dict[str, tuple[float, float]] = {
+    "cfg_home_lat": (-90.0, 90.0),
+    "cfg_home_lon": (-180.0, 180.0),
+}
+_BOOL_SETTINGS = {"cfg_llm_unlimited_context", "cfg_osint_cache_enabled"}
+# Provider base URL -> the stored credential that is only valid for that host.
+_BASE_URL_SECRETS = {
+    "cfg_openai_base_url": "cfg_openai_cloud_key",
+    "cfg_llm_endpoint": "cfg_openai_key",
+}
+_OPENAI_DEFAULT_BASE_URL = OPENAI_DEFAULT_BASE_URL
+# In-process guard for load-mutate-save; the config manager's own file lock
+# (re-entrant, cross-process) is taken as well when it is available.
+_SETTINGS_LOCK = threading.Lock()
+
+
+class _SettingError(ValueError):
+    """A single rejected settings field (message is safe to show the user)."""
+
+
+def _coerce_setting(key: str, value: Any) -> Any:
+    """Validate one settings value and return its normalised form.
+
+    Raises:
+        _SettingError: With a user-facing message when the value is the wrong
+            type or out of range for ``key``.
+    """
+    if key in _INT_SETTINGS:
+        low, high = _INT_SETTINGS[key]
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise _SettingError("must be a whole number")
+        if isinstance(value, float) and (not math.isfinite(value) or value != int(value)):
+            raise _SettingError("must be a whole number")
+        number = int(value)
+        if not low <= number <= high:
+            raise _SettingError(f"must be between {low} and {high}")
+        return number
+    if key in _FLOAT_SETTINGS:
+        low, high = _FLOAT_SETTINGS[key]
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+            raise _SettingError("must be a number")
+        if not low <= value <= high:
+            raise _SettingError(f"must be between {low:g} and {high:g}")
+        return float(value)
+    if key in _BOOL_SETTINGS:
+        if not isinstance(value, bool):
+            raise _SettingError("must be true or false")
+        return value
+    if not isinstance(value, str):
+        raise _SettingError("must be text")
+    if len(value) > _SETTINGS_TEXT_MAX:
+        raise _SettingError(f"must be at most {_SETTINGS_TEXT_MAX} characters")
+    if any(ord(char) < 32 or ord(char) == 127 for char in value):
+        raise _SettingError("must not contain control characters")
+    if key == "cfg_llm_provider" and value not in _LLM_PROVIDERS:
+        raise _SettingError("must be one of: " + ", ".join(sorted(_LLM_PROVIDERS)))
+    if key in _BASE_URL_SECRETS:
+        value = value.strip()
+        if value:
+            try:
+                _validated_model_base_url(value)
+            except HTTPException as exc:
+                raise _SettingError("must be a plain http(s) API URL without credentials, query, or fragment") from exc
+    return value
+
+
+def _effective_base_url(key: str, value: Any) -> str:
+    """The URL a worker would actually call for this setting (blank = default)."""
+    text = str(value or "").strip()
+    if text:
+        return text
+    return default_llm_base_url("openai" if key == "cfg_openai_base_url" else "lmstudio")
+
+
+# Shared with the worker, which applies the same origin rule to environment-supplied keys.
+_url_origin = url_origin
+
+
+def _apply_settings_update(current: dict[str, Any], payload: dict[str, Any]) -> tuple[dict[str, str], list[str]]:
+    """Validate ``payload`` and merge it into ``current`` in place.
+
+    The browser sends its whole settings draft on every save: every non-secret
+    value (changed or not) plus a secret only when the analyst typed one.
+    Unknown keys are ignored, ``null`` leaves a value unchanged, and a blank
+    secret keeps the stored one.
+
+    A stored provider key is bound to the host it was saved for. When a save
+    moves a provider's base URL to a different origin without supplying a new
+    key in the same request, the stored key is cleared rather than later sent
+    to the new host.
+
+    Args:
+        current: Stored configuration (mutated only when there are no errors).
+        payload: Browser-submitted settings object.
+
+    Returns:
+        ``(errors, cleared_keys)`` — per-field messages, and the secrets that
+        were cleared because their provider's host changed.
+    """
+    errors: dict[str, str] = {}
+    updates: dict[str, Any] = {}
+    for key, value in payload.items():
+        if key not in CONFIG_KEYS or value is None:
+            continue
+        if key in SENSITIVE_KEYS:
+            if not isinstance(value, str):
+                errors[key] = "must be text"
+            elif len(value) > _SETTINGS_TEXT_MAX or any(ord(char) < 32 or ord(char) == 127 for char in value):
+                errors[key] = "is not a valid key value"
+            elif value.strip():
+                updates[key] = value.strip()
+            continue
+        if value == current.get(key) and type(value) is type(current.get(key)):
+            continue  # unchanged echo of the stored value, nothing to validate or bind
+        try:
+            updates[key] = _coerce_setting(key, value)
+        except _SettingError as exc:
+            errors[key] = str(exc)
+    if errors:
+        return errors, []
+
+    cleared: list[str] = []
+    for url_key, secret_key in _BASE_URL_SECRETS.items():
+        if url_key not in updates or secret_key in updates or not current.get(secret_key):
+            continue
+        before = _url_origin(_effective_base_url(url_key, current.get(url_key)))
+        after = _url_origin(_effective_base_url(url_key, updates[url_key]))
+        if before != after:
+            updates[secret_key] = ""
+            cleared.append(secret_key)
+    current.update(updates)
+    return {}, cleared
+
+
+async def _json_object(request: Request, *, detail: str = "json_object_required") -> dict[str, Any]:
+    """Read a JSON object body; malformed JSON is 400 and any other JSON type is 422."""
+    try:
+        payload = await request.json()
+    except ValueError as exc:  # JSONDecodeError and UnicodeDecodeError
+        raise HTTPException(status_code=400, detail="invalid_json") from exc
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=422, detail=detail)
+    return payload
 
 
 def _discover_llm_models(provider: str, *, base_url: str, api_key: str) -> list[str]:
@@ -179,8 +363,12 @@ def _discover_llm_models(provider: str, *, base_url: str, api_key: str) -> list[
 
 @asynccontextmanager
 async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
-    recover_stale_running_jobs(get_repo(), stale_after_seconds=120)
+    # Fails this service's jobs from a previous boot, re-dispatches its orphaned
+    # queued jobs, and leaves the API process's live jobs alone.
+    recover_jobs_at_boot(get_repo(), get_queue, role="web")
+    sweep_task = asyncio.create_task(job_sweep_loop(get_repo()))
     yield
+    sweep_task.cancel()
     if get_queue.cache_info().currsize:
         get_queue().shutdown(wait=False)
 
@@ -335,15 +523,23 @@ def create_app() -> FastAPI:
 
     @app.post("/api/ui/cases", status_code=201)
     async def create_case_record(request: Request) -> JSONResponse:
-        payload = await request.json()
-        title = str(payload.get("title") or "Untitled investigation").strip()
+        payload = await _json_object(request, detail="case_object_required")
+        raw_tags = payload.get("tags")
+        if raw_tags is None:
+            raw_tags = []
+        if not isinstance(raw_tags, list) or not all(isinstance(tag, (str, int, float)) for tag in raw_tags):
+            raise HTTPException(status_code=422, detail="tags_must_be_a_list_of_text")
+        for field in ("title", "description", "severity"):
+            if payload.get(field) is not None and not isinstance(payload[field], str):
+                raise HTTPException(status_code=422, detail=f"{field}_must_be_a_string")
+        title = (payload.get("title") or "").strip()[:300] or "Untitled investigation"
         case = Case(
             id=uuid.uuid4().hex[:8],
             title=title,
-            description=str(payload.get("description") or ""),
+            description=payload.get("description") or "",
             status=CaseStatus.OPEN,
-            severity=Severity.from_str(str(payload.get("severity") or "low")),
-            tags=[str(tag) for tag in payload.get("tags", []) if str(tag).strip()][:20],
+            severity=Severity.from_str(payload.get("severity") or "low"),
+            tags=[str(tag).strip()[:100] for tag in raw_tags if str(tag).strip()][:20],
         )
         get_repo().create_case(case)
         return JSONResponse({"id": case.id}, status_code=201)
@@ -353,8 +549,10 @@ def create_app() -> FastAPI:
         case = get_repo().get_case(case_id)
         if case is None:
             raise HTTPException(status_code=404, detail="case_not_found")
-        payload = await request.json()
-        content = str(payload.get("content") or "").strip()
+        payload = await _json_object(request, detail="note_object_required")
+        if payload.get("content") is not None and not isinstance(payload["content"], str):
+            raise HTTPException(status_code=422, detail="note_must_be_a_string")
+        content = (payload.get("content") or "").strip()
         if not content:
             raise HTTPException(status_code=422, detail="note_required")
         note_id = get_repo().add_note(case_id, content)
@@ -407,13 +605,15 @@ def create_app() -> FastAPI:
 
     @app.post("/api/ui/paths", status_code=202)
     async def submit_capture_paths(request: Request) -> JSONResponse:
-        payload = await request.json()
-        raw_paths = payload.get("paths") if isinstance(payload, dict) else None
+        payload = await _json_object(request, detail="at_least_one_capture_path_required")
+        raw_paths = payload.get("paths")
         if not isinstance(raw_paths, list) or not raw_paths:
             raise HTTPException(status_code=422, detail="at_least_one_capture_path_required")
         if len(raw_paths) > 50:
             raise HTTPException(status_code=422, detail="maximum_50_captures")
-        paths = [_allowed_capture_path(str(value).strip()) for value in raw_paths]
+        if not all(isinstance(value, str) for value in raw_paths):
+            raise HTTPException(status_code=422, detail="capture_paths_must_be_strings")
+        paths = [_allowed_capture_path(value.strip()) for value in raw_paths]
         include_llm = bool(payload.get("include_llm", True))
         case = _create_batch_case([path.name for path in paths], path_submission=True)
         repo = get_repo()
@@ -438,25 +638,53 @@ def create_app() -> FastAPI:
             raise
         return JSONResponse({"case_id": case.id, "jobs": jobs}, status_code=202)
 
+    @app.get("/api/ui/jobs")
+    def list_ui_jobs() -> JSONResponse:
+        """Job list only, in the same shape as the bootstrap payload's ``jobs``.
+
+        Lets the client poll run progress without rebuilding the whole
+        workbench state (dashboard, cases, config) on every tick.
+        """
+        return JSONResponse({"jobs": serialize_jobs(get_repo())})
+
     @app.get("/api/ui/settings")
     def get_ui_settings() -> JSONResponse:
-        return JSONResponse(build_workbench_state(get_repo())["config"])
+        return JSONResponse(public_config())
 
     @app.put("/api/ui/settings")
     async def save_ui_settings(request: Request) -> JSONResponse:
-        payload = await request.json()
-        if not isinstance(payload, dict):
-            raise HTTPException(status_code=422, detail="settings_object_required")
-        manager = get_config_manager()
-        current = manager.load()
-        for key, value in payload.items():
-            if key not in CONFIG_KEYS:
-                continue
-            if key in SENSITIVE_KEYS and value in (None, ""):
-                continue
-            current[key] = value
-        manager.save({key: value for key, value in current.items() if key in CONFIG_KEYS})
-        return JSONResponse({"saved": True})
+        payload = await _json_object(request, detail="settings_object_required")
+
+        def _save() -> tuple[dict[str, str], list[str]]:
+            manager = get_config_manager()
+            file_lock = getattr(manager, "_lock", None)
+            # One critical section for load -> validate -> merge -> save, so two
+            # concurrent saves cannot interleave and drop each other's fields.
+            with _SETTINGS_LOCK, file_lock if hasattr(file_lock, "__enter__") else nullcontext():
+                current = manager.load()
+                errors, cleared = _apply_settings_update(current, payload)
+                if not errors:
+                    manager.save({key: value for key, value in current.items() if key in CONFIG_KEYS})
+                return errors, cleared
+
+        errors, cleared = await run_in_threadpool(_save)
+        if errors:
+            summary = "; ".join(f"{key} {message}" for key, message in sorted(errors.items()))
+            return JSONResponse(
+                {
+                    "detail": f"Settings were not saved: {summary}.",
+                    "errors": [{"field": key, "message": message} for key, message in sorted(errors.items())],
+                },
+                status_code=422,
+            )
+        body: dict[str, Any] = {"saved": True}
+        if cleared:
+            body["cleared_keys"] = cleared
+            body["notice"] = (
+                "The provider API URL now points at a different host, so its stored API key was cleared. "
+                "Enter the key for the new host and save again."
+            )
+        return JSONResponse(body)
 
     @app.post("/api/ui/llm/models")
     async def discover_llm_models(request: Request) -> JSONResponse:
@@ -486,6 +714,10 @@ def create_app() -> FastAPI:
             if not base_url:
                 raise HTTPException(status_code=422, detail="llm_base_url_required")
             base_url = _validated_model_base_url(base_url)
+            if not api_key:
+                # Environment key only for the deployment's own origin; otherwise keyless.
+                environment_key = resolve_llm_api_key(provider, base_url, None)[0]
+                api_key = "" if environment_key == LMSTUDIO_PLACEHOLDER_KEY else environment_key
         elif provider == "openai":
             base_url = _draft_value(payload, "base_url", saved.get("cfg_openai_base_url"))
             base_url = _validated_model_base_url(base_url or "https://api.openai.com/v1")
@@ -496,11 +728,15 @@ def create_app() -> FastAPI:
                 str(saved.get("cfg_openai_base_url") or "https://api.openai.com/v1"),
             )
             if not api_key:
+                # Environment key only for the deployment's own origin, exactly as the worker does.
+                api_key = resolve_llm_api_key(provider, base_url, None)[0]
+            if not api_key:
                 raise HTTPException(status_code=422, detail="openai_api_key_required")
         else:
             # Anthropic's official SDK does not accept a user supplied base URL.
             base_url = ""
             api_key = _draft_value(payload, "api_key", saved.get("cfg_anthropic_key"))
+            api_key = resolve_llm_api_key(provider, base_url, api_key)[0]
             if not api_key:
                 raise HTTPException(status_code=422, detail="anthropic_api_key_required")
 

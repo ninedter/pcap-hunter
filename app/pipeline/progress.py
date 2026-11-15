@@ -24,6 +24,16 @@ class ProgressEvent:
 
 
 class PhaseHandle(Protocol):
+    """Streamlit-free contract every pipeline stage codes against.
+
+    Stages should annotate with this protocol (``from app.pipeline.progress import
+    PhaseHandle``). The concrete Streamlit widget handle lives in
+    ``app.pipeline.state.PhaseHandle`` and satisfies it structurally, as does
+    ``_CallbackPhaseHandle`` below; ``app.pipeline.state`` itself imports Streamlit
+    lazily, so the legacy ``from app.pipeline.state import PhaseHandle`` import path
+    also works in headless processes.
+    """
+
     def set(self, percent: int, message: str = "") -> None: ...
     def done(self, message: str = "Done") -> None: ...
     def should_skip(self) -> bool: ...

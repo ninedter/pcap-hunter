@@ -39,6 +39,96 @@ def _iso_utc(timestamp: float | None) -> str | None:
     return datetime.fromtimestamp(timestamp, tz=timezone.utc).isoformat()
 
 
+def _as_int(value: Any) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _zeek_coverage(state: Mapping[str, Any], features: Mapping[str, Any]) -> dict[str, dict[str, Any]]:
+    """Per-log Zeek row accounting recorded by the pipeline runner.
+
+    Looked up from an explicit ``state["zeek_coverage"]`` first, then from
+    ``features["coverage"]["zeek"]`` — the latter travels with the persisted
+    features, so the limitation survives every later rebuild of these metrics
+    (post-OSINT, case restore) where only the 2,000-row display tables remain.
+    """
+    raw = state.get("zeek_coverage")
+    if not isinstance(raw, Mapping):
+        coverage = features.get("coverage")
+        raw = coverage.get("zeek") if isinstance(coverage, Mapping) else None
+    if not isinstance(raw, Mapping):
+        return {}
+    return {str(name): dict(entry) for name, entry in raw.items() if isinstance(entry, Mapping)}
+
+
+def _coverage_limitations(
+    zeek_coverage: Mapping[str, Mapping[str, Any]],
+    parse_stats: Mapping[str, Any],
+    osint: Any,
+) -> list[str]:
+    """Turn truncation / skip accounting into analyst-readable limitation strings."""
+    limitations: list[str] = []
+
+    capped = []
+    sampled = []
+    bad = []
+    for name in sorted(zeek_coverage):
+        entry = zeek_coverage[name]
+        total = _as_int(entry.get("total_rows"))
+        analyzed = _as_int(entry.get("analyzed_rows"))
+        displayed = _as_int(entry.get("displayed_rows"))
+        bad_lines = _as_int(entry.get("bad_lines"))
+        if entry.get("analysis_truncated"):
+            capped.append(f"{name} (first {analyzed:,} of {total:,} rows)")
+        if entry.get("display_truncated"):
+            sampled.append(f"{name} ({displayed:,} of {analyzed:,})")
+        if bad_lines:
+            bad.append(f"{name} ({bad_lines:,})")
+    if capped:
+        limitations.append(
+            "Zeek log analysis hit the row cap, so activity late in the capture was not analyzed: "
+            + ", ".join(capped)
+            + "."
+        )
+    if sampled:
+        limitations.append(
+            "Stored and displayed Zeek tables are leading samples, not the full logs: "
+            + ", ".join(sampled)
+            + ". DNS and TLS detections were computed on the analyzed rows, not on these samples."
+        )
+    if bad:
+        limitations.append("Malformed Zeek log lines were skipped: " + ", ".join(bad) + ".")
+
+    skipped_lines = _as_int(parse_stats.get("skipped_lines"))
+    if skipped_lines:
+        limitations.append(
+            f"Packet parsing skipped {skipped_lines:,} malformed tshark line(s); flow totals exclude those packets."
+        )
+    if parse_stats.get("timed_out"):
+        limitations.append("Packet parsing hit its time limit; flows cover only the packets parsed before the timeout.")
+
+    if isinstance(osint, Mapping):
+        limits = osint.get("limits") if isinstance(osint.get("limits"), Mapping) else {}
+        dom_skipped = _as_int(limits.get("domains_skipped"))
+        if dom_skipped:
+            limitations.append(
+                f"OSINT domain enrichment was capped: {_as_int(limits.get('domains_queried')):,} of "
+                f"{_as_int(limits.get('domains_total')):,} domains queried (DNS-flagged domains first)."
+            )
+        health = osint.get("provider_health") if isinstance(osint.get("provider_health"), Mapping) else {}
+        disabled = sorted(
+            str(name) for name, info in health.items() if isinstance(info, Mapping) and info.get("circuit_open")
+        )
+        if disabled:
+            limitations.append(
+                "OSINT providers stopped answering (rate limit or server errors) and were skipped for the "
+                "rest of the run: " + ", ".join(disabled) + ". Their reputation data is incomplete."
+            )
+    return limitations
+
+
 def build_capture_metrics(state: Mapping[str, Any]) -> dict[str, Any]:
     """Build quality, scale, and visibility metrics from an analysis state."""
     features = state.get("features") if isinstance(state.get("features"), dict) else {}
@@ -94,6 +184,9 @@ def build_capture_metrics(state: Mapping[str, Any]) -> dict[str, Any]:
         limitations.append("One or more pipeline stages reported warnings: " + ", ".join(warnings[:5]))
     if not state.get("zeek_tables"):
         limitations.append("Zeek protocol logs are unavailable, so application-layer visibility is reduced.")
+    zeek_coverage = _zeek_coverage(state, features)
+    parse_stats = features.get("parse_stats") if isinstance(features.get("parse_stats"), Mapping) else {}
+    limitations.extend(_coverage_limitations(zeek_coverage, parse_stats, state.get("osint")))
 
     return {
         "packet_count": packet_count,
@@ -107,6 +200,8 @@ def build_capture_metrics(state: Mapping[str, Any]) -> dict[str, Any]:
         "unique_ips": len(artifacts.get("ips") or []),
         "unique_domains": len(artifacts.get("domains") or []),
         "sampled_flow_count": sampled_flows,
+        "parse_skipped_lines": _as_int(parse_stats.get("skipped_lines")),
+        "zeek_coverage": zeek_coverage,
         "first_seen": _iso_utc(first_seen),
         "last_seen": _iso_utc(last_seen),
         "duration_seconds": round(duration, 3) if duration is not None else None,

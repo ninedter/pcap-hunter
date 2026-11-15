@@ -5,7 +5,6 @@ from __future__ import annotations
 import hashlib
 import secrets
 from dataclasses import dataclass
-from datetime import datetime
 
 from app.api.auth import Scope
 from app.api.key_models import APIKey
@@ -96,9 +95,10 @@ def authenticate(
     if api_key.revoked_at is not None:
         raise ValueError("invalid_key")
 
-    if api_key.expires_at is not None:
-        if datetime.now() > api_key.expires_at:
-            raise ValueError("invalid_key")
+    # ``is_active`` compares offset-aware instants, so neither a legacy naive
+    # (local-time) expiry nor an offset-aware one can raise here.
+    if not api_key.is_active:
+        raise ValueError("invalid_key")
 
     # Step 5: Check scope
     _check_scope(api_key.scope, required)

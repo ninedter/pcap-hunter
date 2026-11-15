@@ -4,7 +4,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import secrets
+import sqlite3
+import threading
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 
@@ -25,9 +28,65 @@ def utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
 
+_SCHEMA_LOCK = threading.Lock()
+_SCHEMA_READY: dict[tuple, object] = {}
+
+
+def ensure_once(repo, component, initialise, still_valid=None):
+    """Run a schema initialiser once per process for one database file.
+
+    Request handlers construct registries and evidence services freely, so the
+    idempotent DDL must not be replayed (and committed) on every request. The
+    cache key includes the database file's device and inode, but that alone
+    does not identify a database: Linux filesystems reuse inode numbers, so a
+    database deleted and recreated at the same path (common in tests, possible
+    after a restore) can look identical. ``still_valid`` therefore re-checks a
+    cached entry with a cheap read-only query before it is trusted.
+
+    Args:
+        repo: Repository whose ``_db_path`` identifies the database.
+        component: Name of the schema component being initialised.
+        initialise: Zero-argument callable that applies the schema and returns
+            a value to cache (for example the persisted cursor key).
+        still_valid: Optional read-only callable taking the cached value and
+            returning whether the database still holds this component's schema.
+
+    Returns:
+        The value returned by ``initialise`` for this database file.
+    """
+    path = os.path.abspath(str(repo._db_path))
+    try:
+        metadata = os.stat(path)
+        identity = (component, path, metadata.st_dev, metadata.st_ino)
+    except OSError:
+        identity = None  # No stable file identity (e.g. in-memory): never cache.
+    with _SCHEMA_LOCK:
+        if identity is not None and identity in _SCHEMA_READY:
+            cached = _SCHEMA_READY[identity]
+            if still_valid is None or still_valid(cached):
+                return cached
+        value = initialise()
+        if identity is not None:
+            _SCHEMA_READY[identity] = value
+        return value
+
+
 class AgentRegistry:
     def __init__(self, repo):
         self.repo = repo
+        self.cursor_key = ensure_once(repo, "agent_registry", self._initialise, self._schema_matches)
+
+    def _schema_matches(self, cursor_key):
+        """Return whether this database still holds the cached cursor-signing key."""
+        try:
+            with self.connection() as conn:
+                row = conn.execute("SELECT value FROM agent_state WHERE name='cursor_key'").fetchone()
+        except sqlite3.Error:
+            return False
+        return row is not None and row[0] == cursor_key.hex()
+
+    def _initialise(self):
+        """Create the agent tables and return the persisted cursor-signing key."""
         with self.connection() as conn:
             conn.executescript("""
                 CREATE TABLE IF NOT EXISTS agent_state (name TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -58,9 +117,7 @@ class AgentRegistry:
                 CREATE INDEX IF NOT EXISTS idx_agent_audit_actor ON agent_audit(actor,id);
             """)
             conn.execute("INSERT OR IGNORE INTO agent_state VALUES ('cursor_key',?)", (secrets.token_hex(32),))
-            self.cursor_key = bytes.fromhex(
-                conn.execute("SELECT value FROM agent_state WHERE name='cursor_key'").fetchone()[0]
-            )
+            return bytes.fromhex(conn.execute("SELECT value FROM agent_state WHERE name='cursor_key'").fetchone()[0])
 
     @contextmanager
     def connection(self, write=False):

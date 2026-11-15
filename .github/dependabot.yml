@@ -1,0 +1,58 @@
+# Weekly, grouped dependency updates. Minor and patch bumps arrive as one PR per
+# ecosystem; majors stay individual so they get a real review.
+#
+# Notes for maintainers:
+# - docker: bumps the digest-pinned base images in the Dockerfile. Any such PR
+#   invalidates the native Zeek/TShark build cache, so expect a cold CI run.
+# - pip: Dependabot edits the requirements-*.txt input ranges only. It does not
+#   regenerate the uv-compiled, hash-pinned requirements*.lock files — run
+#   `make lock` on the PR branch (and `make lock-check` to confirm) before merging.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 3
+    commit-message:
+      prefix: "ci"
+    groups:
+      actions:
+        patterns: ["*"]
+
+  - package-ecosystem: docker
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 2
+    commit-message:
+      prefix: "chore"
+    groups:
+      base-images:
+        patterns: ["*"]
+
+  - package-ecosystem: pip
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 3
+    commit-message:
+      prefix: "chore"
+    groups:
+      python-minor-patch:
+        update-types: ["minor", "patch"]
+
+  - package-ecosystem: npm
+    directory: /prototype-friendly-ui
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 3
+    commit-message:
+      prefix: "chore"
+    groups:
+      frontend-minor-patch:
+        update-types: ["minor", "patch"]

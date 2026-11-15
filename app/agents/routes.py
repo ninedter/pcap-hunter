@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+from datetime import datetime
 from typing import Annotated, Literal
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
@@ -352,7 +353,7 @@ def append_draft(case_id: str, body: Draft, request: Request, principal=Depends(
 
 @router.post("/agent/jobs/{job_id}/cancel")
 def cancel(job_id: str, request: Request, principal=Depends(actor), repo=Depends(get_repo)):
-    from app.agents.spool import atomic_json, input_root
+    from app.agents.spool import request_stop
 
     job = repo.get_job(job_id)
     if job is None:
@@ -365,8 +366,14 @@ def cancel(job_id: str, request: Request, principal=Depends(actor), repo=Depends
         status = conn.execute("SELECT status FROM jobs WHERE id=?", (job_id,)).fetchone()[0]
         if status not in {"queued", "running", "cancelled"}:
             raise HTTPException(409, "job_is_finished")
-        conn.execute("UPDATE jobs SET status='cancelled' WHERE id=? AND status IN ('queued','running')", (job_id,))
-    folder = input_root() / job_id
-    folder.mkdir(parents=True, exist_ok=True)
-    atomic_json(folder / "cancel.json", {"cancelled": True})
+        # finished_at (naive local time, like every other job timestamp) is what
+        # lets job retention reap the row later.
+        transitioned = conn.execute(
+            "UPDATE jobs SET status='cancelled',finished_at=? WHERE id=? AND status IN ('queued','running')",
+            (datetime.now().isoformat(), job_id),
+        ).rowcount
+    # The cancelling request always leaves the signal, even when a concurrent
+    # dispatch has not created the input directory yet. A repeated cancel only
+    # refreshes it and never recreates an input the broker already removed.
+    request_stop(job_id, create=bool(transitioned))
     return receipt(request, {"job_id": job_id, "status": "cancelled"})

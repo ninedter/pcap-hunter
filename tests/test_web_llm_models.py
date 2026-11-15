@@ -19,6 +19,9 @@ class _Config:
 
 def _client(monkeypatch, tmp_path, config=None):
     repo = CaseRepository(db_path=str(tmp_path / "cases.db"))
+    # Discovery may fall back to an environment key; tests set one explicitly after this.
+    for name in ("OPENAI_API_KEY", "ANTHROPIC_API_KEY", "LMSTUDIO_API_KEY", "OPENAI_BASE_URL", "LMSTUDIO_BASE_URL"):
+        monkeypatch.delenv(name, raising=False)
     monkeypatch.setattr(web_app, "get_repo", lambda: repo)
     monkeypatch.setattr(web_app, "get_config_manager", lambda: _Config(config or {}))
     return TestClient(web_app.create_app(), base_url="http://localhost")
@@ -285,3 +288,83 @@ def test_new_lmstudio_endpoint_uses_no_saved_credential(monkeypatch, tmp_path):
     result = client.post("/api/ui/llm/models", json={"provider": "lmstudio", "base_url": "http://localhost:1235/v1"})
     assert result.status_code == 200
     assert discover.call_args.kwargs["api_key"] == ""
+
+
+def test_model_discovery_uses_the_environment_key_only_for_its_own_origin(monkeypatch, tmp_path):
+    client = _client(monkeypatch, tmp_path)
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-env")
+    discover = MagicMock(return_value=[])
+    monkeypatch.setattr(web_app, "_discover_llm_models", discover)
+
+    assert client.post("/api/ui/llm/models", json={"provider": "openai"}).status_code == 200
+    discover.assert_called_once_with("openai", base_url="https://api.openai.com/v1", api_key="sk-env")
+
+    discover.reset_mock()
+    moved = client.post("/api/ui/llm/models", json={"provider": "openai", "base_url": "https://other.example/v1"})
+    assert moved.status_code == 422 and moved.json()["detail"] == "openai_api_key_required"
+    discover.assert_not_called()
+
+
+def test_lmstudio_discovery_withholds_the_environment_key_from_another_host(monkeypatch, tmp_path):
+    client = _client(monkeypatch, tmp_path)
+    monkeypatch.setenv("LMSTUDIO_API_KEY", "lm-env-secret")
+    monkeypatch.setenv("LMSTUDIO_BASE_URL", "http://localhost:1234/v1")
+    discover = MagicMock(return_value=[])
+    monkeypatch.setattr(web_app, "_discover_llm_models", discover)
+
+    client.post("/api/ui/llm/models", json={"provider": "lmstudio", "base_url": "http://localhost:1234/v1"})
+    assert discover.call_args.kwargs["api_key"] == "lm-env-secret"
+    client.post("/api/ui/llm/models", json={"provider": "lmstudio", "base_url": "http://192.168.1.9:1234/v1"})
+    assert discover.call_args.kwargs["api_key"] == ""  # keyless local use still works
+
+
+ACCEPTED_MODEL_HOSTS = [
+    "http://localhost:1234/v1",
+    "http://127.0.0.1:1234/v1",
+    "http://[::1]:1234/v1",
+    "http://host.docker.internal:1234/v1",
+    "http://192.168.1.9:1234/v1",
+    "http://10.0.0.5/v1",
+    "http://172.16.4.4:8080/v1",
+    "http://[::ffff:192.168.1.9]:1234/v1",
+    "http://[fd00::1]:1234/v1",
+    "https://api.openai.com/v1",
+    "https://8.8.8.8/v1",
+    "https://3com.example/v1",
+    "https://0x.example/v1",
+    "https://123.example.com/v1",
+]
+REJECTED_MODEL_HOSTS = [
+    "http://169.254.169.254/latest",
+    "http://[fe80::1]/v1",
+    "http://0.0.0.0/v1",
+    "http://[::]/v1",
+    "http://224.0.0.1/v1",
+    "http://[::ffff:169.254.169.254]/",
+    "http://[::ffff:a9fe:a9fe]/",
+    "http://[::ffff:0.0.0.0]/",
+    "http://2852039166/",
+    "http://0xa9fea9fe/",
+    "http://0XA9FEA9FE/",
+    "http://025177524776/",
+    "http://169.254.43518/",
+    "http://169.16689662/",
+    "http://0251.0376.0251.0376/",
+    "http://0xa9.0xfe.0xa9.0xfe/",
+    "http://169.254.169.254./",
+    "http://127.1/",
+    "http://0/",
+    "http://1.2.3.4.5/",
+]
+
+
+def test_model_base_url_host_table():
+    import pytest
+    from fastapi import HTTPException
+
+    for url in ACCEPTED_MODEL_HOSTS:
+        assert web_app._validated_model_base_url(url) == url, url
+    for url in REJECTED_MODEL_HOSTS:
+        with pytest.raises(HTTPException) as caught:
+            web_app._validated_model_base_url(url)
+        assert (caught.value.status_code, caught.value.detail) == (422, "invalid_model_api_url"), url

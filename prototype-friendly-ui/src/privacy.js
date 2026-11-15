@@ -73,8 +73,19 @@ function isSecretKey(key) {
   return /(?:^|_)(?:api_?)?key$|password|secret|token/i.test(key);
 }
 
+// One registry for the whole page so "[IP 01]" names the same host on every
+// screen (Dashboard, Evidence Explorer, exports) for the life of the session.
+let sharedTokenFor = createTokenRegistry();
+
+/** Forget every issued replacement label. Intended for tests. */
+export function resetPrivacyRegistry() {
+  sharedTokenFor = createTokenRegistry();
+}
+
+const ORGANIZATION_PLACEHOLDERS = new Set(["no organization data", "no enrichment data"]);
+
 export function sanitizeWorkbenchPayload(payload) {
-  const tokenFor = createTokenRegistry();
+  const tokenFor = sharedTokenFor;
 
   const redactString = (value) => {
     let redacted = value.replace(PATTERNS.url, (match) => tokenFor("URL", match));
@@ -93,17 +104,26 @@ export function sanitizeWorkbenchPayload(payload) {
   const visit = (value, path = []) => {
     const key = path.at(-1) || "";
 
-    if (Array.isArray(value)) return value.map((item, index) => visit(item, [...path, String(index)]));
+    if (Array.isArray(value)) {
+      // GeoJSON-style [lon, lat] pairs would otherwise plot markers at true positions.
+      if (key === "coordinates") return value.map((item) => (typeof item === "number" ? 0 : visit(item, [...path, "coordinates"])));
+      return value.map((item, index) => visit(item, [...path, String(index)]));
+    }
     if (value && typeof value === "object") {
       return Object.fromEntries(Object.entries(value).map(([childKey, childValue]) => [childKey, visit(childValue, [...path, childKey])]));
     }
 
     if (typeof value === "string") {
+      const inCases = path.includes("cases");
       if (isSecretKey(key) && value) return "[SECRET REDACTED]";
-      if (/^(?:active_)?(?:case|analysis|job|run)_id$/.test(key) || (path.includes("cases") && key === "id")) return tokenFor("ID", value);
-      if (key === "active_case_title" || (path.includes("cases") && key === "title")) return "[CASE TITLE REDACTED]";
+      if (/^(?:active_)?(?:case|analysis|job|run)_id$/.test(key) || (inCases && key === "id")) return tokenFor("ID", value);
       if (path.includes("notes") && key === "content") return "[NOTE REDACTED]";
-      if (path.includes("jobs") && key === "name") return tokenFor("CAPTURE", value);
+      // Capture filenames are free text ("ACME Corp breach.pcap"): replace the whole name.
+      if ((path.includes("jobs") || path.includes("analyses")) && key === "name") return tokenFor("CAPTURE", value);
+      if (key === "active_case_title" || (inCases && key === "title")) return "[CASE TITLE REDACTED]";
+      if (inCases && key === "description") return value ? "[CASE DESCRIPTION REDACTED]" : value;
+      if (inCases && path.at(-2) === "tags") return tokenFor("TAG", value);
+      if (key === "organization" || key === "org") return !value || ORGANIZATION_PLACEHOLDERS.has(value.toLowerCase()) ? value : tokenFor("ORG", value);
       if (key === "flow_id") return tokenFor("ID", value);
       if (key === "city") return tokenFor("CITY", value);
       if (key === "country") return tokenFor("COUNTRY", value);

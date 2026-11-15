@@ -232,12 +232,12 @@ def install_python_deps(dry_run: bool) -> None:
     run([sys.executable, "-m", "pip", "install", "--upgrade", "pip"], dry_run=dry_run)
     run([sys.executable, "-m", "pip", "install", "-r", str(REQUIREMENTS)], dry_run=dry_run)
 
-    # kaleido 0.2.1 (pinned in requirements.txt) ships its own headless
-    # Chromium inside the wheel — no separate browser install or first-use
-    # download. Render a tiny PNG here to verify the static-image pipeline
-    # works end-to-end. Best-effort — if it fails, PDF charts are the only
-    # feature affected.
-    info("Verifying kaleido static-image renderer...")
+    # kaleido 1.x (requirements-runtime.txt: kaleido>=1.5,<2) does NOT bundle a
+    # browser — it drives an external Chrome/Chromium found on the host.
+    # Render a tiny PNG here to verify the static-image pipeline works
+    # end-to-end. Best-effort — if it fails, chart images in PDF reports are
+    # the only feature affected, so this stays a warning.
+    info("Verifying kaleido static-image renderer (needs Chrome or Chromium)...")
     if not dry_run:
         try:
             import plotly.graph_objects as _go
@@ -245,7 +245,15 @@ def install_python_deps(dry_run: bool) -> None:
             _go.Figure().to_image(format="png", width=10, height=10)
             ok("kaleido renderer ready")
         except Exception as e:
-            warn(f"kaleido render check skipped: {e}")
+            warn(f"kaleido could not render a test chart: {e}")
+            warn("  kaleido 1.x does not bundle a browser; it needs Chrome or Chromium on this machine.")
+            warn("  Until then, PDF reports are generated without chart images. To fix, do one of:")
+            warn("    1. Download a private Chrome:   plotly_get_chrome")
+            warn("       If that command is not on PATH, run this instead:")
+            warn(f"         {sys.executable} -c 'import kaleido; kaleido.get_chrome_sync()'")
+            warn("    2. Install Google Chrome or Chromium; if it is not auto-detected,")
+            warn("       set BROWSER_PATH to the browser executable.")
+            warn("  Then re-run:  python3 scripts/install.py --skip-system")
 
 
 # ---------------------------------------------------------------------------

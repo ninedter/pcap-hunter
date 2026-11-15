@@ -45,6 +45,9 @@ data/
 .DS_Store
 node_modules/
 prototype-friendly-ui/dist/
+# Frontend bundle copied in by `make web-build` / the Docker build; only the placeholder is tracked.
+app/web/static/*
+!app/web/static/.gitkeep
 .ux-audit/
 output/
 tmp/

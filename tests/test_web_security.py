@@ -69,3 +69,30 @@ def test_same_origin_json_and_uploads_work(guarded_client):
     assert response.headers["x-frame-options"] == "DENY"
     assert client.post("/api/ui/uploads", files={"files": ("probe.pcap", b"test")}, headers=headers).status_code == 200
     assert calls == [True, True]
+
+
+@pytest.mark.parametrize("path", ["/api/ui/boom", "/boom"])
+def test_unhandled_handler_error_is_a_hardened_json_500(path, caplog):
+    from app.web.security import CONTENT_SECURITY_POLICY
+
+    app = FastAPI()
+    app.add_middleware(LocalWorkbenchMiddleware)
+
+    @app.get(path)
+    def boom():
+        raise RuntimeError("secret-internal-detail /Users/someone/key")
+
+    client = TestClient(app, base_url="http://127.0.0.1:8501", raise_server_exceptions=False)
+    with caplog.at_level("ERROR", logger="app.web.security"):
+        response = client.get(path)
+
+    assert response.status_code == 500
+    assert response.headers["content-type"].startswith("application/json")
+    assert response.json() == {"detail": "internal_server_error"}
+    assert "secret-internal-detail" not in response.text
+    assert response.headers["Content-Security-Policy"] == CONTENT_SECURITY_POLICY
+    assert response.headers["X-Content-Type-Options"] == "nosniff"
+    assert response.headers["X-Frame-Options"] == "DENY"
+    assert response.headers["Cache-Control"] == "no-store"
+    logged = [record for record in caplog.records if record.name == "app.web.security"]
+    assert logged and logged[0].exc_info and "secret-internal-detail" in str(logged[0].exc_info[1])

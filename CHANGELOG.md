@@ -4,6 +4,76 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Added
+
+- **Connection-level beacon detection.** Beaconing is now also scored across the separate connections one host makes to the same destination and port, so a beacon that reconnects for every check-in is found. Rows carry `aggregation` (`flow` or `connection`) and `connections`.
+- Zeek `files.log`, `notice.log`, `weird.log` and `x509.log` are collected when Zeek produces them.
+- Analyses report partial coverage instead of hiding it: new warnings `pyshark_timeout`, `pyshark_lines_skipped`, `zeek_rows_capped` and `zeek_bad_lines`, per-log Zeek row accounting, and OSINT `limits` / `provider_health` / `warnings`.
+- OSINT retries `429` and `5xx` answers with backoff (honouring `Retry-After`), stops querying a provider that keeps failing for the rest of the run, and queries at most 100 domains per run with DNS-flagged domains first.
+- IOC feed errors `invalid_since` and `invalid_cursor` (422), and agent job error codes `agent_job_deadline_exceeded` and `agent_launcher_failed`.
+- Workbench: `GET /api/ui/jobs` for lightweight progress polling, drag-and-drop capture upload with client-side checks (extension, 50 files, 1 GB per file, 5 GB total), and run-queue rows that show failed and cancelled jobs.
+- `make run-web` / `make web-build` to build and serve the v3 workbench on the host for development, mirroring the Dockerfile's frontend build and `uvicorn` command.
+- `make lock` and `make lock-check` to recompile the three `uv` lock files and detect drift from their inputs.
+- A committed synthetic capture (`tests/fixtures/e2e_small.pcap`, with its deterministic generator) so the end-to-end pipeline tests run by default instead of skipping; real captures can still be supplied through `PCAP_HUNTER_E2E_PCAP`.
+- Grouped weekly Dependabot updates for GitHub Actions, Docker base images, Python inputs and the frontend.
+
+### Changed
+
+- **More periodic web traffic is now listed as beaconing.** The score multiplier for ports 80 and 443 changed from 0.3 / 0.15 to 0.8, so a strongly periodic HTTP(S) flow is no longer suppressed below the reporting thresholds. Expect more web beacon candidates, including benign keep-alives, to review.
+- DNS and TLS analysis read the whole Zeek log (up to 200,000 rows each for `dns.log` and `ssl.log`) instead of the first 2,000 rows; only the stored and displayed copy is limited to 2,000 rows. Findings late in a long capture are no longer missed.
+- DGA scoring is reworked around pronounceability (common letter pairs, vowel and consonant runs), digit mixing and length-normalised entropy, with subdomain labels weighted lower. Brand names with one odd property are no longer flagged; scores differ from earlier releases.
+- DNS tunneling and per-domain grouping use the registrable domain, including multi-part suffixes such as `co.uk` and `com.tw`; fast flux counts only responses that introduce a new address, and query rates are measured over at least five seconds.
+- Exfiltration findings are directional: every row has the sender as `src` and a `direction`, both orientations of a host pair are checked, and a download from a public server to an internal host is no longer reported.
+- C2-suspect ports support an ATT&CK mapping only with sustained use, and with lower confidence when nothing else corroborates them; reply traffic from well-known services is ignored.
+- `pyshark_packet_limit`: omitting it now applies the 200,000-packet default (previously no cap was applied, despite the documentation), and `0` means unlimited. API callers that relied on omitting the field to parse everything must now send `0`.
+- Packet parsing has a 900-second time limit; when it is reached the flows parsed so far are kept and the run is marked partial.
+- The OSINT response cache setting is honoured by the API and worker paths (it was only effective inside the legacy Streamlit interface), and IPv6 addresses are included in OSINT enrichment and top-N selection.
+- Key `expires_at` and feed `since` accept a trailing `Z` or a UTC offset; an unparseable `expires_at` now returns 422 instead of 400 (code `invalid_expires_at` unchanged).
+- STIX feed timestamps are UTC with a `Z` suffix.
+- Workbench Findings shows a verdict derived from the analysis's actual risk, with loading, error and empty states; fixed sample text that did not come from the analysis is removed, and indicator counts show the saved total when only part is loaded.
+- Agent job status no longer exposes parser-reported stages; a running job shows one fixed stage. Agent ingest receipts are schema version `"2"`.
+- The workbench loads faster with many cases: listing cases no longer decompresses each analysis's evidence, and progress polling fetches only the job list.
+- CI reports Ruff (now including `scripts/`) and frontend unit-test failures from a fast `quick` job that does not wait for the native image build, compiles Zeek with all runner cores, and rebuilds and rescans `main` twice a week. The required `test` check now also requires `quick`.
+- Documentation states that Docker is the supported way to run the v3 workbench, that `make run` starts the legacy Streamlit interface, and that Python 3.13 is the supported version; the user manuals are marked as describing the legacy interface. The Traditional Chinese README and agent guide are brought up to date.
+
+### Fixed
+
+- **Analyses started from the workbench or API could not read saved settings in v3.1.0, and could fail outright.** The saved-configuration file lock was created in the server process and then inherited by the forked analysis worker, which the lock library refuses to use. Workers silently fell back to environment-only API keys and default YARA rules, and jobs failed with "Evidence persistence did not complete". The lock is now created per process.
+- **Agent capture submissions failed with `offline_worker_failed` whenever a beacon row had an unmeasured metric.** Pandas stored the missing `jitter_pct` / `dominant_interval` as `NaN`, which the strict result encoder rejects. Unmeasured metrics are now `null`, and the worker replaces any non-finite number before writing its result.
+- TLS certificate extraction returned no certificates from real captures because tshark's quoted, comma-joined field output was not parsed. Certificates are now extracted, expiry is judged at capture time rather than today, and the server endpoint is reported correctly whichever direction the certificate travelled.
+- TLS alerts, YARA matches and DNS tunneling findings now reach correlation, the timeline and ATT&CK mapping; mismatched stage output shapes had silently dropped them. Carved files record their source and destination addresses so a YARA match can be tied to a host.
+- Timeline and narrative events use the time each event was observed in the capture; events without an observed time are no longer given an invented one. Timeline buckets no longer merge the same clock minute from different days.
+- A perfectly regular flow (zero variation between intervals) scored as the least periodic instead of the most.
+- One malformed packet line or Zeek log line no longer discards the rest of the capture or the whole log; skipped lines are counted and reported.
+- The analysis pipeline can be imported and run where Streamlit is not installed; reverse-DNS lookups no longer change the process-wide socket timeout.
+- Jobs interrupted by a restart are recovered reliably: queued jobs are re-dispatched (or failed with `input_missing_after_restart` when the upload is gone), a periodic sweep fails jobs whose worker died, a heartbeat runs through long OSINT and LLM stages, and a finished job's state is never overwritten. A killed worker no longer breaks all later submissions.
+- API keys with an offset-aware expiry no longer cause errors when used or listed; an unreadable stored expiry is treated as expired.
+- The IOC feed compared `since` as text, which mis-ordered timestamps with different offsets, and silently restarted at the first page on a malformed cursor.
+- The cached PDF report is regenerated after the LLM narrative is rewritten, not only after a new analysis.
+- Workbench settings are validated before saving (a rejected save changes nothing and names each field), concurrent saves no longer drop each other's changes, and malformed JSON bodies return 400 `invalid_json` instead of a server error.
+- Agent jobs no longer wait forever when the launcher or Docker is down (they fail with `agent_job_deadline_exceeded`); the launcher survives Docker outages and retries a refused job before reporting `agent_launcher_failed`; cancelled and closed jobs have their temporary input removed, and a cancelled job can no longer gain an analysis.
+- Workbench privacy mode uses the same replacement label for a host on every screen and export, hides map coordinates, and replaces whole capture filenames; a slow background refresh can no longer overwrite a newer one; a low score is shown as assessed only when a reputation provider actually answered.
+- The standalone installer and README no longer claim that kaleido bundles its own browser; they explain how to provide Chrome/Chromium for PDF chart images when the render check fails.
+
+### Security
+
+- The workbench sends a Content-Security-Policy on every response that restricts scripts, styles, images, fonts and connections to its own origin and forbids framing.
+- Rendered AI reports no longer load images; an `[image omitted]` placeholder is shown, so report text cannot make the analyst's browser contact a remote host.
+- Changing a provider's API URL to a different host without entering a new key clears the stored key instead of sending it to the new host.
+- Agent ingest receipts are built from broker-held facts. Tool versions, rule hashes and timestamps reported by the untrusted parser are kept only under `parser_asserted`, and `analyzed_at` is stamped by the broker.
+- Agent auditing fails closed: if an audit record cannot be written the response is withheld and the agent receives 503 `agent_audit_unavailable` with `Retry-After`.
+- STIX patterns escape backslashes as well as single quotes, so an indicator value cannot break out of its string literal.
+- The API-key lockout warning points to the supported recovery path (bootstrap `PCAP_HUNTER_API_KEY`, then `POST /api/v1/admin/keys`) instead of a screen the v3 workbench does not have.
+- LLM keys supplied through environment variables (`OPENAI_API_KEY`, `LMSTUDIO_API_KEY`) are only sent to the provider's default or environment-configured base URL. If the saved base URL points elsewhere the key is withheld and the job records `llm_env_key_withheld_base_url_changed`.
+- API key `expires_at` must fall between 1971-01-01 and 8999-12-31 (422 otherwise); an unreadable stored expiry counts as expired and no longer breaks key listing or API start-up.
+- The agent broker selects jobs by the parsed `_agent_id` option, so a workbench upload whose filename merely contains that text is never handed to the agent parser.
+- Unhandled workbench errors return a JSON 500 that still carries the security headers; LLM base URLs given as bare integer, hex or IPv4-mapped IPv6 hosts are rejected.
+- A parser container that fails after it has started is failed once instead of being retried.
+
+### Removed
+
+- The empty, unused `pcaps/__init__.py` package marker.
+
 ## [3.1.0] - 2026-10-31
 
 ### Added

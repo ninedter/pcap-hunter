@@ -206,7 +206,7 @@ def test_stages_4_to_7_run_concurrently(monkeypatch, tmp_path):
     monkeypatch.setattr(R, "count_packets_fast", lambda p: 10)
     monkeypatch.setattr(R, "parse_pcap_pyshark", lambda p, **kw: features)
     monkeypatch.setattr(R, "run_zeek", lambda p, d, phase=None: {"dns.log": str(tmp_path / "d.log")})
-    monkeypatch.setattr(R, "load_zeek_any", lambda p: pd.DataFrame({"query": ["a.com"]}))
+    monkeypatch.setattr(R, "load_zeek_any", lambda p, max_rows=None: pd.DataFrame({"query": ["a.com"]}))
     monkeypatch.setattr(R, "merge_zeek_dns", lambda zt, f: f)
 
     lock = threading.Lock()
@@ -277,7 +277,7 @@ def test_stage_order_deterministic_and_carve_hashes_backfilled(monkeypatch, tmp_
     monkeypatch.setattr(R, "count_packets_fast", lambda p: 10)
     monkeypatch.setattr(R, "parse_pcap_pyshark", lambda p, **kw: features)
     monkeypatch.setattr(R, "run_zeek", lambda p, d, phase=None: {"dns.log": str(tmp_path / "d.log")})
-    monkeypatch.setattr(R, "load_zeek_any", lambda p: pd.DataFrame({"query": ["a.com"]}))
+    monkeypatch.setattr(R, "load_zeek_any", lambda p, max_rows=None: pd.DataFrame({"query": ["a.com"]}))
     monkeypatch.setattr(R, "merge_zeek_dns", lambda zt, f: f)
     monkeypatch.setattr(R, "analyze_dns", lambda *a, **kw: {})
     monkeypatch.setattr(R, "analyze_certificates", lambda *a, **kw: {})
@@ -325,7 +325,7 @@ def _stub_stage_dirs(monkeypatch, tmp_path, zeek_logs=None):
         return []
 
     monkeypatch.setattr(R, "run_zeek", _fake_run_zeek)
-    monkeypatch.setattr(R, "load_zeek_any", lambda p: pd.DataFrame({"query": ["a.com"]}))
+    monkeypatch.setattr(R, "load_zeek_any", lambda p, max_rows=None: pd.DataFrame({"query": ["a.com"]}))
     monkeypatch.setattr(R, "merge_zeek_dns", lambda zt, f: f)
     monkeypatch.setattr(R, "analyze_dns", lambda *a, **kw: {})
     monkeypatch.setattr(R, "analyze_certificates", lambda *a, **kw: {})

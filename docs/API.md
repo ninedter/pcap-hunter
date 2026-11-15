@@ -3,7 +3,7 @@
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.111+-009688.svg)](https://fastapi.tiangolo.com/)
 [![OpenAPI](https://img.shields.io/badge/OpenAPI-3.1-6BA539.svg)](https://spec.openapis.org/oas/v3.1.0)
 
-The Integrations API lets external platforms (SOAR, SIEM, log analysis tools, custom scripts) submit PCAPs for analysis and consume extracted IOCs as a feed. It runs as a separate `uvicorn` process alongside the Streamlit UI, sharing the same pipeline, case database, and configuration.
+The Integrations API lets external platforms (SOAR, SIEM, log analysis tools, custom scripts) submit PCAPs for analysis and consume extracted IOCs as a feed. It runs as a separate `uvicorn` process alongside the web workbench, sharing the same pipeline, case database, and configuration.
 
 | | |
 |---|---|
@@ -34,6 +34,7 @@ The Integrations API lets external platforms (SOAR, SIEM, log analysis tools, cu
 - [Configuration Reference](#configuration-reference)
 - [SIEM Integration Examples](#siem-integration-examples)
 - [Architecture Notes](#architecture-notes)
+- [Workbench UI API](#workbench-ui-api)
 
 ---
 
@@ -131,7 +132,7 @@ Authorization: Bearer <token>
 |----------|--------|-------------|------------|
 | 1 | Environment variable (main) | Any string | `PCAP_HUNTER_API_KEY=...` |
 | 2 | Environment variable (feed) | Any string | `PCAP_HUNTER_FEED_KEY=...` |
-| 3 | Database-backed keys | `phk_` prefix + 32 hex chars | Created via admin endpoints or Streamlit UI |
+| 3 | Database-backed keys | `phk_` prefix + 32 hex chars | Created via admin endpoints (or the legacy Streamlit UI) |
 
 Environment-variable keys are checked first using constant-time comparison (no database query). If neither matches, the token is SHA-256 hashed and looked up in the key database. Expired and revoked DB keys fail with the same `invalid_key` error as unknown tokens — callers deliberately cannot distinguish key states.
 
@@ -210,9 +211,14 @@ Response (201 Created):
 
 > **Save the `key` value immediately.** It cannot be retrieved later.
 
-### Create a Key via Streamlit UI
+### Keys and the web UI
 
-Navigate to the **API Keys** tab in the Streamlit interface to create, view, and revoke keys with a visual management interface.
+The v3 workbench does **not** create, display, or edit integration keys. **Settings → API access** is read-only: it shows the integrations service and its endpoint list. Bootstrap `full` and `feed` keys through the deployment environment (`PCAP_HUNTER_API_KEY`, `PCAP_HUNTER_FEED_KEY`), then create, list, and revoke database-backed `phk_` keys with the admin endpoints described above.
+
+Two related paths exist:
+
+- **Agent credentials** (`pha_`, case-scoped and expiring) are a separate mechanism created in **Settings → Agent access** — see [Agent usage and setup](AGENT_USAGE.md).
+- The **legacy Streamlit interface** (`make run`) still has a visual **API Keys** tab for creating, viewing, and revoking `phk_` keys.
 
 ### Key Lifecycle
 
@@ -323,7 +329,7 @@ curl http://localhost:8000/readyz
 
 #### `POST /api/v1/pcaps`
 
-Submit a PCAP file for background analysis. The upload is streamed to disk in 1 MiB chunks (under `PCAP_HUNTER_API_UPLOADS_DIR`, default `data/api_uploads/<case_id>.pcap`), size-checked during the stream and magic-checked afterwards — oversized or non-PCAP uploads are deleted immediately and rejected. On acceptance the endpoint **creates a new case** (visible in the Streamlit Cases tab with `source = api`) and **enqueues a job** on the analysis queue, then returns `202 Accepted` with polling links. Requires `full` scope. **Not idempotent** — every successful call creates a fresh case and job, even for a byte-identical file. If the queue is full, the upload file and provisional case are removed before returning `503 queue_full`.
+Submit a PCAP file for background analysis. The upload is streamed to disk in 1 MiB chunks (under `PCAP_HUNTER_API_UPLOADS_DIR`, default `data/api_uploads/<case_id>.pcap`), size-checked during the stream and magic-checked afterwards — oversized or non-PCAP uploads are deleted immediately and rejected. On acceptance the endpoint **creates a new case** (visible in the workbench's Cases view with `source = api`) and **enqueues a job** on the analysis queue, then returns `202 Accepted` with polling links. Requires `full` scope. **Not idempotent** — every successful call creates a fresh case and job, even for a byte-identical file. If the queue is full, the upload file and provisional case are removed before returning `503 queue_full`.
 
 **Auth:** `full` scope required
 
@@ -338,9 +344,9 @@ Submit a PCAP file for background analysis. The upload is streamed to disk in 1 
 | `tags` | string | No | `[]` | JSON array (e.g. `["soar","edr"]`) or comma-separated list (`soar,edr`) |
 | `severity_hint` | string | No | `medium` | `low`, `medium`, `high`, or `critical`; unrecognized values fall back to `medium` |
 | `osint_enabled` | boolean | No | `true` | Run OSINT enrichment after analysis (see below) |
-| `pyshark_packet_limit` | integer | No | server default (200,000) | Cap on packets to deep-parse |
+| `pyshark_packet_limit` | integer | No | server default (200,000) | Cap on packets to deep-parse. Omit the field to use the default (`DEFAULT_PYSHARK_LIMIT`, 200,000); a positive value is a hard cap; `0` (or a negative value) means **unlimited** — every packet is parsed |
 
-**OSINT enrichment (`osint_enabled`):** when enabled, the worker enriches the top public IPs after analysis using provider keys from the saved Streamlit config (`cfg_*_key` values) or, as a fallback, the environment (`OTX_KEY`, `VT_KEY`, `ABUSEIPDB_KEY`, `GREYNOISE_KEY`, `SHODAN_KEY`). If no provider keys are configured, the job still completes — with the warning code `osint_not_configured` in the result. Note: the API path always queries providers fresh; the OSINT response cache is not used headless.
+**OSINT enrichment (`osint_enabled`):** when enabled, the worker enriches the top public IPs after analysis using provider keys from the saved application config (`cfg_*_key` values) or, as a fallback, the environment (`OTX_KEY`, `VT_KEY`, `ABUSEIPDB_KEY`, `GREYNOISE_KEY`, `SHODAN_KEY`). If no provider keys are configured, the job still completes — with the warning code `osint_not_configured` in the result. Public IPv6 addresses are enriched alongside IPv4. The worker honours the saved **OSINT response cache** setting (`cfg_osint_cache_enabled`, off by default): when it is on, cached provider answers are reused; when it is off, every lookup is sent fresh. At most 100 domains are queried per run (`OSINT_MAX_DOMAINS_DEFAULT`), with domains flagged by DNS analysis queried first. A provider answering `429` or `5xx` is retried up to twice (honouring `Retry-After` up to 30 seconds); after three consecutive lookups end that way — or a longer `Retry-After` — that provider is skipped for the rest of the run.
 
 **Sample request:**
 
@@ -518,7 +524,12 @@ curl http://localhost:8000/api/v1/jobs/j_7d4e9f21 \
 }
 ```
 
-> A second failure code exists: `interrupted_restart` — set at API startup for jobs that were `running` with a stale heartbeat when the server restarted ("API restarted with this job in flight; resubmit the PCAP to retry.").
+> Two further failure codes are written by job recovery rather than by the pipeline (see [Background Processing](#background-processing)):
+>
+> - `interrupted_restart` — the job was `running` when its worker went away: either the service that owned it restarted, or its heartbeat went stale for 120 seconds — while the service is running this must be seen on two consecutive sweeps, so a host suspend does not fail a healthy job ("The service restarted with this job in flight; resubmit the PCAP to retry.").
+> - `input_missing_after_restart` — the job was still `queued` when the service restarted and its uploaded capture no longer exists, so it could not be re-dispatched.
+>
+> A terminal state is final: once a job is `done`, `failed` or `cancelled`, a late write from a worker or from recovery never changes it.
 
 **Error responses:**
 
@@ -619,7 +630,7 @@ Example `409`:
 
 #### `GET /api/v1/cases/{case_id}`
 
-Fetch the full case record — title, status, severity, tags, plus every persisted analysis (with its extracted IOCs) and case notes embedded. API-submitted cases are created with `status = in_progress` and the requested `severity_hint`; the same record is visible in the Streamlit Cases tab. Read-only and idempotent. Requires `full` scope. Note that embedded `analyses[]` can be large (the `features` object holds the full feature extraction); fetch the job result instead if you only need pipeline output.
+Fetch the full case record — title, status, severity, tags, plus every persisted analysis (with its extracted IOCs) and case notes embedded. API-submitted cases are created with `status = in_progress` and the requested `severity_hint`; the same record is visible in the workbench's Cases view. Read-only and idempotent. Requires `full` scope. Note that embedded `analyses[]` can be large (the `features` object holds the full feature extraction); fetch the job result instead if you only need pipeline output.
 
 **Auth:** `full` scope required
 
@@ -693,7 +704,7 @@ Render the case's PDF report **on demand** from its most recent persisted analys
 Side effects and caching:
 
 - Rendered PDFs are cached under `PCAP_HUNTER_API_REPORTS_DIR` (default `data/reports/`; legacy alias `PCAP_HUNTER_REPORTS_DIR`) and served from cache on subsequent requests, so repeated calls are cheap.
-- The cache is regenerated automatically when a newer analysis lands on the case (file mtime is compared against the latest analysis's `analyzed_at`).
+- The cache is regenerated automatically when a newer analysis lands on the case, **or when the latest analysis's LLM narrative is rewritten** (for example by a report-only regeneration). The file mtime is compared against the later of that analysis's `analyzed_at` and `report_updated_at`; `report_updated_at` moves only when the stored narrative text actually changes.
 - Writes are atomic (temp file + rename), so a concurrent reader never sees a torn PDF.
 - The PDF rendering stack (WeasyPrint) is imported lazily on the first cache miss — it is not required for the API to boot.
 
@@ -802,13 +813,13 @@ All feed endpoints require `feed` scope (a `full`-scope key also works), are rea
 
 | Param | Type | Default | Description |
 |-------|------|---------|-------------|
-| `since` | string | | ISO 8601 cutoff; only IOCs whose analysis ran at/after this instant. Compared **lexically** against stored local-time ISO timestamps — pass the same format (e.g. `2026-06-01T00:00:00`); relative strings like `now-24h` silently match nothing |
+| `since` | string | | ISO 8601 cutoff; only IOCs whose analysis ran at/after this instant. Compared as an **instant**, so a trailing `Z` or any UTC offset is accepted (e.g. `2026-06-01T00:00:00Z`, `2026-06-01T08:00:00+08:00`); a value with no offset is read as server-local time. Anything that is not an ISO 8601 datetime — including relative strings like `now-24h` — is rejected with `422 invalid_since` |
 | `min_score` | integer | `0` | Minimum threat score, 0–100 (422 outside that range) |
 | `type` | string | | Comma-separated IOC types: `ip`, `domain`, `url`, `hash` |
 | `tag` | string | | Only IOCs from cases carrying this tag |
 | `case_id` | string | | Restrict to a single case |
 | `limit` | integer | `1000` | Results per page, 1–10000 (422 outside that range) |
-| `cursor` | string | | Pagination cursor from the previous response's `next_cursor` (an absolute row offset; non-numeric values are treated as `0`) |
+| `cursor` | string | | Pagination cursor from the previous response's `next_cursor` (an absolute row offset). A non-numeric, negative or over-long (more than 12 digits) value is rejected with `422 invalid_cursor` |
 
 **Feed semantics:**
 
@@ -816,7 +827,7 @@ All feed endpoints require `feed` scope (a `full`-scope key also works), are rea
 - **Deduplication:** the same indicator appearing in multiple analyses collapses to a single row carrying that maximum severity/score; `first_seen`/`last_seen` span all sightings and `case_ids` lists every contributing case. `mitre_techniques` contains the distinct persisted ATT&CK technique IDs observed in those contributing analyses.
 - **Filtering:** `min_score` is applied in SQL (not post-filtered), so it composes correctly with `limit`/`cursor` — pages are always full up to `limit` and no matching rows are dropped at page boundaries.
 - **Ordering:** deterministic — `last_seen` descending, then indicator value ascending as a tie-breaker. Stable ordering makes cursor pagination reliable.
-- **Pagination:** `next_cursor` is non-null exactly when the page came back full (`count == limit`); pass it as `cursor` for the next page. (CSV/STIX responses don't carry a cursor — page by incrementing `cursor` by `limit` while pages stay full.)
+- **Pagination:** `next_cursor` is non-null exactly when the page came back full (`count == limit`); pass it as `cursor` for the next page. (CSV/STIX responses don't carry a cursor — page by incrementing `cursor` by `limit` while pages stay full.) The cursor is a row offset, not a snapshot: if indicators are added or removed between page requests, later pages can repeat or skip rows. For an exact incremental pull, page until `next_cursor` is null, then poll with `since` set to the time of the previous pull.
 
 **Caching:** responses include `ETag` (SHA-256 of the body), `Cache-Control: private, max-age=60`, and `Last-Modified` (RFC 7231 IMF-fixdate, e.g. `Fri, 12 Jun 2026 01:14:02 GMT`, derived from the newest `last_seen` in the response). Send `If-None-Match` with the saved ETag to receive `304 Not Modified` (empty body) when data hasn't changed.
 
@@ -874,6 +885,8 @@ curl "http://localhost:8000/api/v1/iocs.json?min_score=50&type=ip,domain&limit=1
 |--------|------|------|
 | 401 | `missing_or_malformed_auth` / `invalid_key` | Auth failure |
 | 422 | `validation_error` | Query constraint violated (e.g. `min_score=200`, `limit=0`) |
+| 422 | `invalid_since` | `since` is not an ISO 8601 datetime ("since must be an ISO 8601 datetime, for example 2026-08-01T00:00:00Z.") |
+| 422 | `invalid_cursor` | `cursor` is not a `next_cursor` value (non-numeric, negative or over-long) |
 | 429 | `rate_limit_exceeded` | DB key over its per-minute limit |
 
 Example `422`:
@@ -918,7 +931,7 @@ domain,updates.evil-cdn.example,100,critical,malware,2026-06-11T17:44:03.215587,
 
 #### `GET /api/v1/iocs.stix`
 
-The same feed as a **STIX 2.1 bundle** of `indicator` objects, for STIX-native platforms (OpenCTI, MISP, TAXII ingest scripts). Also served at the alias path **`GET /api/v1/iocs/stix`** (identical behavior). Same query parameters and caching as the other formats. Indicator IDs are deterministic (UUIDv5 of the indicator value), so re-pulls produce stable IDs; IOC types map to STIX patterns:
+The same feed as a **STIX 2.1 bundle** of `indicator` objects, for STIX-native platforms (OpenCTI, MISP, TAXII ingest scripts). Also served at the alias path **`GET /api/v1/iocs/stix`** (identical behavior). Same query parameters and caching as the other formats. Indicator IDs are deterministic (UUIDv5 of the indicator value), so re-pulls produce stable IDs. `created`, `modified` and `valid_from` are STIX timestamps in UTC with millisecond precision and a `Z` suffix (stored local-time and offset values are converted), and `modified` is never earlier than `created`. Inside a pattern's string literal, backslashes and single quotes in the indicator value are escaped with a backslash (backslash first), so a value cannot terminate the literal early. IOC types map to STIX patterns:
 
 | IOC Type | STIX Pattern |
 |----------|-------------|
@@ -950,18 +963,18 @@ curl "http://localhost:8000/api/v1/iocs.stix?min_score=75" \
       "type": "indicator",
       "spec_version": "2.1",
       "id": "indicator--1ed5f9f2-3c2b-5a7e-9f31-8d2a4c6b0e17",
-      "created": "2026-06-10T08:02:11.402199",
-      "modified": "2026-06-12T09:15:40.992103",
+      "created": "2026-06-10T08:02:11.402Z",
+      "modified": "2026-06-12T09:15:40.992Z",
       "pattern_type": "stix",
       "pattern": "[ipv4-addr:value = '198.51.100.42']",
-      "valid_from": "2026-06-10T08:02:11.402199",
+      "valid_from": "2026-06-10T08:02:11.402Z",
       "labels": ["malicious-activity"]
     }
   ]
 }
 ```
 
-**Error responses:** same as `iocs.json` (401 / 422 / 429).
+**Error responses:** same as `iocs.json` (401 / 422 / 429), including `invalid_since` and `invalid_cursor`.
 
 ---
 
@@ -1166,7 +1179,7 @@ Partially update a key's mutable fields — name, scope, description, rate limit
 | `scope` | body | string | No | `full` or `feed` |
 | `description` | body | string | No | New description (max 500 chars) |
 | `rate_limit_rpm` | body | integer | No | New limit (≥ 1); `0` clears to unlimited |
-| `expires_at` | body | string | No | New expiry as an ISO 8601 datetime (e.g. `2027-01-01T00:00:00`) |
+| `expires_at` | body | string | No | New expiry as an ISO 8601 datetime. A trailing `Z` or a UTC offset is accepted (e.g. `2027-01-01T00:00:00Z`, `2027-01-01T08:00:00+08:00`); a value with no offset is read as server-local time. The value is stored, and returned in responses, as server-local time without an offset |
 
 **Sample request:**
 
@@ -1201,20 +1214,20 @@ curl -X PATCH http://localhost:8000/api/v1/admin/keys/k_3f9c2b1a \
 
 | Status | Code | When |
 |--------|------|------|
-| 400 | `invalid_expires_at` | `expires_at` is not a valid ISO 8601 datetime string |
 | 401 | `missing_or_malformed_auth` / `invalid_key` | Auth failure |
 | 403 | `insufficient_scope` | Feed-scope key |
 | 404 | `key_not_found` | No key with this ID |
+| 422 | `invalid_expires_at` | `expires_at` is not a valid ISO 8601 datetime string, or lies outside 1971-01-01 – 8999-12-31 |
 | 422 | `validation_error` | Field constraint violated (e.g. `scope: "admin"`, empty `name`) |
 
-Example `400`:
+Example `422` for an unparseable `expires_at` (this was a `400` before; the code is unchanged):
 
 ```json
 {
   "type": "https://pcap-hunter.io/errors/invalid_expires_at",
-  "title": "Bad Request",
-  "status": 400,
-  "detail": "expires_at must be a valid ISO 8601 datetime string.",
+  "title": "Unprocessable Entity",
+  "status": 422,
+  "detail": "expires_at must be a valid ISO 8601 datetime string between 1971-01-01 and 8999-12-31, for example 2027-01-01T00:00:00Z.",
   "instance": "/api/v1/admin/keys/k_3f9c2b1a",
   "code": "invalid_expires_at",
   "request_id": "9f2c1ab4e8d34c61a2f0b7c5d9e81234"
@@ -1255,7 +1268,7 @@ curl -X DELETE http://localhost:8000/api/v1/admin/keys/k_3f9c2b1a \
 {
   "status": "revoked",
   "id": "k_3f9c2b1a",
-  "warning": "No full-scope auth source remains — ingress and admin endpoints (including key creation) will reject every request. Recover by setting PCAP_HUNTER_API_KEY and restarting, or by creating a full-scope key in the Streamlit 'API Keys' tab."
+  "warning": "No full-scope auth source remains — ingress and admin endpoints (including key creation) will reject every request. Recover by setting the PCAP_HUNTER_API_KEY environment variable and restarting the API service, then use that key to create a full-scope database key with POST /api/v1/admin/keys (body: {\"name\": \"...\", \"scope\": \"full\"})."
 }
 ```
 
@@ -1442,7 +1455,9 @@ Revoking a key clears its rate-limit window immediately.
 | `case_has_running_job` | 409 | Cannot delete a case with a running job; additive `job_id` field |
 | `case_delete_failed` | 500 | Database deletion failed; file cleanup aborted |
 | `key_not_found` | 404 | API key ID does not exist |
-| `invalid_expires_at` | 400 | `expires_at` in a key PATCH is not valid ISO 8601 |
+| `invalid_expires_at` | 422 | `expires_at` in a key PATCH is not valid ISO 8601 |
+| `invalid_since` | 422 | Feed `since` is not an ISO 8601 datetime |
+| `invalid_cursor` | 422 | Feed `cursor` is not a value returned as `next_cursor` |
 | `validation_error` | 422 | Request body/query validation failed (see `errors` array) |
 | `method_not_allowed` | 405 | HTTP method not supported on this route |
 | `not_found` | 404 | Unknown route (no handler matched the path) |
@@ -1540,15 +1555,16 @@ job_id = response.json()["job_id"]
 Use the `http_poller` input to pull the IOC feed:
 
 ```ruby
-# `since` must be ISO 8601 — the API compares it lexically against stored timestamps,
-# so Logstash-style relative strings (e.g. "now-24h") silently return an empty feed.
-# Template the cutoff from your pipeline's clock; the example below uses a fixed date.
+# `since` must be an ISO 8601 datetime (a trailing `Z` or a UTC offset is accepted; no offset
+# means server-local time). Logstash-style relative strings (e.g. "now-24h") are rejected
+# with 422 `invalid_since`. Template the cutoff from your pipeline's clock; the example below
+# uses a fixed date.
 input {
   http_poller {
     urls => {
       pcap_hunter => {
         method => get
-        url => "http://pcap-hunter:8000/api/v1/iocs.json?min_score=50&since=2026-06-01T00:00:00"
+        url => "http://pcap-hunter:8000/api/v1/iocs.json?min_score=50&since=2026-06-01T00:00:00Z"
         headers => { "Authorization" => "Bearer ${PCAP_HUNTER_FEED_KEY}" }
       }
     }
@@ -1604,13 +1620,13 @@ curl -s http://localhost:8000/api/v1/jobs/$JOB/result \
 
 ### Process Model
 
-The API runs as a separate `uvicorn` process (default port 8000) alongside the Streamlit UI (port 8501). Both share:
+The API runs as a separate `uvicorn` process (default port 8000) alongside the web workbench (port 8501). Both share:
 
 - The same SQLite case database
 - The same `~/.pcap_hunter_config.json` settings
 - The same 10-stage analysis pipeline (`app.pipeline.runner.run_pipeline`)
 
-API-submitted PCAPs create regular Cases that appear in the Streamlit Cases tab.
+API-submitted PCAPs create regular Cases that appear in the workbench's Cases view.
 
 ### Background Processing
 
@@ -1618,10 +1634,19 @@ PCAP analysis runs in a `ProcessPoolExecutor` (`PCAP_HUNTER_API_WORKERS` process
 
 1. Receives a job submission with PCAP path and options
 2. Calls `run_pipeline()` with a `CallbackProgress` adapter
-3. Updates job progress in the database at each stage transition (plus a heartbeat)
-4. Stores the full result JSON on completion
+3. Updates job progress in the database at each stage transition
+4. Refreshes the job's heartbeat from a timer every 15 seconds for the whole run — including long OSINT and LLM stages — so a stale heartbeat means the worker process is gone, not that a stage is slow
+5. Stores the full result JSON on completion
 
-At startup the API recovers state: any job stuck in `running` with a heartbeat older than 120 seconds (i.e. it was in flight when the previous process died) is flipped to `failed` with error code `interrupted_restart`.
+**Job ownership and recovery.** Every job records an internal owner token identifying the server process that dispatched it (`role@host:pid:boot`; the role is `api` for this service and `web` for the workbench, which shares the database). The token is recovery bookkeeping only and is not returned by any endpoint. It lets each service recover its own jobs without touching the other service's live ones:
+
+- **At startup**, `running` jobs owned by an earlier boot of the same service are failed with `interrupted_restart`, as is any `running` job whose heartbeat is older than 120 seconds.
+- **At startup**, `queued` jobs that lost their dispatcher (owned by an earlier boot of the same service, or legacy rows with no owner) are re-dispatched in submission order when their input still exists; otherwise they are failed with `input_missing_after_restart`.
+- **Every 60 seconds** while the service runs, a sweep fails `running` jobs whose heartbeat has gone stale (a worker killed mid-run, or a job interrupted moments before a fast restart).
+- **Terminal states are never overwritten.** Completion, failure and cancellation are compare-and-set writes that apply only while a job is `queued` or `running`, so a worker finishing late cannot resurrect a job that recovery or a cancel already closed.
+- If a worker process is killed and breaks the worker pool, the pool is rebuilt on the next dispatch instead of failing every later submission.
+
+Agent-submitted jobs are owned by the offline launcher and are not touched by this recovery (see [Agent usage and setup](AGENT_USAGE.md)).
 
 ### Garbage Collection
 
@@ -1651,6 +1676,7 @@ Request counts are accumulated in memory and flushed to the SQLite database ever
 - **Per-key sliding-window rate limiting** (in-memory, 60-second window)
 - **Request ID tracing** with sanitized input (`X-Request-ID`)
 - **CSV injection prevention** in feed exports
+- **STIX pattern escaping** — backslashes and single quotes in indicator values are escaped in the STIX feed
 - **PCAP magic validation** before queuing analysis
 - **Parameterized SQL** throughout the key repository
 - **Structured audit logging** for all key CRUD operations
@@ -1687,6 +1713,47 @@ Request counts are accumulated in memory and flushed to the SQLite database ever
 | `key_id` | TEXT FK | References `api_keys.id` |
 | `date` | TEXT | `YYYY-MM-DD` |
 | `requests` | INTEGER | Daily count |
+
+## Workbench UI API
+
+The v3 workbench (port 8501) serves its own same-origin API under `/api/ui/*` for the bundled React client. It is **not** an integration surface: it has no API keys, accepts only loopback `Host` values and same-origin requests, and its shape may change with the client. Use `/api/v1/*` for integrations. Errors here are plain `{"detail": "..."}` JSON, not problem documents. The behaviors below matter to anyone scripting against a local workbench or reading its responses in browser tools.
+
+**Response headers.** Every workbench response — pages, static files, `/api/ui/*` answers and the middleware's own rejections — carries `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`, `Referrer-Policy: same-origin` and this Content-Security-Policy (`/api/ui/*` responses also carry `Cache-Control: no-store`):
+
+```
+default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self'; font-src 'self'; connect-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'
+```
+
+The AI report is rendered as Markdown in this origin, so the policy blocks inline and remote script, any request or image load to another origin, and framing. Images referenced by report Markdown are not fetched; the client shows an `[image omitted]` placeholder instead.
+
+**`GET /api/ui/jobs`** returns only the job list, `{"jobs": [...]}`, in the same shape as the `jobs` array of the bootstrap payload (`id`, `case_id`, `name`, `status`, `stage`, `progress`, `completed_stages`, `total_stages`, `stage_progress`, `stage_message`, `submitted_at`, `started_at`, `finished_at`, `error`). The client polls it for run progress instead of rebuilding the whole workbench state.
+
+**`PUT /api/ui/settings`** validates the submitted settings object before saving anything:
+
+- Unknown keys are ignored, `null` leaves a value unchanged, and a blank secret keeps the stored one.
+- Numeric settings must be whole numbers in range (`cfg_pyshark_limit` 0–1,000,000,000, where `0` means unlimited; `cfg_osint_top_ips` 0–1000), coordinates must be valid latitude/longitude, booleans must be `true`/`false`, text is limited to 2,048 characters without control characters, and provider base URLs must be plain `http(s)` API URLs without credentials, query or fragment.
+- If any field is rejected, nothing is saved and the response is `422`:
+
+```json
+{
+  "detail": "Settings were not saved: cfg_osint_top_ips must be between 0 and 1000.",
+  "errors": [
+    { "field": "cfg_osint_top_ips", "message": "must be between 0 and 1000" }
+  ]
+}
+```
+
+- A stored provider key is bound to the origin (scheme, host and port) it was saved for. When a save moves `cfg_openai_base_url` or `cfg_llm_endpoint` to a different origin without supplying a new key in the same request, the stored key (`cfg_openai_cloud_key` or `cfg_openai_key` respectively) is cleared rather than sent to the new host, and the success response says so:
+
+```json
+{
+  "saved": true,
+  "cleared_keys": ["cfg_openai_cloud_key"],
+  "notice": "The provider API URL now points at a different host, so its stored API key was cleared. Enter the key for the new host and save again."
+}
+```
+
+**Malformed request bodies.** On `/api/ui/*` endpoints that take a JSON object (settings, cases, notes, capture paths), a body that is not valid JSON returns `400` with `{"detail": "invalid_json"}`; valid JSON that is not an object returns `422` (for settings, `{"detail": "settings_object_required"}`).
 
 ## Case-scoped agent API
 

@@ -10,6 +10,7 @@ import logging
 from dataclasses import dataclass, field
 from typing import Any
 
+from app.pipeline.tls_certs import certificate_alerts_from_analysis
 from app.utils.common import is_public_ipv4
 
 logger = logging.getLogger(__name__)
@@ -169,20 +170,85 @@ def _collect_domain_signals(
         signals.append(CorrelationSignal("vt_detections", f"{malicious}/{total}", malicious / total, "virustotal"))
 
     # DGA detection
+    domain_norm = _normalise_domain(domain)
     dga_list = dns_analysis.get("dga_detections", [])
     for dga in dga_list:
-        if dga.get("domain") == domain and dga.get("is_dga"):
-            signals.append(CorrelationSignal("dga_domain", dga.get("score", 0), dga["score"], "dns"))
+        if _normalise_domain(dga.get("domain")) == domain_norm and dga.get("is_dga"):
+            signals.append(CorrelationSignal("dga_domain", dga.get("score", 0), dga.get("score", 0), "dns"))
             break
 
-    # Tunneling
-    tunnel_list = dns_analysis.get("tunneling_detections", [])
-    for tunnel in tunnel_list:
-        if tunnel.get("domain") == domain and tunnel.get("is_tunneling"):
-            signals.append(CorrelationSignal("dns_tunneling", tunnel.get("score", 0), tunnel["score"], "dns"))
-            break
+    # Tunneling: detections are keyed by the registrable base domain, while the
+    # indicators here are the queried FQDNs - match on a label-boundary suffix.
+    tunnel = _matching_tunnel(domain_norm, dns_analysis)
+    if tunnel is not None:
+        # A base-domain row always carries the signal. A name *under* the base
+        # only repeats it when something else already implicates that name;
+        # otherwise every encoded query label would become its own result row.
+        if _normalise_domain(tunnel.get("domain")) == domain_norm or signals:
+            signals.append(CorrelationSignal("dns_tunneling", tunnel.get("score", 0), tunnel.get("score", 0), "dns"))
 
     return signals
+
+
+def _normalise_domain(domain: Any) -> str:
+    """Lower-case a domain and strip the trailing root dot."""
+    return str(domain or "").lower().strip(".")
+
+
+def _matching_tunnel(domain_norm: str, dns_analysis: dict) -> dict | None:
+    """Find the confirmed tunneling detection whose base domain covers ``domain_norm``.
+
+    Args:
+        domain_norm: Normalised FQDN or base domain.
+        dns_analysis: DNS analysis results.
+
+    Returns:
+        The matching detection dict, or None.
+    """
+    if not domain_norm:
+        return None
+    for tunnel in dns_analysis.get("tunneling_detections", []):
+        base = _normalise_domain(tunnel.get("domain"))
+        if base and tunnel.get("is_tunneling") and (domain_norm == base or domain_norm.endswith("." + base)):
+            return tunnel
+    return None
+
+
+def _yara_matched_ips(yara_results: dict | None) -> set[str]:
+    """Collect endpoint IPs of YARA-matched carved files.
+
+    ``YARAScanResult.to_dict`` carries ``src_ip``/``dst_ip`` only when the carve
+    stage recorded them for the HTTP stream the file came from. When matches
+    exist but none can be attributed, that is logged rather than silently
+    producing no ``yara_match`` signal.
+
+    Args:
+        yara_results: YARA scan results dict, or None.
+
+    Returns:
+        Set of IP strings (possibly empty).
+    """
+    ips: set[str] = set()
+    if not yara_results or not yara_results.get("matched", 0):
+        return ips
+
+    unattributed = 0
+    for r in yara_results.get("results", []):
+        if not isinstance(r, dict) or not r.get("has_matches"):
+            continue
+        endpoints = {str(r.get(key)) for key in ("src_ip", "dst_ip") if r.get(key)}
+        if endpoints:
+            ips |= endpoints
+        else:
+            unattributed += 1
+
+    if unattributed:
+        logger.warning(
+            "%d YARA-matched file(s) carry no src_ip/dst_ip, so no yara_match correlation signal can be "
+            "attributed to an IP (the carve stage must record stream endpoints for this to work)",
+            unattributed,
+        )
+    return ips
 
 
 # Tier definitions — a strong OSINT hit alone can push to "high"; behavioural
@@ -266,29 +332,26 @@ def correlate_indicators(
 
     # Build lookup tables
     beacon_lookup: dict[str, float] = {}
-    if beacon_df is not None:
+    if beacon_df is not None and not getattr(beacon_df, "empty", False):
         try:
             # Vectorized max-score-per-dst (rank_beaconing emits "dst"/"score";
             # dst can repeat across src/port combos). Keeps only truthy dsts
             # with positive scores, same as the previous row-by-row loop.
             valid = beacon_df[beacon_df["dst"].astype(bool) & (beacon_df["score"] > 0)]
             beacon_lookup = valid.groupby("dst")["score"].max().to_dict()
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning("Beacon results could not be read for correlation: %s", e)
 
+    # ``alerts`` in the TLS stage output is a dict of counters; the per-certificate
+    # list lives under ``certificate_alerts`` (helper handles older saved shapes).
     tls_lookup: dict[str, list[str]] = {}
-    for alert in tls_analysis.get("alerts", []):
-        if isinstance(alert, dict):
-            dst_ip = alert.get("dst_ip", "")
-            alert_type = alert.get("type", "")
-            if dst_ip and alert_type:
-                tls_lookup.setdefault(dst_ip, []).append(alert_type)
+    for alert in certificate_alerts_from_analysis(tls_analysis):
+        dst_ip = alert.get("dst_ip", "")
+        alert_type = alert.get("type", "")
+        if dst_ip and alert_type and alert_type not in tls_lookup.setdefault(dst_ip, []):
+            tls_lookup[dst_ip].append(alert_type)
 
-    yara_ips: set[str] = set()
-    if yara_results and yara_results.get("matched", 0) > 0:
-        for r in yara_results.get("results", []):
-            if r.get("has_matches"):
-                yara_ips.add(r.get("src_ip", ""))
+    yara_ips = _yara_matched_ips(yara_results)
 
     asymmetry_lookup: dict[str, float] = {}
     if asymmetry_results:
@@ -320,8 +383,15 @@ def correlate_indicators(
             )
         )
 
-    # Correlate domains
-    domains = features.get("artifacts", {}).get("domains", [])
+    # Correlate domains. Tunneling is detected per registrable base domain, which
+    # need not itself have been queried - make sure it is a candidate.
+    domains = list(features.get("artifacts", {}).get("domains", []))
+    known = {_normalise_domain(d) for d in domains}
+    for tunnel in dns_analysis.get("tunneling_detections", []):
+        base = _normalise_domain(tunnel.get("domain"))
+        if base and tunnel.get("is_tunneling") and base not in known:
+            domains.append(base)
+            known.add(base)
     for domain in domains:
         signals = _collect_domain_signals(domain, osint, dns_analysis)
         if not signals:

@@ -10,9 +10,13 @@ class NoKeysConfiguredError(RuntimeError):
     """Raised when no auth keys exist (neither env vars nor DB keys)."""
 
 
+# The v3 workbench has no key-management screen (Settings -> API access is
+# read-only), so the only supported recovery is the bootstrap env var followed
+# by the admin endpoint. See docs/API.md "Managing keys".
 FULL_SCOPE_RECOVERY_HINT = (
-    "Recover by setting PCAP_HUNTER_API_KEY and restarting, "
-    "or by creating a full-scope key in the Streamlit 'API Keys' tab."
+    "Recover by setting the PCAP_HUNTER_API_KEY environment variable and restarting the API service, "
+    "then use that key to create a full-scope database key with POST /api/v1/admin/keys "
+    '(body: {"name": "...", "scope": "full"}).'
 )
 
 

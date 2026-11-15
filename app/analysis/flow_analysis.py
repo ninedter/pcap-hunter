@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ipaddress
 import logging
 from collections import defaultdict
 from dataclasses import dataclass
@@ -39,6 +40,59 @@ ASYMMETRY_MIN_BYTES = 1_000_000  # 1 MB minimum to flag
 ASYMMETRY_RATIO_THRESHOLD = 10.0  # 10:1 outbound:inbound
 HIGH_PORT_THRESHOLD = 10000
 
+# Transfer directions, by address scope of the two endpoints
+DIRECTION_OUTBOUND = "outbound"  # internal source -> public destination (exfil-shaped)
+DIRECTION_INBOUND = "inbound"  # public source -> internal destination (a download)
+DIRECTION_INTERNAL = "internal"  # both endpoints internal (staging / lateral transfer)
+DIRECTION_EXTERNAL = "external"  # both endpoints public (capture point outside the network)
+DIRECTION_UNKNOWN = "unknown"  # an endpoint is not a parseable unicast address
+
+
+def is_internal_address(ip: str) -> bool | None:
+    """Classify an address as internal (non-routable) or public.
+
+    Handles IPv4 and IPv6 (``app.utils.network_utils.is_public_ipv4`` is IPv4
+    only). Private, loopback, link-local, unique-local and CGNAT space is
+    internal.
+
+    Args:
+        ip: Address string.
+
+    Returns:
+        True for internal, False for globally routable, None for anything that is
+        not a unicast host address (unparseable, multicast, unspecified).
+    """
+    try:
+        addr = ipaddress.ip_address(str(ip).split("%", 1)[0])
+    except ValueError:
+        return None
+    if addr.is_multicast or addr.is_unspecified:
+        return None
+    if getattr(addr, "ipv4_mapped", None) is not None:
+        addr = addr.ipv4_mapped
+    return not addr.is_global
+
+
+def classify_direction(src: str, dst: str) -> str:
+    """Classify a src->dst transfer by the address scope of its endpoints.
+
+    Args:
+        src: Sending address.
+        dst: Receiving address.
+
+    Returns:
+        One of the ``DIRECTION_*`` constants.
+    """
+    src_internal = is_internal_address(src)
+    dst_internal = is_internal_address(dst)
+    if src_internal is None or dst_internal is None:
+        return DIRECTION_UNKNOWN
+    if src_internal and not dst_internal:
+        return DIRECTION_OUTBOUND
+    if not src_internal and dst_internal:
+        return DIRECTION_INBOUND
+    return DIRECTION_INTERNAL if src_internal else DIRECTION_EXTERNAL
+
 
 @dataclass
 class FlowAsymmetryResult:
@@ -53,11 +107,13 @@ class FlowAsymmetryResult:
     score: float  # 0.0 - 1.0
     is_suspicious: bool
     reason: str
+    direction: str = DIRECTION_UNKNOWN  # address-scope direction of src -> dst
 
     def to_dict(self) -> dict:
         return {
             "src": self.src,
             "dst": self.dst,
+            "direction": self.direction,
             "outbound_bytes": self.outbound_bytes,
             "inbound_bytes": self.inbound_bytes,
             "ratio": round(self.ratio, 2),
@@ -99,7 +155,11 @@ def detect_flow_asymmetry(flows: list[dict[str, Any]]) -> list[FlowAsymmetryResu
     Detect potential data exfiltration via upload/download byte ratio analysis.
 
     Groups flows by (src, dst) pair and calculates byte ratio in each direction.
-    Flags pairs with high outbound:inbound ratio above threshold.
+    Both orientations of every pair are evaluated, so the result does not depend
+    on which side's packet happened to be captured first. A public source
+    sending to an internal destination is an ordinary download and is never
+    reported; every reported row has ``src`` as the sender and carries its
+    ``direction``.
 
     Args:
         flows: List of flow dicts from pyshark_pass
@@ -108,9 +168,7 @@ def detect_flow_asymmetry(flows: list[dict[str, Any]]) -> list[FlowAsymmetryResu
         List of FlowAsymmetryResult sorted by score descending
     """
     # Group flows by (src, dst) pair
-    pair_stats: dict[tuple[str, str], dict] = defaultdict(
-        lambda: {"outbound_bytes": 0, "inbound_bytes": 0, "total_packets": 0}
-    )
+    pair_stats: dict[tuple[str, str], dict] = defaultdict(lambda: {"outbound_bytes": 0, "total_packets": 0})
 
     for flow in flows:
         src = flow.get("src", "")
@@ -136,25 +194,22 @@ def detect_flow_asymmetry(flows: list[dict[str, Any]]) -> list[FlowAsymmetryResu
         pair_stats[(src, dst)]["outbound_bytes"] += total_bytes
         pair_stats[(src, dst)]["total_packets"] += count
 
-        # Track reverse direction
-        pair_stats[(dst, src)]["inbound_bytes"] += total_bytes
-
     results: list[FlowAsymmetryResult] = []
 
-    # Deduplicate pairs (only check each direction once)
-    checked: set[tuple[str, str]] = set()
-
-    for (src, dst), stats in pair_stats.items():
-        if (src, dst) in checked or (dst, src) in checked:
-            continue
-        checked.add((src, dst))
-
+    # Evaluate BOTH orientations of each pair. The heavy direction is whichever
+    # one carries the bytes; only one orientation can clear the ratio threshold.
+    for (src, dst), stats in list(pair_stats.items()):
         outbound = stats["outbound_bytes"]
-        inbound = pair_stats[(dst, src)].get("outbound_bytes", 0)
-        total_packets = stats["total_packets"] + pair_stats[(dst, src)].get("total_packets", 0)
-
         if outbound < ASYMMETRY_MIN_BYTES:
             continue
+
+        reverse = pair_stats.get((dst, src), {})
+        inbound = reverse.get("outbound_bytes", 0)
+        total_packets = stats["total_packets"] + reverse.get("total_packets", 0)
+
+        direction = classify_direction(src, dst)
+        if direction == DIRECTION_INBOUND:
+            continue  # internal client downloading from a public server
 
         ratio = outbound / max(inbound, 1)
 
@@ -196,6 +251,7 @@ def detect_flow_asymmetry(flows: list[dict[str, Any]]) -> list[FlowAsymmetryResu
                 score=score,
                 is_suspicious=is_suspicious,
                 reason="; ".join(reasons),
+                direction=direction,
             )
         )
 

@@ -76,6 +76,48 @@ function weightedGeographicCenter(flows) {
   return [longitude, latitude];
 }
 
+export const MAP_ASSESSMENT_COLORS = {
+  Review: "#ffbd59",
+  Expected: "#47a8ff",
+  "Not assessed": "#8b96aa",
+  "Partly assessed": "#8b96aa",
+};
+
+/**
+ * Assessment of one destination: "Review" | "Expected" | "Not assessed".
+ *
+ * `status` only says the score was low; it reads "Expected" even when no
+ * reputation provider answered. Newer payloads add `assessed`/`assessment`.
+ * Payloads saved before those fields existed keep the old two-way reading.
+ */
+export function getFlowAssessment(flow) {
+  if (flow?.status === "Review" || flow?.assessment === "Review") return "Review";
+  if (typeof flow?.assessed === "boolean") return flow.assessed ? "Expected" : "Not assessed";
+  if (flow?.assessment === "Expected" || flow?.assessment === "Not assessed") return flow.assessment;
+  return "Expected";
+}
+
+/**
+ * Assessment of a group of destinations. "Review" wins; "Expected" requires
+ * every member to be assessed and expected; otherwise the group is
+ * "Not assessed" (none assessed) or "Partly assessed" (some assessed).
+ */
+export function summarizeGroupAssessment(members) {
+  const assessments = (members || []).map(getFlowAssessment);
+  const assessedCount = assessments.filter((item) => item !== "Not assessed").length;
+  const reviewCount = assessments.filter((item) => item === "Review").length;
+  let assessment = "Not assessed";
+  if (reviewCount) assessment = "Review";
+  else if (assessments.length && assessedCount === assessments.length) assessment = "Expected";
+  else if (assessedCount) assessment = "Partly assessed";
+  return { assessment, assessedCount, reviewCount, color: MAP_ASSESSMENT_COLORS[assessment] };
+}
+
+/** Marker/arc colour for a single destination. */
+export function getFlowAssessmentColor(flow) {
+  return MAP_ASSESSMENT_COLORS[getFlowAssessment(flow)];
+}
+
 export function aggregateMapFlows(flows, level) {
   const grouped = new Map();
   for (const flow of flows) {
@@ -95,7 +137,9 @@ export function aggregateMapFlows(flows, level) {
     const packets = group.members.reduce((sum, flow) => sum + (Number(flow.packets) || 0), 0);
     const protocols = Array.from(new Set(group.members.flatMap((flow) => flow.protocols || []))).sort();
     const countries = new Set(group.members.map((flow) => flow.country).filter((country) => country && country !== "Unknown"));
+    // `status` keeps its two historical values; `assessment` is what the map shows.
     const status = group.members.some((flow) => flow.status === "Review") ? "Review" : "Expected";
+    const { assessment, assessedCount, color } = summarizeGroupAssessment(group.members);
     const primaryFlow = [...group.members].sort((left, right) => (Number(right.packets) || 0) - (Number(left.packets) || 0))[0];
     return {
       ...group,
@@ -103,7 +147,9 @@ export function aggregateMapFlows(flows, level) {
       packets,
       protocols,
       status,
-      color: status === "Review" ? "#ffbd59" : "#47a8ff",
+      assessment,
+      assessedCount,
+      color,
       endpointCount: group.members.length,
       countryCount: countries.size,
       primaryFlow,

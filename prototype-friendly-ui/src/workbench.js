@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { isPrivacyMode, sanitizeWorkbenchPayload } from "./privacy.js";
 import { collectEvidencePages } from "./evidenceExport.js";
+import { parseSettingsSaveResult } from "./settingsFeedback.js";
 
 const emptyDashboard = {
   risk: "N/A",
@@ -18,6 +19,7 @@ const emptyDashboard = {
   top_domains: [],
   map_flows: [],
   evidence: [],
+  evidence_total: 0,
   packet_sizes: [],
   inter_arrivals: [],
   heatmap: [],
@@ -81,7 +83,11 @@ async function responseJson(response) {
   const payload = await response.json().catch(() => ({}));
   if (!response.ok) {
     const message = typeof payload.detail === "string" ? payload.detail : "The workbench could not complete that request.";
-    throw new Error(message);
+    const error = new Error(message);
+    // Callers that can show structured feedback (settings validation) read these.
+    error.status = response.status;
+    error.payload = payload;
+    throw error;
   }
   return payload;
 }
@@ -106,6 +112,96 @@ export function nextLlmDiscoveryGeneration(currentGeneration) {
 
 export function acceptsLlmDiscoveryResponse(requestGeneration, currentGeneration) {
   return requestGeneration === currentGeneration;
+}
+
+/**
+ * Orders overlapping bootstrap requests. Each request takes a generation when
+ * it starts; only the newest generation may apply its response, so a slow
+ * poll can never overwrite the result of a later explicit refresh.
+ */
+export function createRequestGate({ now = () => Date.now() } = {}) {
+  let generation = 0;
+  let inFlight = 0;
+  let lastStartedAt = 0;
+  return {
+    begin() {
+      generation += 1;
+      inFlight += 1;
+      lastStartedAt = now();
+      return generation;
+    },
+    end() {
+      inFlight = Math.max(0, inFlight - 1);
+    },
+    isCurrent(requestGeneration) {
+      return requestGeneration === generation;
+    },
+    /** Generation of the newest request started so far (0 before the first). */
+    current() {
+      return generation;
+    },
+    /** True while a request is pending, unless the newest one has been pending longer than maxAgeMs. */
+    isBusy(maxAgeMs = Infinity) {
+      return inFlight > 0 && now() - lastStartedAt < maxAgeMs;
+    },
+  };
+}
+
+export const BOOTSTRAP_POLL_INTERVAL_MS = 1600;
+// A poll tick waits for the pending request unless it has been stuck this long.
+export const BOOTSTRAP_POLL_STALL_MS = 20000;
+// With no active job, the job list is still checked at this cadence (visible
+// tabs only) so runs submitted through the API or MCP appear without a refresh.
+export const IDLE_JOBS_POLL_INTERVAL_MS = 15000;
+
+const TERMINAL_JOB_STATUSES = new Set(["done", "failed", "cancelled"]);
+
+export function isTerminalJobStatus(status) {
+  return TERMINAL_JOB_STATUSES.has(status);
+}
+
+/**
+ * Decide whether a job-list poll requires the full bootstrap payload.
+ *
+ * Progress ticks only change the jobs themselves. The dashboard, cases, and
+ * counts change when a job reaches a terminal state, or when jobs appear or
+ * disappear (a submission elsewhere, a deleted case).
+ *
+ * @param {Array<{id: string, status: string}>} previousJobs - jobs currently applied.
+ * @param {Array<{id: string, status: string}>} nextJobs - jobs from the poll.
+ * @returns {boolean} true when the bootstrap must be refetched.
+ */
+export function jobsNeedBootstrapRefresh(previousJobs, nextJobs) {
+  const previous = new Map((Array.isArray(previousJobs) ? previousJobs : []).map((job) => [String(job?.id), job?.status]));
+  const next = Array.isArray(nextJobs) ? nextJobs : [];
+  const nextIds = new Set(next.map((job) => String(job?.id)));
+  if (nextIds.size !== previous.size) return true;
+  return next.some((job) => {
+    const id = String(job?.id);
+    if (!previous.has(id)) return true;
+    return isTerminalJobStatus(job?.status) && previous.get(id) !== job.status;
+  });
+}
+
+/**
+ * What a poll tick should do: "skip" | "bootstrap" | "jobs".
+ *
+ * @param {object} input
+ * @param {boolean} input.bootstrapBusy - a bootstrap request is pending and not yet stalled.
+ * @param {boolean} input.bootstrapPending - a bootstrap request is pending at all.
+ * @param {boolean} input.jobsBusy - a job-list request is pending and not yet stalled.
+ * @param {boolean} input.jobsEndpointMissing - the server answered 404 for /api/ui/jobs.
+ * @param {boolean} [input.idle] - no job is active (slow cadence).
+ * @param {boolean} [input.visible] - the document is visible.
+ * @param {boolean} [input.loaded] - a bootstrap response has been applied.
+ */
+export function planJobsPollTick({ bootstrapBusy, bootstrapPending, jobsBusy, jobsEndpointMissing, idle = false, visible = true, loaded = true }) {
+  if (idle && (!visible || !loaded || jobsEndpointMissing)) return "skip";
+  // Skip while a request is still pending so slow responses cannot stack.
+  if (bootstrapBusy || jobsBusy) return "skip";
+  // Older server, or a bootstrap stuck past the stall window: full refresh, as before.
+  if (jobsEndpointMissing || bootstrapPending) return idle ? "skip" : "bootstrap";
+  return "jobs";
 }
 
 export function getLlmModelPickerState({ models = [], selectedModel = "", customModelMode = false }) {
@@ -137,23 +233,38 @@ export function useWorkbench() {
   const [state, setState] = useState(emptyState);
   const resourceScope = useRef({});
   const [loading, setLoading] = useState(true);
+  const [loaded, setLoaded] = useState(false);
   const [error, setError] = useState("");
+  const requestGate = useRef(null);
+  if (!requestGate.current) requestGate.current = createRequestGate();
+  const jobsGate = useRef(null);
+  if (!jobsGate.current) jobsGate.current = createRequestGate();
+  const jobsEndpointMissing = useRef(false);
+  const jobsPollFailed = useRef(false);
 
+  // Resolves to the applied payload, or null when the request failed or was
+  // superseded by a newer refresh (its response is then discarded).
   const refresh = useCallback(async () => {
+    const gate = requestGate.current;
+    const generation = gate.begin();
     try {
       const selected = new URLSearchParams(window.location.search).get("analysis_id");
       const url = selected ? `/api/ui/bootstrap?analysis_id=${encodeURIComponent(selected)}` : "/api/ui/bootstrap";
       const payload = await responseJson(await fetch(url, { cache: "no-store" }));
+      if (!gate.isCurrent(generation)) return null;
       resourceScope.current = payload;
       const visiblePayload = privacyMode ? sanitizeWorkbenchPayload(payload) : payload;
       setState({ ...emptyState, ...visiblePayload, dashboard: { ...emptyDashboard, ...(visiblePayload.dashboard || {}) } });
       setError("");
+      jobsPollFailed.current = false;
+      setLoaded(true);
       return payload;
     } catch (requestError) {
-      setError(requestError.message);
+      if (gate.isCurrent(generation)) setError(requestError.message);
       return null;
     } finally {
-      setLoading(false);
+      gate.end();
+      if (gate.isCurrent(generation)) setLoading(false);
     }
   }, [privacyMode]);
 
@@ -166,11 +277,75 @@ export function useWorkbench() {
     [state.jobs],
   );
 
+  // Fetches only the job list. Progress updates touch just `jobs` in state; the
+  // full bootstrap is refetched when a job finishes or the set of jobs changes.
+  const pollJobs = useCallback(async ({ idle = false } = {}) => {
+    const gate = requestGate.current;
+    const plan = planJobsPollTick({
+      bootstrapBusy: gate.isBusy(BOOTSTRAP_POLL_STALL_MS),
+      bootstrapPending: gate.isBusy(),
+      jobsBusy: jobsGate.current.isBusy(BOOTSTRAP_POLL_STALL_MS),
+      jobsEndpointMissing: jobsEndpointMissing.current,
+      idle,
+      visible: typeof document === "undefined" || document.visibilityState === "visible",
+      loaded: Boolean(resourceScope.current.jobs),
+    });
+    if (plan === "skip") return;
+    if (plan === "bootstrap") { await refresh(); return; }
+
+    const bootstrapGeneration = gate.current();
+    const generation = jobsGate.current.begin();
+    let needsBootstrap = false;
+    try {
+      const response = await fetch("/api/ui/jobs", { cache: "no-store" });
+      if (response.status === 404) {
+        // Older server without the job-list endpoint: keep polling the bootstrap.
+        jobsEndpointMissing.current = true;
+        needsBootstrap = !idle;
+        return;
+      }
+      const payload = await responseJson(response);
+      // Discard when a newer job poll or any bootstrap request started meanwhile.
+      if (!jobsGate.current.isCurrent(generation) || gate.current() !== bootstrapGeneration) return;
+      const nextJobs = Array.isArray(payload.jobs) ? payload.jobs : [];
+      if (jobsPollFailed.current) { jobsPollFailed.current = false; setError(""); }
+      if (jobsNeedBootstrapRefresh(resourceScope.current.jobs, nextJobs)) {
+        // Leave the applied jobs untouched so a failed refresh is retried next tick.
+        needsBootstrap = true;
+        return;
+      }
+      resourceScope.current = { ...resourceScope.current, jobs: nextJobs };
+      const visibleJobs = privacyMode ? sanitizeWorkbenchPayload({ jobs: nextJobs }).jobs : nextJobs;
+      setState((current) => ({ ...current, jobs: visibleJobs }));
+    } catch (requestError) {
+      // A background check with nothing running stays quiet; an active run must not look alive when it is not.
+      if (!idle && jobsGate.current.isCurrent(generation) && gate.current() === bootstrapGeneration) {
+        jobsPollFailed.current = true;
+        setError(requestError.message);
+      }
+    } finally {
+      jobsGate.current.end();
+      if (needsBootstrap) await refresh();
+    }
+  }, [privacyMode, refresh]);
+
   useEffect(() => {
     if (!hasActiveJobs) return undefined;
-    const timer = window.setInterval(refresh, 1600);
+    const timer = window.setInterval(() => { pollJobs(); }, BOOTSTRAP_POLL_INTERVAL_MS);
     return () => window.clearInterval(timer);
-  }, [hasActiveJobs, refresh]);
+  }, [hasActiveJobs, pollJobs]);
+
+  useEffect(() => {
+    if (hasActiveJobs || !loaded) return undefined;
+    const check = () => { pollJobs({ idle: true }); };
+    const onVisibility = () => { if (document.visibilityState === "visible") check(); };
+    const timer = window.setInterval(check, IDLE_JOBS_POLL_INTERVAL_MS);
+    document.addEventListener("visibilitychange", onVisibility);
+    return () => {
+      window.clearInterval(timer);
+      document.removeEventListener("visibilitychange", onVisibility);
+    };
+  }, [hasActiveJobs, loaded, pollJobs]);
 
   const submitCaptures = useCallback(async (files, includeLlm) => {
     if (!files.length) throw new Error("Add at least one PCAP or PCAPNG file first.");
@@ -196,8 +371,10 @@ export function useWorkbench() {
     return payload;
   }, [refresh]);
 
+  // Resolves to { notice, clearedKeys }. A 422 rejects with an error carrying
+  // `payload.errors`; see mapSettingsErrors in settingsFeedback.js.
   const saveSettings = useCallback(async (settings) => {
-    await responseJson(
+    const payload = await responseJson(
       await fetch("/api/ui/settings", {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
@@ -205,6 +382,7 @@ export function useWorkbench() {
       }),
     );
     await refresh();
+    return parseSettingsSaveResult(payload);
   }, [refresh]);
 
   const discoverLlmModels = useCallback(async ({ provider, baseUrl, apiKey }) => {
@@ -291,6 +469,7 @@ export function useWorkbench() {
     selectAnalysis,
     exportEvidence,
     loading,
+    loaded,
     error,
     refresh,
     submitCaptures,

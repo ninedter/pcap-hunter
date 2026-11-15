@@ -1,7 +1,9 @@
 import assert from "node:assert/strict";
-import test from "node:test";
+import test, { beforeEach } from "node:test";
 
-import { isPrivacyMode, sanitizeWorkbenchPayload } from "../src/privacy.js";
+import { isPrivacyMode, resetPrivacyRegistry, sanitizeWorkbenchPayload } from "../src/privacy.js";
+
+beforeEach(() => resetPrivacyRegistry());
 
 test("privacy mode is explicit and opt-in", () => {
   assert.equal(isPrivacyMode("?privacy=1"), true);
@@ -80,4 +82,76 @@ test("privacy sanitizer removes capture-specific identifiers without mutating in
   }
   for (const value of result.ipv6_urls) assert.match(value, /^\[URL \d{2}\]$/);
   assert.equal(result.dashboard.traffic_replay.events[0].src_scope.includes("10.1.2.3"), false);
+});
+
+test("privacy sanitizer zeroes coordinate pairs so markers cannot plot at true positions", () => {
+  const result = sanitizeWorkbenchPayload({
+    dashboard: {
+      map_flows: [
+        { ip: "203.0.113.8", city: "Taipei", coordinates: [121.5654, 25.033], packets: 12 },
+        { ip: "198.51.100.33", city: "Berlin", coordinates: [13.405, 52.52], packets: 7 },
+      ],
+      home: { lat: 25.03, lon: 121.56, city: "Taipei" },
+    },
+  });
+  for (const flow of result.dashboard.map_flows) assert.deepEqual(flow.coordinates, [0, 0]);
+  assert.equal(result.dashboard.map_flows[0].packets, 12);
+  assert.equal(result.dashboard.home.lat, 0);
+  assert.equal(result.dashboard.home.lon, 0);
+  assert.equal(JSON.stringify(result).includes("121.5654"), false);
+});
+
+test("privacy sanitizer replaces whole capture filenames in saved analyses", () => {
+  const result = sanitizeWorkbenchPayload({
+    cases: [{ id: "c1", title: "Incident", analyses: [
+      { id: "a1", name: "ACME Corp breach.pcap", packet_count: 10 },
+      { id: "a2", name: "ACME Corp breach.pcap" },
+      { id: "a3", name: "Initech lateral movement.pcapng" },
+    ] }],
+    jobs: [{ name: "ACME Corp breach.pcap" }],
+  });
+  const [first, second, third] = result.cases[0].analyses;
+  assert.match(first.name, /^\[CAPTURE \d{2}\]$/);
+  assert.equal(first.name, second.name);
+  assert.notEqual(first.name, third.name);
+  assert.equal(first.name, result.jobs[0].name);
+  assert.equal(first.packet_count, 10);
+  for (const leaked of ["ACME", "Corp", "breach", "Initech", "lateral"]) assert.equal(JSON.stringify(result).includes(leaked), false, leaked);
+});
+
+test("privacy sanitizer tokenises case tags, descriptions, and OSINT organizations", () => {
+  const result = sanitizeWorkbenchPayload({
+    cases: [{ title: "Incident", description: "Finance laptop of Jane Doe", tags: ["acme-finance", "jane-doe", "acme-finance"] }, { title: "Other", description: "", tags: [] }],
+    dashboard: {
+      osint_rows: [
+        { value: "203.0.113.8", organization: "Contoso Hosting Ltd" },
+        { value: "203.0.113.9", organization: "Contoso Hosting Ltd" },
+        { value: "203.0.113.10", organization: "No organization data" },
+      ],
+      yara_results: { tags: ["trojan"] },
+    },
+  });
+  const serialized = JSON.stringify(result);
+  for (const leaked of ["Jane", "Finance laptop", "acme-finance", "jane-doe", "Contoso"]) assert.equal(serialized.includes(leaked), false, leaked);
+  assert.equal(result.cases[0].description, "[CASE DESCRIPTION REDACTED]");
+  assert.equal(result.cases[1].description, "");
+  assert.match(result.cases[0].tags[0], /^\[TAG \d{2}\]$/);
+  assert.equal(result.cases[0].tags[0], result.cases[0].tags[2]);
+  assert.notEqual(result.cases[0].tags[0], result.cases[0].tags[1]);
+  assert.match(result.dashboard.osint_rows[0].organization, /^\[ORG \d{2}\]$/);
+  assert.equal(result.dashboard.osint_rows[0].organization, result.dashboard.osint_rows[1].organization);
+  assert.equal(result.dashboard.osint_rows[2].organization, "No organization data");
+  assert.deepEqual(result.dashboard.yara_results.tags, ["trojan"]);
+});
+
+test("replacement labels stay stable across separate sanitizer calls until reset", () => {
+  const dashboard = sanitizeWorkbenchPayload({ dashboard: { top_talkers: [{ name: "10.1.2.3" }, { name: "203.0.113.8" }] } });
+  const evidencePage = sanitizeWorkbenchPayload({ items: [{ value: "203.0.113.8" }, { value: "192.0.2.77" }, { value: "10.1.2.3" }] });
+  assert.equal(evidencePage.items[0].value, dashboard.dashboard.top_talkers[1].name);
+  assert.equal(evidencePage.items[2].value, dashboard.dashboard.top_talkers[0].name);
+  assert.equal(new Set([evidencePage.items[0].value, evidencePage.items[1].value, evidencePage.items[2].value]).size, 3);
+
+  resetPrivacyRegistry();
+  const afterReset = sanitizeWorkbenchPayload({ items: [{ value: "192.0.2.77" }] });
+  assert.equal(afterReset.items[0].value, "[IP 01]");
 });

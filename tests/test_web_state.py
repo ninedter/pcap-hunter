@@ -217,7 +217,9 @@ def test_map_flows_preserve_continent_and_filter_slices(monkeypatch):
     assert mapped[0]["country"] == "Taiwan"
     assert mapped[0]["city"] == "Taipei"
     assert mapped[0]["byte_count"] == 256
-    assert mapped[0]["traffic_slices"] == [{"protocol": "UDP", "time": "00:01", "packets": 4, "bytes": 256}]
+    assert mapped[0]["traffic_slices"] == [
+        {"protocol": "UDP", "time": "00:01", "packets": 4, "bytes": 256, "ts": "1970-01-01T00:01:00Z"}
+    ]
 
 
 def test_capture_statistics_prefer_scalar_bytes_and_keep_file_bytes_distinct(tmp_path):

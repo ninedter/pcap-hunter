@@ -25,7 +25,7 @@ from app.agents import submission as agent_submission  # noqa: F401
 from app.agents.middleware import AgentBoundaryMiddleware
 from app.api.auth import Scope
 from app.api.deps import get_key_repo, get_settings, get_usage_tracker
-from app.api.queue import recover_stale_running_jobs
+from app.api.queue import job_sweep_loop, recover_jobs_at_boot
 from app.api.routers import admin, cases, health, iocs, jobs, pcaps
 from app.api.settings import FULL_SCOPE_RECOVERY_HINT, NoKeysConfiguredError
 
@@ -34,12 +34,13 @@ logger = logging.getLogger(__name__)
 
 @asynccontextmanager
 async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
-    """Startup/shutdown hook — recover stale jobs on boot, schedule GC."""
-    from app.api.deps import get_repo
+    """Startup/shutdown hook — recover interrupted jobs on boot, schedule sweeps and GC."""
+    from app.api.deps import get_queue, get_repo
 
-    n = recover_stale_running_jobs(get_repo(), stale_after_seconds=120)
-    if n:
-        logger.warning("Recovered %d stale running jobs at startup", n)
+    # Fails this service's jobs from a previous boot, re-dispatches its orphaned
+    # queued jobs, and leaves the UI process's live jobs alone.
+    recover_jobs_at_boot(get_repo(), get_queue, role="api")
+    sweep_task = asyncio.create_task(job_sweep_loop(get_repo()))
 
     # Schedule hourly GC sweep
     gc_task = asyncio.create_task(_gc_loop())
@@ -52,6 +53,7 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     broker_task = asyncio.create_task(broker_loop(get_repo()))
     yield
     broker_task.cancel()
+    sweep_task.cancel()
 
     # Shutdown: final flush before stopping
     flush_task.cancel()

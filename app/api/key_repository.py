@@ -4,11 +4,11 @@ from __future__ import annotations
 
 import sqlite3
 import uuid
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from app.api.auth import Scope
-from app.api.key_models import APIKey
+from app.api.key_models import EXPIRED_SENTINEL, APIKey, expiry_in_range, expiry_instant, to_stored_local
 from app.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -108,7 +108,7 @@ class KeyRepository:
                     key.scope.value,
                     key.description,
                     key.created_at.isoformat(),
-                    key.expires_at.isoformat() if key.expires_at else None,
+                    to_stored_local(key.expires_at).isoformat() if key.expires_at else None,
                     key.revoked_at.isoformat() if key.revoked_at else None,
                     key.last_used_at.isoformat() if key.last_used_at else None,
                     key.total_requests,
@@ -216,7 +216,7 @@ class KeyRepository:
                 if field_name == "scope" and isinstance(val, Scope):
                     params.append(val.value)
                 elif field_name == "expires_at" and isinstance(val, datetime):
-                    params.append(val.isoformat())
+                    params.append(to_stored_local(val).isoformat())
                 else:
                     params.append(val)
 
@@ -364,22 +364,26 @@ class KeyRepository:
         Returns:
             Number of currently active keys (matching the scope, if given).
         """
-        now = datetime.now().isoformat()
-        query = """
-                SELECT COUNT(*) FROM api_keys
-                WHERE revoked_at IS NULL
-                AND (expires_at IS NULL OR expires_at > ?)
-                """
-        params: list[str] = [now]
+        # Expiry is evaluated in Python (``APIKey.is_active``) rather than by SQL
+        # text comparison, which misorders rows that mix naive and offset forms.
+        query = "SELECT * FROM api_keys WHERE revoked_at IS NULL"
+        params: list[str] = []
         if scope is not None:
             query += " AND scope = ?"
             params.append(scope)
         conn = self._get_conn()
         try:
-            row = conn.execute(query, params).fetchone()
-            return int(row[0])
+            rows = conn.execute(query, params).fetchall()
         finally:
             conn.close()
+        active = 0
+        for row in rows:
+            try:
+                active += self._row_to_key(dict(row)).is_active
+            except (ValueError, OverflowError, OSError, TypeError):
+                # One unreadable row must not stop the application from booting.
+                logger.warning("API key %s could not be read; counting it as inactive", row["id"])
+        return active
 
     def get_expiring_keys(self, within_days: int = 7) -> list[APIKey]:
         """Get active keys that will expire within the given window.
@@ -390,24 +394,20 @@ class KeyRepository:
         Returns:
             List of APIKey objects expiring soon.
         """
-        now = datetime.now()
-        deadline = (now + timedelta(days=within_days)).isoformat()
+        now = datetime.now(timezone.utc)
+        deadline = now + timedelta(days=within_days)
         conn = self._get_conn()
         try:
-            rows = conn.execute(
-                """
-                SELECT * FROM api_keys
-                WHERE revoked_at IS NULL
-                AND expires_at IS NOT NULL
-                AND expires_at > ?
-                AND expires_at <= ?
-                ORDER BY expires_at
-                """,
-                (now.isoformat(), deadline),
-            ).fetchall()
-            return [self._row_to_key(dict(row)) for row in rows]
+            rows = conn.execute("SELECT * FROM api_keys WHERE revoked_at IS NULL AND expires_at IS NOT NULL").fetchall()
         finally:
             conn.close()
+        keys = [self._row_to_key(dict(row)) for row in rows]
+        expiring = []
+        for key in keys:
+            instant = expiry_instant(key.expires_at) if key.expires_at is not None else None
+            if instant is not None and now < instant <= deadline:
+                expiring.append((instant, key))
+        return [key for _, key in sorted(expiring, key=lambda pair: pair[0])]
 
     # ==================== Helpers ====================
 
@@ -429,7 +429,21 @@ class KeyRepository:
         if isinstance(created_at, str):
             created_at = datetime.fromisoformat(created_at)
         if isinstance(expires_at, str):
-            expires_at = datetime.fromisoformat(expires_at)
+            try:
+                # Rows written before the boundary normalisation may carry an
+                # offset; hand every caller the one stored form (naive local).
+                parsed = datetime.fromisoformat(expires_at)
+                if not expiry_in_range(parsed):
+                    raise ValueError("expires_at out of range")
+                expires_at = to_stored_local(parsed)
+                if expiry_instant(expires_at) is None:
+                    raise ValueError("expires_at out of range")
+            except (ValueError, OverflowError, OSError):
+                # Unreadable or unrepresentable expiry (for example a 9999-12-31
+                # "never" sentinel): fail closed (treated as already expired)
+                # instead of failing every request that lists or uses the key.
+                logger.warning("API key %s has an unreadable expires_at; treating it as expired", row.get("id"))
+                expires_at = EXPIRED_SENTINEL
         if isinstance(revoked_at, str):
             revoked_at = datetime.fromisoformat(revoked_at)
         if isinstance(last_used_at, str):

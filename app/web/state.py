@@ -8,12 +8,13 @@ import math
 import os
 import shutil
 from collections import Counter, defaultdict
-from datetime import datetime
+from collections.abc import Callable
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 from app import __version__
-from app.database.models import Analysis, Case
+from app.database.models import Analysis, AnalysisSummary, Case
 from app.database.repository import CaseRepository
 from app.pipeline.geoip import GeoIP
 from app.pipeline.rdns_cache import get_rdns_cache
@@ -22,6 +23,8 @@ from app.utils.config_manager import get_config_manager
 
 _SERIES_COLORS = ["#2b8de0", "#7d46c8", "#2fac55", "#f3aa35", "#5f6f89"]
 _TRAFFIC_REPLAY_MAX_EVENTS = 2_000
+# OSINT record keys that annotate an IP without assessing its reputation.
+_NON_ASSESSMENT_KEYS = frozenset({"ptr", "city", "country"})
 
 
 def _as_number(value: Any, default: float = 0) -> float:
@@ -330,28 +333,26 @@ def _traffic_replay(flows: list[dict[str, Any]], summary: dict[str, Any]) -> dic
     }
 
 
-def _latest_case_and_analysis(repo: CaseRepository) -> tuple[Case | None, Analysis | None]:
+CaseSummaries = list[tuple[Case, list[AnalysisSummary]]]
+
+
+def _latest_case_and_analysis(summaries: CaseSummaries) -> tuple[Case | None, AnalysisSummary | None]:
+    """Pick the newest analysis across the listed cases (first case when none has one)."""
     latest_case: Case | None = None
-    latest_analysis: Analysis | None = None
-    for case_summary in repo.list_cases(limit=100):
-        case = repo.get_case(case_summary.id)
-        if case is None:
-            continue
+    latest_analysis: AnalysisSummary | None = None
+    for case, analyses in summaries:
         if latest_case is None:
             latest_case = case
-        for analysis in case.analyses:
+        for analysis in analyses:
             if latest_analysis is None or analysis.sort_timestamp > latest_analysis.sort_timestamp:
                 latest_case = case
                 latest_analysis = analysis
     return latest_case, latest_analysis
 
 
-def _serialize_cases(repo: CaseRepository) -> list[dict[str, Any]]:
+def _serialize_cases(summaries: CaseSummaries) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
-    for summary in repo.list_cases(limit=100):
-        case = repo.get_case(summary.id)
-        if case is None:
-            continue
+    for case, analyses in summaries:
         rows.append(
             {
                 "id": case.id,
@@ -362,24 +363,29 @@ def _serialize_cases(repo: CaseRepository) -> list[dict[str, Any]]:
                 "tags": case.tags,
                 "created_at": case.created_at.isoformat(),
                 "updated_at": case.updated_at.isoformat(),
-                "analysis_count": len(case.analyses),
-                "ioc_count": case.ioc_count,
+                "analysis_count": len(analyses),
+                "ioc_count": sum(analysis.ioc_count for analysis in analyses),
                 "note_count": len(case.notes),
                 "analyses": [
                     {
                         "id": analysis.id,
                         "name": Path(analysis.pcap_path).name,
                         "packet_count": analysis.packet_count,
-                        "flow_count": len((analysis.features or {}).get("flows") or []),
-                        "ioc_count": len(analysis.iocs),
+                        "flow_count": analysis.flow_count,
+                        "ioc_count": analysis.ioc_count,
                         "analyzed_at": analysis.analyzed_at.isoformat(),
                     }
-                    for analysis in case.analyses
+                    for analysis in analyses
                 ],
                 "notes": [note.to_dict() for note in case.notes],
             }
         )
     return rows
+
+
+def serialize_jobs(repo: CaseRepository) -> list[dict[str, Any]]:
+    """Job list in the bootstrap payload's ``jobs`` shape, without building the rest of the state."""
+    return _serialize_jobs(repo, {case.id: case.title for case in repo.list_cases(limit=100)})
 
 
 def _serialize_jobs(repo: CaseRepository, case_titles: dict[str, str] | None = None) -> list[dict[str, Any]]:
@@ -425,23 +431,52 @@ def _protocol_rows(flows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     ]
 
 
-def _flow_time_label(flow: dict[str, Any]) -> str | None:
+def _flow_minute(flow: dict[str, Any]) -> int | None:
+    """Epoch second of the UTC minute a flow started in, or None when it has no usable timestamp."""
     times = _sample_sequence(flow.get("pkt_times"))
     timestamp = flow.get("first_ts") or (times[0] if times else None)
     if timestamp is None:
         return None
     try:
-        return datetime.utcfromtimestamp(float(timestamp)).strftime("%H:%M")
+        value = float(timestamp)
+        if not math.isfinite(value):
+            return None
+        minute = int(value // 60) * 60
+        datetime.fromtimestamp(minute, timezone.utc)  # reject values outside the platform's range
     except (OSError, OverflowError, TypeError, ValueError):
         return None
+    return minute
+
+
+def _time_labeler(flows: list[dict[str, Any]]) -> Callable[[int], str]:
+    """Build the display label for a timeline bucket.
+
+    A capture inside one UTC day keeps the short ``HH:MM`` label. Once the
+    capture spans more than one day that label is ambiguous (10:05 on day one
+    and day two would merge), so every label carries its date instead. The
+    timeline and the map's ``traffic_slices`` share this labeler because the
+    client filters the map by comparing the two label strings for equality.
+    """
+    days = {minute // 86400 for flow in flows if (minute := _flow_minute(flow)) is not None}
+    pattern = "%Y-%m-%d %H:%M" if len(days) > 1 else "%H:%M"
+    return lambda minute: datetime.fromtimestamp(minute, timezone.utc).strftime(pattern)
+
+
+def _minute_iso(minute: int) -> str:
+    return datetime.fromtimestamp(minute, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def _traffic_rows(flows: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    buckets: Counter[str] = Counter()
+    # Bucket on the absolute minute and sort chronologically: keying on the
+    # HH:MM text merged the same clock minute from different days and put
+    # 00:01 before 23:59 for a capture that crossed midnight.
+    buckets: Counter[int] = Counter()
     for flow in flows:
-        if label := _flow_time_label(flow):
-            buckets[label] += 1
-    return [{"time": label, "flows": buckets[label]} for label in sorted(buckets)]
+        minute = _flow_minute(flow)
+        if minute is not None:
+            buckets[minute] += 1
+    label = _time_labeler(flows)
+    return [{"time": label(minute), "flows": buckets[minute], "ts": _minute_iso(minute)} for minute in sorted(buckets)]
 
 
 def _top_talkers(flows: list[dict[str, Any]], limit: int = 10) -> list[dict[str, Any]]:
@@ -520,9 +555,10 @@ def _map_flows(flows: list[dict[str, Any]], osint: dict[str, Any], limit: int = 
             "traffic_slices": defaultdict(lambda: {"packets": 0, "bytes": 0}),
         }
     )
+    label = _time_labeler(flows)
     for flow in flows:
         protocol = str(flow.get("proto") or "Unknown").upper()
-        time_label = _flow_time_label(flow)
+        minute = _flow_minute(flow)
         flow_packets = _flow_weight(flow)
         flow_bytes = _flow_bytes(flow)
         for field in ("src", "dst"):
@@ -533,8 +569,8 @@ def _map_flows(flows: list[dict[str, Any]], osint: dict[str, Any], limit: int = 
             row["packets"] += flow_packets
             row["bytes"] += flow_bytes
             row["protocols"].add(protocol)
-            if time_label:
-                traffic_slice = row["traffic_slices"][(protocol, time_label)]
+            if minute is not None:
+                traffic_slice = row["traffic_slices"][(protocol, minute)]
                 traffic_slice["packets"] += flow_packets
                 traffic_slice["bytes"] += flow_bytes
 
@@ -544,11 +580,16 @@ def _map_flows(flows: list[dict[str, Any]], osint: dict[str, Any], limit: int = 
         if not location:
             continue
         reputation = (osint or {}).get("ips", {}).get(ip, {})
+        reputation = reputation if isinstance(reputation, dict) else {}
         score = max(
             _as_number(reputation.get("score")),
             _as_number(reputation.get("abuseConfidenceScore")) / 100,
         )
         status = "Review" if score >= 0.35 else "Expected"
+        # A low score only means "expected" if a reputation provider actually
+        # answered for this IP. Reverse-DNS and GeoIP annotations are attached
+        # to every public IP and are not an assessment.
+        assessed = any(key not in _NON_ASSESSMENT_KEYS for key in reputation)
         byte_count = int(row["bytes"])
         byte_label = (
             f"{byte_count / 1_048_576:.1f} MB" if byte_count >= 1_048_576 else f"{max(1, byte_count // 1024)} KB"
@@ -567,14 +608,20 @@ def _map_flows(flows: list[dict[str, Any]], osint: dict[str, Any], limit: int = 
                 "traffic_slices": [
                     {
                         "protocol": protocol,
-                        "time": time_label,
+                        "time": label(minute),
                         "packets": int(values["packets"]),
                         "bytes": int(values["bytes"]),
+                        "ts": _minute_iso(minute),
                     }
-                    for (protocol, time_label), values in sorted(row["traffic_slices"].items())
+                    for (protocol, minute), values in sorted(row["traffic_slices"].items())
                 ],
+                # ``status`` keeps its two historical values because the client
+                # switches on the exact string; ``assessed``/``assessment`` say
+                # whether that verdict is backed by any reputation data.
                 "status": status,
                 "color": "#ffbd59" if status == "Review" else "#47a8ff",
+                "assessed": assessed,
+                "assessment": status if assessed or status == "Review" else "Not assessed",
             }
         )
         if len(output) >= limit:
@@ -659,7 +706,7 @@ def _raw_flow_rows(flows: list[dict[str, Any]], limit: int = 250) -> list[dict[s
         times = _sample_sequence(flow.get("pkt_times"))
         timestamp = flow.get("first_ts") or (times[0] if times else None)
         try:
-            first_seen = datetime.utcfromtimestamp(float(timestamp)).strftime("%H:%M:%S")
+            first_seen = datetime.fromtimestamp(float(timestamp), timezone.utc).strftime("%H:%M:%S")
         except (OSError, OverflowError, TypeError, ValueError):
             first_seen = "—"
         proto = str(flow.get("proto") or "Unknown").upper()
@@ -875,17 +922,31 @@ def public_config() -> dict[str, Any]:
 
 
 def build_workbench_state(repo: CaseRepository, analysis_id: str | None = None) -> dict[str, Any]:
-    """Create the single bootstrap payload used by the production workbench."""
-    latest_case, latest_analysis = _latest_case_and_analysis(repo)
+    """Create the single bootstrap payload used by the production workbench.
+
+    Each listed case is read once, through a summary query that leaves the
+    analysis evidence blobs compressed; only the one active analysis is loaded
+    in full for the dashboard.
+    """
+    summaries = repo.list_case_summaries(limit=100)
+    latest_case, latest_summary = _latest_case_and_analysis(summaries)
+    analyses_by_case = {case.id: analyses for case, analyses in summaries}
+    capture_count = len(analyses_by_case.get(latest_case.id, [])) if latest_case else 0
     if analysis_id:
         from fastapi import HTTPException
 
-        selected = repo.get_analysis(analysis_id)
-        if selected is None:
+        latest_analysis = repo.get_analysis(analysis_id)
+        if latest_analysis is None:
             raise HTTPException(status_code=404, detail="analysis_not_found")
-        latest_analysis = selected
-        latest_case = repo.get_case(selected.case_id)
-    cases = _serialize_cases(repo)
+        if latest_analysis.case_id in analyses_by_case:
+            selected_case = next(pair for pair in summaries if pair[0].id == latest_analysis.case_id)
+        else:
+            selected_case = repo.get_case_summary(latest_analysis.case_id)
+        latest_case = selected_case[0] if selected_case else None
+        capture_count = len(selected_case[1]) if selected_case else 0
+    else:
+        latest_analysis = repo.get_analysis(latest_summary.id) if latest_summary else None
+    cases = _serialize_cases(summaries)
     jobs = _serialize_jobs(repo, {row["id"]: row["title"] for row in cases})
     dashboard = _dashboard_state(latest_analysis)
     tools = [
@@ -895,7 +956,7 @@ def build_workbench_state(repo: CaseRepository, analysis_id: str | None = None) 
     ]
     return {
         "version": __version__,
-        "capture_count": len(latest_case.analyses) if latest_case else 0,
+        "capture_count": capture_count,
         "analysis_complete": latest_analysis is not None,
         "active_case_id": latest_case.id if latest_case else None,
         "active_case_title": latest_case.title if latest_case else None,

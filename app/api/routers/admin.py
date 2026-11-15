@@ -10,7 +10,7 @@ from pydantic import BaseModel, Field
 
 from app.api.auth import Scope
 from app.api.deps import get_key_repo, get_rate_limiter, get_settings, require_full_scope
-from app.api.key_models import APIKey, generate_api_key
+from app.api.key_models import APIKey, generate_api_key, parse_key_timestamp
 from app.api.key_repository import KeyRepository
 from app.api.rate_limiter import RateLimiter
 from app.api.settings import FULL_SCOPE_RECOVERY_HINT, APISettings
@@ -157,15 +157,21 @@ def update_key(
         # 0 means "clear to unlimited" (stored as NULL in DB)
         updates["rate_limit_rpm"] = body.rate_limit_rpm if body.rate_limit_rpm > 0 else None
     if body.expires_at is not None:
+        # Normalised at the boundary: "2027-01-01T00:00:00Z" and offset forms
+        # are converted to the stored form, so later expiry checks never mix
+        # naive and offset-aware datetimes. No offset means server-local time.
         try:
-            updates["expires_at"] = datetime.fromisoformat(body.expires_at)
-        except ValueError:
+            updates["expires_at"] = parse_key_timestamp(body.expires_at)
+        except (ValueError, OverflowError, OSError):
             raise HTTPException(
-                status_code=400,
+                status_code=422,
                 detail={
                     "code": "invalid_expires_at",
-                    "title": "Bad Request",
-                    "detail": "expires_at must be a valid ISO 8601 datetime string.",
+                    "title": "Unprocessable Entity",
+                    "detail": (
+                        "expires_at must be a valid ISO 8601 datetime string between 1971-01-01 and "
+                        "8999-12-31, for example 2027-01-01T00:00:00Z."
+                    ),
                 },
             )
 

@@ -164,6 +164,10 @@ class Analysis:
     # into the analysis/scoring contracts.
     session_artifacts: dict | None = None
     iocs: list[IOC] = field(default_factory=list)
+    # Set by the repository whenever the stored narrative text changes, so
+    # derived artifacts (the cached PDF) can tell a rewritten report from a
+    # re-save that left ``analyzed_at`` untouched. ``None`` on legacy rows.
+    report_updated_at: datetime | None = None
 
     @property
     def sort_timestamp(self) -> float:
@@ -191,6 +195,7 @@ class Analysis:
             "capture_metrics": self.capture_metrics,
             "session_artifacts": self.session_artifacts,
             "iocs": [ioc.to_dict() for ioc in self.iocs],
+            "report_updated_at": self.report_updated_at.isoformat() if self.report_updated_at else None,
         }
 
     @classmethod
@@ -200,6 +205,9 @@ class Analysis:
             analyzed_at = datetime.fromisoformat(analyzed_at)
 
         iocs = [IOC.from_dict(i) for i in data.get("iocs", [])]
+        report_updated_at = data.get("report_updated_at")
+        if isinstance(report_updated_at, str):
+            report_updated_at = datetime.fromisoformat(report_updated_at)
 
         return cls(
             id=data.get("id", ""),
@@ -218,7 +226,27 @@ class Analysis:
             capture_metrics=data.get("capture_metrics"),
             session_artifacts=data.get("session_artifacts"),
             iocs=iocs,
+            report_updated_at=report_updated_at,
         )
+
+
+@dataclass
+class AnalysisSummary:
+    """Listing-level view of an analysis that never loads its evidence blobs."""
+
+    id: str = ""
+    case_id: str = ""
+    pcap_path: str = ""
+    packet_count: int = 0
+    analyzed_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    flow_count: int = 0
+    ioc_count: int = 0
+
+    @property
+    def sort_timestamp(self) -> float:
+        """Same ordering rule as ``Analysis.sort_timestamp``."""
+        value = self.analyzed_at
+        return (value if value.tzinfo else value.replace(tzinfo=timezone.utc)).timestamp()
 
 
 @dataclass
@@ -341,6 +369,9 @@ class Job:
     error_code: str | None = None
     error_detail: str | None = None
     result_json: str | None = None
+    # Identity of the process that dispatched/runs the job (role@host:pid:boot).
+    # Internal recovery bookkeeping; deliberately not part of ``to_dict``.
+    owner_token: str | None = None
 
     def to_dict(self) -> dict:
         return {
@@ -396,4 +427,5 @@ class Job:
             error_code=data.get("error_code"),
             error_detail=data.get("error_detail"),
             result_json=data.get("result_json"),
+            owner_token=data.get("owner_token"),
         )

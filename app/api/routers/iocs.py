@@ -10,11 +10,11 @@ import uuid
 from datetime import datetime, timezone
 from email.utils import format_datetime
 
-from fastapi import APIRouter, Depends, Query, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import Response
 
 from app.api.deps import get_repo, require_feed_scope
-from app.api.feed import IOCFilter, query_iocs
+from app.api.feed import IOCFilter, parse_feed_timestamp, query_iocs
 from app.utils.export import _sanitize_csv_value
 
 router = APIRouter(prefix="/api/v1", tags=["egress"])
@@ -29,13 +29,46 @@ def _build_filter(
     limit: int,
     cursor: str | None,
 ) -> IOCFilter:
+    """Validate feed query parameters.
+
+    Paging limitation: ``cursor`` is a plain row offset into the feed ordered by
+    newest ``last_seen`` first. It is not a snapshot — if indicators are added
+    or removed between page requests, later pages can repeat or skip rows. For
+    an exact incremental pull, page until ``next_cursor`` is null and then
+    poll with ``since`` set to the time of the previous pull.
+
+    ``since`` is compared as an instant, so any ISO 8601 offset (or ``Z``) is
+    accepted; a value with no offset keeps its historical meaning of
+    server-local time.
+
+    Raises:
+        HTTPException: 422 for a non-numeric/negative ``cursor`` or a ``since``
+            that is not an ISO 8601 datetime.
+    """
     type_list = [t.strip() for t in (types or "").split(",") if t.strip()]
     offset = 0
     if cursor:
-        try:
-            offset = int(cursor)
-        except ValueError:
-            offset = 0
+        # A malformed cursor used to restart silently at row 0, handing the
+        # caller page one again as if it were the next page.
+        if not cursor.isascii() or not cursor.isdigit() or len(cursor) > 12:
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "code": "invalid_cursor",
+                    "title": "Unprocessable Entity",
+                    "detail": "cursor must be the next_cursor value returned by a previous page.",
+                },
+            )
+        offset = int(cursor)
+    if since is not None and parse_feed_timestamp(since) is None:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "code": "invalid_since",
+                "title": "Unprocessable Entity",
+                "detail": "since must be an ISO 8601 datetime, for example 2026-08-01T00:00:00Z.",
+            },
+        )
     return IOCFilter(
         since=since,
         min_score=min_score,
@@ -180,6 +213,14 @@ def iocs_stix(
     _scope=Depends(require_feed_scope),
     repo=Depends(get_repo),
 ):
+    """STIX 2.1 indicator bundle of the IOC feed.
+
+    Timestamps are STIX UTC (``...Z``). Paging uses the same offset ``cursor``
+    as the JSON/CSV feeds and shares its limitation: it is not a snapshot, so
+    rows can repeat or be skipped if the feed changes between pages (see
+    ``_build_filter``). The bundle itself carries no cursor; request pages with
+    ``limit``/``cursor`` and stop when a page returns fewer than ``limit`` rows.
+    """
     filt = _build_filter(since, min_score, type, tag, case_id, limit, cursor)
     rows = query_iocs(repo, filt)
 
@@ -195,16 +236,19 @@ def _to_stix_bundle(rows: list[dict]) -> dict:
         pattern = _row_to_stix_pattern(r)
         if not pattern:
             continue
+        created = _stix_timestamp(r["first_seen"])
+        # Same fixed-width UTC format on both sides, so text order is time order.
+        modified = max(created, _stix_timestamp(r["last_seen"] or r["first_seen"]))
         objects.append(
             {
                 "type": "indicator",
                 "spec_version": "2.1",
                 "id": f"indicator--{uuid.uuid5(uuid.NAMESPACE_URL, r['value'])}",
-                "created": r["first_seen"] or "1970-01-01T00:00:00Z",
-                "modified": r["last_seen"] or r["first_seen"] or "1970-01-01T00:00:00Z",
+                "created": created,
+                "modified": modified,
                 "pattern_type": "stix",
                 "pattern": pattern,
-                "valid_from": r["first_seen"] or "1970-01-01T00:00:00Z",
+                "valid_from": created,
                 "labels": ["malicious-activity"],
             }
         )
@@ -216,9 +260,27 @@ def _to_stix_bundle(rows: list[dict]) -> dict:
     }
 
 
+_STIX_EPOCH = "1970-01-01T00:00:00.000Z"
+
+
+def _stix_timestamp(value: str | None) -> str:
+    """Stored timestamp -> STIX 2.1 timestamp (RFC 3339, UTC, ``Z`` suffix).
+
+    Legacy rows hold naive local time (written by ``datetime.now()``); newer
+    rows carry an explicit offset. Both are converted to UTC.
+    """
+    parsed = parse_feed_timestamp(value)
+    if parsed is None:
+        return _STIX_EPOCH
+    return parsed.strftime("%Y-%m-%dT%H:%M:%S.") + f"{parsed.microsecond // 1000:03d}Z"
+
+
 def _row_to_stix_pattern(r: dict) -> str | None:
     t = r["type"]
-    v = r["value"].replace("'", "\\'")
+    # STIX string literals escape backslash and single quote with a backslash.
+    # Backslash must go first, or the quote's own escape would be re-escaped
+    # and a value ending in a backslash could close the literal early.
+    v = r["value"].replace("\\", "\\\\").replace("'", "\\'")
     if t == "ip":
         return f"[ipv4-addr:value = '{v}']"
     if t == "domain":

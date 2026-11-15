@@ -5,17 +5,37 @@ from __future__ import annotations
 import gzip
 import json
 import sqlite3
+import threading
 import uuid
+from collections import OrderedDict
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
-from app.database.models import IOC, Analysis, Case, CaseStatus, IOCType, Job, JobStatus, Note, Severity
+from app.database.models import (
+    IOC,
+    Analysis,
+    AnalysisSummary,
+    Case,
+    CaseStatus,
+    IOCType,
+    Job,
+    JobStatus,
+    Note,
+    Severity,
+)
 from app.utils.logger import get_logger
 
 logger = get_logger(__name__)
 
 JSON_COMPRESSION_LEVEL = 6
+
+# Flow counts live inside the compressed features blob. Listings need only the
+# count, so it is computed once per stored blob and remembered; the key changes
+# whenever the analysis is re-saved with different features.
+_FLOW_COUNT_CACHE_MAX = 4096
+_flow_count_cache: OrderedDict[tuple[str, str, str, int], int] = OrderedDict()
+_flow_count_lock = threading.Lock()
 
 
 class CaseRepository:
@@ -79,7 +99,8 @@ class CaseRepository:
                     tls_json TEXT,
                     attack_mapping_json TEXT,
                     capture_metrics_json TEXT,
-                    session_artifacts_json TEXT
+                    session_artifacts_json TEXT,
+                    report_updated_at TIMESTAMP
                 );
 
                 -- IOCs extracted from analyses
@@ -133,7 +154,8 @@ class CaseRepository:
                     heartbeat_at TIMESTAMP,
                     error_code TEXT,
                     error_detail TEXT,
-                    result_json BLOB
+                    result_json BLOB,
+                    owner_token TEXT
                 );
 
                 -- Indexes
@@ -146,23 +168,43 @@ class CaseRepository:
                 CREATE INDEX IF NOT EXISTS idx_jobs_case ON jobs(case_id);
                 """
             )
-            analysis_columns = {row["name"] for row in conn.execute("PRAGMA table_info(analyses)")}
-            for column in ("attack_mapping_json", "capture_metrics_json", "session_artifacts_json"):
-                if column not in analysis_columns:
-                    conn.execute(f"ALTER TABLE analyses ADD COLUMN {column} TEXT")
-
-            case_columns = {row["name"] for row in conn.execute("PRAGMA table_info(cases)")}
-            if "source" not in case_columns:
-                conn.execute("ALTER TABLE cases ADD COLUMN source TEXT DEFAULT 'ui'")
-
-            job_columns = {row["name"] for row in conn.execute("PRAGMA table_info(jobs)")}
-            if "progress_percent" not in job_columns:
-                conn.execute("ALTER TABLE jobs ADD COLUMN progress_percent INTEGER DEFAULT 0")
-            if "progress_message" not in job_columns:
-                conn.execute("ALTER TABLE jobs ADD COLUMN progress_message TEXT")
+            for table, column, declaration in (
+                ("analyses", "attack_mapping_json", "TEXT"),
+                ("analyses", "capture_metrics_json", "TEXT"),
+                ("analyses", "session_artifacts_json", "TEXT"),
+                ("analyses", "report_updated_at", "TIMESTAMP"),
+                ("cases", "source", "TEXT DEFAULT 'ui'"),
+                ("jobs", "progress_percent", "INTEGER DEFAULT 0"),
+                ("jobs", "progress_message", "TEXT"),
+                ("jobs", "owner_token", "TEXT"),
+            ):
+                self._ensure_column(conn, table, column, declaration)
             conn.commit()
         finally:
             conn.close()
+
+    @staticmethod
+    def _ensure_column(conn: sqlite3.Connection, table: str, column: str, declaration: str) -> None:
+        """Add a column when it is missing (additive, idempotent migration).
+
+        The UI and API processes share one database file and may boot at the
+        same moment, so losing the ``ADD COLUMN`` race to the other process is
+        expected and ignored.
+
+        Args:
+            conn: Open connection.
+            table: Table name (trusted constant).
+            column: Column name (trusted constant).
+            declaration: Column type/default clause (trusted constant).
+        """
+        existing = {row["name"] for row in conn.execute(f"PRAGMA table_info({table})")}
+        if column in existing:
+            return
+        try:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {declaration}")
+        except sqlite3.OperationalError as exc:
+            if "duplicate column name" not in str(exc).lower():
+                raise
 
     # ==================== Case CRUD ====================
 
@@ -319,6 +361,102 @@ class CaseRepository:
             return cases
         finally:
             conn.close()
+
+    def list_case_summaries(self, limit: int = 100) -> list[tuple[Case, list[AnalysisSummary]]]:
+        """List recent cases with tags, notes and per-analysis summary fields.
+
+        Unlike calling ``get_case`` per case, this never decompresses the
+        OSINT, YARA, DNS, TLS, ATT&CK, capture-metric or session-artifact
+        blobs, and reads a features blob only the first time its flow count is
+        needed (see ``_flow_count``).
+
+        Args:
+            limit: Maximum number of cases, most recently updated first.
+
+        Returns:
+            ``(case, analysis_summaries)`` pairs. ``case.analyses`` is left
+            empty; ``case.tags`` and ``case.notes`` match ``get_case``.
+        """
+        return self._summarize_cases(self.list_cases(limit=limit))
+
+    def get_case_summary(self, case_id: str) -> tuple[Case, list[AnalysisSummary]] | None:
+        """Summary of a single case (see ``list_case_summaries``), or None if missing."""
+        conn = self._get_conn()
+        try:
+            row = conn.execute("SELECT * FROM cases WHERE id = ?", (case_id,)).fetchone()
+        finally:
+            conn.close()
+        if row is None:
+            return None
+        return self._summarize_cases([self._row_to_case(dict(row))])[0]
+
+    def _summarize_cases(self, cases: list[Case]) -> list[tuple[Case, list[AnalysisSummary]]]:
+        if not cases:
+            return []
+        case_ids = [case.id for case in cases]
+        placeholders = ",".join("?" for _ in case_ids)
+        by_case: dict[str, list[AnalysisSummary]] = {case_id: [] for case_id in case_ids}
+        conn = self._get_conn()
+        try:
+            rows = conn.execute(
+                f"""
+                SELECT a.id, a.case_id, a.pcap_path, a.packet_count, a.analyzed_at,
+                       length(a.features_json) AS features_len,
+                       (SELECT COUNT(*) FROM iocs i WHERE i.analysis_id = a.id) AS ioc_count
+                FROM analyses a
+                WHERE a.case_id IN ({placeholders})
+                ORDER BY a.rowid
+                """,  # noqa: S608 - placeholders only
+                case_ids,
+            ).fetchall()
+            for row in rows:
+                analyzed_at = row["analyzed_at"]
+                if isinstance(analyzed_at, str):
+                    analyzed_at = datetime.fromisoformat(analyzed_at)
+                by_case[row["case_id"]].append(
+                    AnalysisSummary(
+                        id=row["id"],
+                        case_id=row["case_id"] or "",
+                        pcap_path=row["pcap_path"] or "",
+                        packet_count=row["packet_count"] or 0,
+                        analyzed_at=analyzed_at or datetime.now(timezone.utc),
+                        flow_count=self._flow_count(conn, row),
+                        ioc_count=int(row["ioc_count"] or 0),
+                    )
+                )
+            for case in cases:
+                # Same helpers as get_case, so tag and note order are identical.
+                case.tags = self._get_case_tags(conn, case.id)
+                case.notes = self._get_case_notes(conn, case.id)
+                case.analyses = []
+                case._analysis_count = len(by_case[case.id])
+        finally:
+            conn.close()
+        return [(case, by_case[case.id]) for case in cases]
+
+    def _flow_count(self, conn: sqlite3.Connection, row: sqlite3.Row) -> int:
+        """Number of flows in an analysis, decompressing its features blob at most once."""
+        features_len = row["features_len"]
+        if not features_len:
+            return 0
+        key = (str(self._db_path), row["id"], str(row["analyzed_at"]), int(features_len))
+        with _flow_count_lock:
+            cached = _flow_count_cache.get(key)
+            if cached is not None:
+                _flow_count_cache.move_to_end(key)
+                return cached
+        blob = conn.execute("SELECT features_json FROM analyses WHERE id = ?", (row["id"],)).fetchone()
+        features = self._decompress_json(blob["features_json"]) if blob else None
+        flows = features.get("flows") if isinstance(features, dict) else None
+        try:
+            count = len(flows or [])
+        except TypeError:
+            count = 0
+        with _flow_count_lock:
+            _flow_count_cache[key] = count
+            while len(_flow_count_cache) > _FLOW_COUNT_CACHE_MAX:
+                _flow_count_cache.popitem(last=False)
+        return count
 
     def update_case(self, case: Case) -> None:
         """
@@ -488,6 +626,9 @@ class CaseRepository:
                 attack_mapping_json,
                 capture_metrics_json,
                 session_artifacts_json,
+                # Bound to the DO UPDATE branch only: a first insert leaves
+                # report_updated_at NULL ("no rewrite since analysis").
+                datetime.now(timezone.utc).isoformat(),
             )
             conn.execute(
                 """
@@ -497,6 +638,13 @@ class CaseRepository:
                  attack_mapping_json, capture_metrics_json, session_artifacts_json)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(id) DO UPDATE SET
+                    -- Evaluated against the pre-update row: the stamp moves only
+                    -- when the narrative text actually changed.
+                    report_updated_at = CASE
+                        WHEN COALESCE(analyses.report_md, '') = COALESCE(excluded.report_md, '')
+                        THEN analyses.report_updated_at
+                        ELSE ?
+                    END,
                     case_id = excluded.case_id,
                     pcap_path = excluded.pcap_path,
                     pcap_hash = excluded.pcap_hash,
@@ -554,6 +702,14 @@ class CaseRepository:
                 return None
 
             return self._row_to_analysis(dict(row), conn)
+        finally:
+            conn.close()
+
+    def analysis_exists(self, analysis_id: str) -> bool:
+        """Cheap existence check that does not load or decompress the analysis."""
+        conn = self._get_conn()
+        try:
+            return conn.execute("SELECT 1 FROM analyses WHERE id = ?", (analysis_id,)).fetchone() is not None
         finally:
             conn.close()
 
@@ -798,6 +954,12 @@ class CaseRepository:
         analyzed_at = row.get("analyzed_at")
         if isinstance(analyzed_at, str):
             analyzed_at = datetime.fromisoformat(analyzed_at)
+        report_updated_at = row.get("report_updated_at")
+        if isinstance(report_updated_at, str):
+            try:
+                report_updated_at = datetime.fromisoformat(report_updated_at)
+            except ValueError:
+                report_updated_at = None
 
         # Decompress JSON fields
         features = self._decompress_json(row.get("features_json")) or {}
@@ -810,7 +972,7 @@ class CaseRepository:
         session_artifacts = self._decompress_json(row.get("session_artifacts_json"))
 
         if iocs is None:
-            ioc_rows = conn.execute("SELECT * FROM iocs WHERE analysis_id = ?", (row["id"],)).fetchall()
+            ioc_rows = conn.execute("SELECT * FROM iocs WHERE analysis_id = ? ORDER BY id", (row["id"],)).fetchall()
             iocs = [self._row_to_ioc(ioc_row) for ioc_row in ioc_rows]
 
         return Analysis(
@@ -830,6 +992,7 @@ class CaseRepository:
             capture_metrics=capture_metrics,
             session_artifacts=session_artifacts,
             iocs=iocs,
+            report_updated_at=report_updated_at if isinstance(report_updated_at, datetime) else None,
         )
 
     @staticmethod
@@ -916,8 +1079,8 @@ class CaseRepository:
                 INSERT INTO jobs (id, case_id, pcap_path, options_json, status,
                                   progress_stage, progress_done, progress_total,
                                   progress_percent, progress_message,
-                                  submitted_at, heartbeat_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                  submitted_at, heartbeat_at, owner_token)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     job.id,
@@ -932,6 +1095,7 @@ class CaseRepository:
                     job.progress_message,
                     job.submitted_at.isoformat(),
                     datetime.now().isoformat(),
+                    job.owner_token,
                 ),
             )
             conn.commit()
@@ -986,35 +1150,89 @@ class CaseRepository:
         error_code: str | None = None,
         error_detail: str | None = None,
         result_json: bytes | None = None,
-    ) -> None:
+    ) -> bool:
+        """Move a job to ``status`` without ever leaving a terminal state.
+
+        Terminal writes (done/failed/cancelled) are compare-and-set: they only
+        apply while the job is still queued or running, so a late writer cannot
+        overwrite an earlier terminal outcome. A job that already finished is
+        likewise never moved back to running.
+
+        Args:
+            job_id: Job to update.
+            status: Target lifecycle state.
+            error_code: Machine-readable failure code (terminal states).
+            error_detail: Human-readable failure detail (terminal states).
+            result_json: Result payload (terminal states).
+
+        Returns:
+            True when a row changed; False when the job is missing or was
+            already terminal.
+        """
         now = datetime.now().isoformat()
         conn = self._get_conn()
         try:
             if status == JobStatus.RUNNING:
-                conn.execute(
-                    "UPDATE jobs SET status=?, started_at=?, heartbeat_at=? WHERE id=?",
+                cur = conn.execute(
+                    "UPDATE jobs SET status=?, started_at=?, heartbeat_at=? "
+                    "WHERE id=? AND status IN ('queued','running')",
                     (status.value, now, now, job_id),
                 )
             elif status in (JobStatus.DONE, JobStatus.FAILED, JobStatus.CANCELLED):
-                conn.execute(
+                cur = conn.execute(
                     """UPDATE jobs SET status=?, finished_at=?, error_code=?,
-                                        error_detail=?, result_json=? WHERE id=?""",
+                                        error_detail=?, result_json=?
+                       WHERE id=? AND status IN ('queued','running')""",
                     (status.value, now, error_code, error_detail, result_json, job_id),
                 )
             else:
-                conn.execute("UPDATE jobs SET status=? WHERE id=?", (status.value, job_id))
+                cur = conn.execute(
+                    "UPDATE jobs SET status=? WHERE id=? AND status IN ('queued','running')", (status.value, job_id)
+                )
             conn.commit()
+            return cur.rowcount > 0
         finally:
             conn.close()
 
-    def start_job_if_queued(self, job_id: str) -> bool:
-        """Atomically flip a QUEUED job to RUNNING; False if it is missing or no longer queued."""
+    def start_job_if_queued(self, job_id: str, owner_token: str | None = None) -> bool:
+        """Atomically flip a QUEUED job to RUNNING; False if it is missing or no longer queued.
+
+        Args:
+            job_id: Job to start.
+            owner_token: Identity of the process running the job. When given it
+                replaces the dispatcher's token so restart recovery can tell
+                whose job this is; ``None`` keeps whatever is stored.
+        """
         now = datetime.now().isoformat()
         conn = self._get_conn()
         try:
             cur = conn.execute(
-                "UPDATE jobs SET status='running', started_at=?, heartbeat_at=? WHERE id=? AND status='queued'",
-                (now, now, job_id),
+                "UPDATE jobs SET status='running', started_at=?, heartbeat_at=?, "
+                "owner_token=COALESCE(?, owner_token) WHERE id=? AND status='queued'",
+                (now, now, owner_token, job_id),
+            )
+            conn.commit()
+            return cur.rowcount > 0
+        finally:
+            conn.close()
+
+    def claim_queued_job(self, job_id: str, owner_token: str, *, expected_owner: str | None) -> bool:
+        """Atomically hand a still-QUEUED job to a new dispatcher.
+
+        Args:
+            job_id: Job to adopt.
+            owner_token: The adopting process's token.
+            expected_owner: Owner the caller observed (``None`` for legacy rows);
+                the claim fails if another process changed it in the meantime.
+
+        Returns:
+            True when this call took ownership.
+        """
+        conn = self._get_conn()
+        try:
+            cur = conn.execute(
+                "UPDATE jobs SET owner_token=? WHERE id=? AND status='queued' AND owner_token IS ?",
+                (owner_token, job_id, expected_owner),
             )
             conn.commit()
             return cur.rowcount > 0
@@ -1035,12 +1253,26 @@ class CaseRepository:
         finally:
             conn.close()
 
-    def complete_job(self, job_id: str, result_json: bytes, *, only_active: bool = False) -> bool:
+    def complete_job(self, job_id: str, result_json: bytes, *, only_active: bool = True) -> bool:
         """Mark a job done and reconcile its progress in one atomic write.
 
         Skipped stages never emit progress events, so a finished job would
         otherwise freeze at its last snapshot (e.g. 50%).
+
+        The write is compare-and-set: it only applies while the job is still
+        queued or running, so a late ``done`` cannot resurrect a job that was
+        already failed or cancelled (for example by restart recovery).
+
+        Args:
+            job_id: Job to finish.
+            result_json: Serialized result payload.
+            only_active: Retained for call-site compatibility; the write is
+                always conditional on an active job.
+
+        Returns:
+            True when the job was marked done by this call.
         """
+        del only_active  # always enforced
         now = datetime.now().isoformat()
         conn = self._get_conn()
         try:
@@ -1048,8 +1280,60 @@ class CaseRepository:
                 "UPDATE jobs SET status='done', finished_at=?, heartbeat_at=?, error_code=NULL, "
                 "error_detail=NULL, result_json=?, progress_stage='Complete', progress_done=progress_total, "
                 "progress_percent=100, progress_message='All stages completed' "
-                "WHERE id=?" + (" AND status IN ('queued','running')" if only_active else ""),
+                "WHERE id=? AND status IN ('queued','running')",
                 (now, now, result_json, job_id),
+            )
+            conn.commit()
+            return cur.rowcount > 0
+        finally:
+            conn.close()
+
+    def fail_job_if_active(
+        self,
+        job_id: str,
+        error_code: str,
+        error_detail: str | None = None,
+        *,
+        from_status: JobStatus | None = None,
+        stale_before: datetime | None = None,
+        owner_token: str | None = None,
+    ) -> bool:
+        """Compare-and-set a queued/running job to FAILED.
+
+        The optional guards are re-checked inside the UPDATE so recovery never
+        fails a job that changed between the caller's read and this write.
+
+        Args:
+            job_id: Job to fail.
+            error_code: Machine-readable failure code.
+            error_detail: Human-readable failure detail.
+            from_status: Only fail the job while it is in exactly this state.
+            stale_before: Only fail the job if its heartbeat is older than this
+                (naive local time, matching how heartbeats are written).
+            owner_token: Only fail the job if it is still held by this owner.
+
+        Returns:
+            True when the job was marked failed by this call.
+        """
+        clauses = ["id=?"]
+        params: list[Any] = [datetime.now().isoformat(), error_code, error_detail, job_id]
+        if from_status is not None:
+            clauses.append("status=?")
+            params.append(from_status.value)
+        else:
+            clauses.append("status IN ('queued','running')")
+        if stale_before is not None:
+            clauses.append("(heartbeat_at IS NULL OR heartbeat_at < ?)")
+            params.append(stale_before.isoformat())
+        if owner_token is not None:
+            clauses.append("owner_token=?")
+            params.append(owner_token)
+        conn = self._get_conn()
+        try:
+            cur = conn.execute(
+                "UPDATE jobs SET status='failed', finished_at=?, error_code=?, error_detail=? "  # noqa: S608 - fixed clauses
+                f"WHERE {' AND '.join(clauses)}",
+                params,
             )
             conn.commit()
             return cur.rowcount > 0
@@ -1122,14 +1406,21 @@ class CaseRepository:
         finally:
             conn.close()
 
-    def touch_job_heartbeat(self, job_id: str) -> None:
+    def touch_job_heartbeat(self, job_id: str) -> bool:
+        """Refresh a job's liveness stamp.
+
+        Returns:
+            True while the job is still active; False once it is missing or
+            terminal, which tells a heartbeat loop it can stop.
+        """
         conn = self._get_conn()
         try:
-            conn.execute(
-                "UPDATE jobs SET heartbeat_at=? WHERE id=?",
+            cur = conn.execute(
+                "UPDATE jobs SET heartbeat_at=? WHERE id=? AND status IN ('queued','running')",
                 (datetime.now().isoformat(), job_id),
             )
             conn.commit()
+            return cur.rowcount > 0
         finally:
             conn.close()
 
@@ -1138,7 +1429,7 @@ class CaseRepository:
         conn = self._get_conn()
         try:
             rows = conn.execute(
-                "SELECT * FROM jobs WHERE status='running' AND heartbeat_at < ?",
+                "SELECT * FROM jobs WHERE status='running' AND (heartbeat_at IS NULL OR heartbeat_at < ?)",
                 (cutoff,),
             ).fetchall()
             return [Job.from_dict(dict(r)) for r in rows]

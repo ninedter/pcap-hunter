@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import sqlite3
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from typing import Any
 
 from app.database.repository import CaseRepository
@@ -19,6 +21,38 @@ _SCORE_CASE = (
 _SCORE_SEV = {25: "low", 50: "medium", 75: "high", 100: "critical"}
 
 
+def parse_feed_timestamp(value: Any, *, naive_is_local: bool = True) -> datetime | None:
+    """Parse an ISO 8601 string into an offset-aware UTC datetime.
+
+    Args:
+        value: ISO 8601 text (offset, ``Z`` or naive).
+        naive_is_local: How to read a value with no offset. Stored
+            ``analyzed_at`` rows from before v3.1 were written with naive
+            ``datetime.now()`` and are server-local time, and the documented
+            ``since`` format (``2026-06-01T00:00:00``) was compared against
+            those rows, so both default to local. Pass False to read a
+            naive value as UTC.
+
+    Returns:
+        The instant in UTC, or ``None`` when ``value`` is empty or unparseable.
+    """
+    if not isinstance(value, str) or not value.strip():
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.strip())
+        if parsed.tzinfo is None:
+            parsed = parsed.astimezone() if naive_is_local else parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(timezone.utc)
+    except (ValueError, OverflowError, OSError):
+        return None
+
+
+def _stored_epoch(value: Any) -> float | None:
+    """SQL helper: stored ``analyzed_at`` text -> epoch seconds (NULL if unreadable)."""
+    parsed = parse_feed_timestamp(value)
+    return parsed.timestamp() if parsed is not None else None
+
+
 @dataclass
 class IOCFilter:
     """Filters for the IOC feed."""
@@ -32,6 +66,10 @@ class IOCFilter:
     offset: int = 0
 
 
+def _register_sql_helpers(conn: sqlite3.Connection) -> None:
+    conn.create_function("ph_stored_epoch", 1, _stored_epoch, deterministic=True)
+
+
 def query_iocs(repo: CaseRepository, filt: IOCFilter) -> list[dict[str, Any]]:
     """Aggregate IOCs across all cases with derived fields.
 
@@ -41,6 +79,9 @@ def query_iocs(repo: CaseRepository, filt: IOCFilter) -> list[dict[str, Any]]:
 
     Returns rows shaped like the API IOCEntry: type, value, score, severity,
     tags, first_seen, last_seen, case_ids, mitre_techniques.
+
+    Raises:
+        ValueError: If ``filt.since`` is set but is not an ISO 8601 datetime.
     """
     sql = f"""
         SELECT i.ioc_type, i.value,
@@ -63,8 +104,13 @@ def query_iocs(repo: CaseRepository, filt: IOCFilter) -> list[dict[str, Any]]:
         where.append(f"i.ioc_type IN ({placeholders})")
         params.extend(filt.types)
     if filt.since:
-        where.append("a.analyzed_at >= ?")
-        params.append(filt.since)
+        # Stored timestamps mix naive-local (legacy) and explicit-offset text, so
+        # a string comparison is wrong; compare instants instead.
+        since = parse_feed_timestamp(filt.since)
+        if since is None:
+            raise ValueError("since must be an ISO 8601 datetime")
+        where.append("ph_stored_epoch(a.analyzed_at) >= ?")
+        params.append(since.timestamp())
     if filt.case_id:
         where.append("a.case_id = ?")
         params.append(filt.case_id)
@@ -85,6 +131,7 @@ def query_iocs(repo: CaseRepository, filt: IOCFilter) -> list[dict[str, Any]]:
 
     conn = repo._get_conn()
     try:
+        _register_sql_helpers(conn)
         rows = conn.execute(sql, params).fetchall()
         analysis_ids = {
             analysis_id for row in rows for analysis_id in (row["analysis_ids"] or "").split(",") if analysis_id

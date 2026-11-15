@@ -10,6 +10,26 @@ from pathlib import Path
 
 from app.agents.registry import digest
 
+RECEIPT_OPTIONS = frozenset(
+    {
+        "osint_enabled",
+        "llm_enabled",
+        "do_pyshark",
+        "do_zeek",
+        "do_carve",
+        "do_yara",
+        "pre_count",
+        "pyshark_packet_limit",
+        "osint_top_n",
+        "_max_wall_seconds",
+    }
+)
+
+
+def selected_options(options):
+    """Return the analysis options that belong in an ingest receipt."""
+    return {key: value for key, value in options.items() if key in RECEIPT_OPTIONS}
+
 
 def capture_provenance(job, options):
     versions = {}
@@ -27,23 +47,7 @@ def capture_provenance(job, options):
             except (subprocess.SubprocessError, OSError, IndexError):
                 versions[name] = "unavailable"
     path = Path(job.pcap_path)
-    selected = {
-        k: v
-        for k, v in options.items()
-        if k
-        in {
-            "osint_enabled",
-            "llm_enabled",
-            "do_pyshark",
-            "do_zeek",
-            "do_carve",
-            "do_yara",
-            "pre_count",
-            "pyshark_packet_limit",
-            "osint_top_n",
-            "_max_wall_seconds",
-        }
-    }
+    selected = selected_options(options)
     rule_hashes = []
     if options.get("do_yara", True):
         from app import config as C

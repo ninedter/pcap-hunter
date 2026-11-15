@@ -186,7 +186,7 @@ def test_worker_runs_osint_when_enabled(tmp_path, monkeypatch):
     """osint_enabled=True with keys configured must enrich and persist osint."""
     captured = {}
 
-    def fake_enrich(arts, keys, phase=None):
+    def fake_enrich(arts, keys, phase=None, **kwargs):
         captured["arts"] = arts
         captured["keys"] = keys
         return {"ips": {"8.8.8.8": {"vt": {}}}, "domains": {}, "ja3": {}}

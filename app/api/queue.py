@@ -2,13 +2,21 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
+import socket
+import threading
+import uuid
 from abc import ABC, abstractmethod
+from collections.abc import Callable
 from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures.process import BrokenProcessPool
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta
 from typing import TYPE_CHECKING, Any
+from urllib.parse import urlparse
 
 import pandas as pd
 
@@ -16,7 +24,7 @@ from app import config as C
 from app.database.models import Job, JobStatus
 from app.database.repository import CaseRepository
 from app.pipeline.osint import enrich as osint_enrich
-from app.utils.network_utils import bulk_resolve_ips, is_public_ipv4, pick_top_public_ips
+from app.utils.network_utils import bulk_resolve_ips, is_public_ip, pick_top_public_ips
 
 if TYPE_CHECKING:
     from app.pipeline.runner import PipelineResult
@@ -31,6 +39,109 @@ WARNING_OSINT_FAILED = "osint_failed"
 WARNING_YARA_FAILED = "yara_failed"
 WARNING_LLM_NOT_CONFIGURED = "llm_not_configured"
 WARNING_LLM_FAILED = "llm_failed"
+# An environment-supplied provider key was not sent because the configured base URL
+# points at a different origin than the one that key was provisioned for.
+WARNING_LLM_ENV_KEY_WITHHELD = "llm_env_key_withheld_base_url_changed"
+
+OPENAI_DEFAULT_BASE_URL = "https://api.openai.com/v1"
+# LM Studio ignores the key; this non-secret placeholder keeps keyless local use working.
+LMSTUDIO_PLACEHOLDER_KEY = "lm-studio"
+
+# Wire-format job error codes written by restart recovery.
+ERROR_INTERRUPTED_RESTART = "interrupted_restart"
+ERROR_INPUT_MISSING = "input_missing_after_restart"
+
+# A worker refreshes its job's heartbeat on a timer for the whole run, so a
+# heartbeat older than STALE_JOB_SECONDS means the worker process is gone, not
+# that a long stage (OSINT, LLM) is still in progress.
+HEARTBEAT_INTERVAL_SECONDS = 15.0
+STALE_JOB_SECONDS = 120
+JOB_SWEEP_INTERVAL_SECONDS = 60.0
+# Periodic sweep only: (database, job id) -> heartbeat value seen on the previous sweep
+# that found the job stale. Heartbeats are wall-clock, so right after a host suspend or
+# a clock jump every healthy job looks stale until its worker ticks again; the job is
+# failed only when two consecutive sweeps see it stale with an unchanged heartbeat.
+_stale_observed: dict[tuple[str, str], str | None] = {}
+
+# One id per server process lifetime. Worker children re-import this module
+# under spawn/forkserver, so the dispatching parent always passes its own token
+# to the worker explicitly instead of the worker deriving one.
+_BOOT_ID = uuid.uuid4().hex[:12]
+_process_role = os.environ.get("PCAP_HUNTER_PROCESS_ROLE", "").strip() or "local"
+
+
+@dataclass(frozen=True)
+class JobOwner:
+    """Parsed ``role@host:pid:boot`` identity of the process holding a job."""
+
+    role: str
+    host: str
+    pid: int
+    boot_id: str
+
+    @property
+    def service(self) -> str:
+        """Stable identity across restarts of the same service on the same host."""
+        return f"{self.role}@{self.host}"
+
+
+def set_process_role(role: str) -> None:
+    """Name this server process ("web", "api", ...) for job ownership.
+
+    The UI and API containers share a database *and* a pinned hostname, so the
+    hostname alone cannot tell a restarted self from the other live service.
+    """
+    global _process_role
+    cleaned = "".join(ch for ch in str(role) if ch.isalnum() or ch in "-_")
+    _process_role = cleaned or "local"
+
+
+def process_owner_token() -> str:
+    """Owner token for jobs dispatched by this server process."""
+    host = socket.gethostname().replace(":", "_").replace("@", "_") or "unknown"
+    return f"{_process_role}@{host}:{os.getpid()}:{_BOOT_ID}"
+
+
+def parse_owner_token(token: str | None) -> JobOwner | None:
+    """Parse a stored owner token; ``None`` for legacy rows and malformed values."""
+    if not token or not isinstance(token, str):
+        return None
+    try:
+        service, pid, boot_id = token.rsplit(":", 2)
+        role, host = service.split("@", 1)
+        return JobOwner(role=role, host=host, pid=int(pid), boot_id=boot_id)
+    except ValueError:
+        return None
+
+
+def _pid_alive(pid: int) -> bool:
+    """Best-effort liveness probe; unknown answers count as alive (the safe side)."""
+    if pid <= 0 or os.name == "nt":
+        return True
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except OSError:
+        return True
+    return True
+
+
+def _is_previous_boot_of(owner: JobOwner, me: JobOwner) -> bool:
+    """True when ``owner`` is an earlier, now dead, incarnation of this service."""
+    if owner.service != me.service or (owner.pid == me.pid and owner.boot_id == me.boot_id):
+        return False
+    # Same pid with a different boot id is pid reuse (routine inside a
+    # container); otherwise the old process must really be gone.
+    return owner.pid == me.pid or not _pid_alive(owner.pid)
+
+
+def _job_options(job: Job) -> dict[str, Any]:
+    try:
+        options = json.loads(job.options_json or "{}")
+    except (TypeError, ValueError):
+        return {}
+    return options if isinstance(options, dict) else {}
 
 
 def _load_osint_keys() -> dict[str, str]:
@@ -176,9 +287,9 @@ def _run_osint_stage(result: PipelineResult, opts: dict, job_id: str, repo: Case
                 arts["ips"] = (
                     pick_top_public_ips(feats, top_n)
                     if top_n > 0
-                    else [ip for ip in arts.get("ips", []) if is_public_ipv4(ip)]
+                    else [ip for ip in arts.get("ips", []) if is_public_ip(ip)]
                 )
-                osint_data = osint_enrich(arts, keys)
+                osint_data = osint_enrich(arts, keys, dns_analysis=result.dns_analysis or None)
                 osint_data = osint_data if isinstance(osint_data, dict) else {"ips": {}, "domains": {}, "ja3": {}}
                 result.stages_run.append("osint")
             except Exception:
@@ -191,7 +302,7 @@ def _run_osint_stage(result: PipelineResult, opts: dict, job_id: str, repo: Case
     # retain results for IPs that no provider happened to return.
     try:
         feats = result.features if isinstance(result.features, dict) else {}
-        all_public = [ip for ip in feats.get("artifacts", {}).get("ips", []) if is_public_ipv4(ip)]
+        all_public = [ip for ip in feats.get("artifacts", {}).get("ips", []) if is_public_ip(ip)]
         ip_records = osint_data.setdefault("ips", {})
         for ip, hostname in bulk_resolve_ips(all_public, max_workers=C.RDNS_MAX_WORKERS).items():
             hostname = str(hostname).strip().rstrip(".")
@@ -205,6 +316,85 @@ def _run_osint_stage(result: PipelineResult, opts: dict, job_id: str, repo: Case
     except Exception:
         logger.exception("Job %s: reverse DNS enrichment failed", job_id)
     return osint_data
+
+
+def url_origin(value: str) -> tuple[str, str, int | None] | None:
+    """(scheme, host, port) a credential is bound to; None if unparseable."""
+    try:
+        parsed = urlparse(str(value or "").strip())
+        port = parsed.port
+    except ValueError:
+        return None
+    if not parsed.scheme or not parsed.hostname:
+        return None
+    scheme = parsed.scheme.lower()
+    if port is None:
+        port = {"http": 80, "https": 443}.get(scheme)
+    return scheme, parsed.hostname.lower(), port
+
+
+def default_llm_base_url(provider: str) -> str:
+    """The base URL the deployment itself configured for ``provider`` (environment, else built-in).
+
+    Anthropic has no configurable base URL in this application and returns "".
+    """
+    if provider == "openai":
+        return os.getenv("OPENAI_BASE_URL") or OPENAI_DEFAULT_BASE_URL
+    if provider == "anthropic":
+        return ""
+    return os.getenv("LMSTUDIO_BASE_URL") or C.LM_BASE_URL
+
+
+def _environment_llm_secret(provider: str) -> str:
+    if provider == "openai":
+        return os.getenv("OPENAI_API_KEY", "").strip()
+    if provider == "anthropic":
+        return os.getenv("ANTHROPIC_API_KEY", "").strip()
+    value = (os.getenv("LMSTUDIO_API_KEY") or C.LM_API_KEY or "").strip()
+    return "" if value == LMSTUDIO_PLACEHOLDER_KEY else value
+
+
+def resolve_llm_api_key(provider: str, base_url: str, stored_key: str | None) -> tuple[str, str | None]:
+    """Pick the credential that may be sent to ``base_url``; shared by the worker and model discovery.
+
+    A stored key was saved for its destination (the settings route clears it when the
+    base URL moves to another origin) and is used as is. An environment-supplied key
+    was provisioned for the deployment's own endpoint, so it is used only when the
+    effective base URL has the same origin as the environment-configured (or built-in
+    default) base URL of that provider. Otherwise no secret is sent. Anthropic has no
+    user-configurable base URL, so its environment key is always eligible. LM Studio
+    falls back to its non-secret placeholder so keyless local servers keep working.
+
+    Args:
+        provider: ``"lmstudio"``, ``"openai"`` or ``"anthropic"``.
+        base_url: Base URL about to be called; blank means the provider default.
+        stored_key: Key saved in the settings store for this provider, if any.
+
+    Returns:
+        ``(api_key, warning_code)``; the code is ``WARNING_LLM_ENV_KEY_WITHHELD``
+        when an environment key existed but was withheld, else ``None``.
+    """
+    stored = str(stored_key or "").strip()
+    fallback = LMSTUDIO_PLACEHOLDER_KEY if provider == "lmstudio" else ""
+    if stored:
+        return stored, None
+    secret = _environment_llm_secret(provider)
+    if not secret:
+        return fallback, None
+    if provider == "anthropic":
+        return secret, None
+    default_url = default_llm_base_url(provider)
+    target = url_origin(str(base_url or "").strip() or default_url)
+    if target is not None and target == url_origin(default_url):
+        return secret, None
+    return fallback, WARNING_LLM_ENV_KEY_WITHHELD
+
+
+def _withheld_env_key_warning(provider: str, base_url: str, api_key: str) -> str | None:
+    """Warning code when the key in use is not the environment key because it was withheld."""
+    if api_key and api_key != LMSTUDIO_PLACEHOLDER_KEY:
+        return None
+    return resolve_llm_api_key(provider, base_url, None)[1]
 
 
 def _load_llm_settings() -> tuple[str, str, str, str, str, int, bool]:
@@ -225,16 +415,22 @@ def _load_llm_settings() -> tuple[str, str, str, str, str, int, bool]:
 
     if provider == llm_providers.PROVIDER_OPENAI:
         base_url = saved.get("cfg_openai_base_url") or os.getenv("OPENAI_BASE_URL", "")
-        api_key = saved.get("cfg_openai_cloud_key") or os.getenv("OPENAI_API_KEY", "")
+        api_key, withheld = resolve_llm_api_key(provider, base_url, saved.get("cfg_openai_cloud_key"))
         model = saved.get("cfg_openai_model") or os.getenv("OPENAI_MODEL", C.OPENAI_MODEL_DEFAULT)
     elif provider == llm_providers.PROVIDER_ANTHROPIC:
         base_url = ""
-        api_key = saved.get("cfg_anthropic_key") or os.getenv("ANTHROPIC_API_KEY", "")
+        api_key, withheld = resolve_llm_api_key(provider, base_url, saved.get("cfg_anthropic_key"))
         model = saved.get("cfg_anthropic_model") or os.getenv("ANTHROPIC_MODEL", C.ANTHROPIC_MODEL_DEFAULT)
     else:
-        base_url = saved.get("cfg_llm_endpoint") or os.getenv("LMSTUDIO_BASE_URL", C.LM_BASE_URL)
-        api_key = saved.get("cfg_openai_key") or os.getenv("LMSTUDIO_API_KEY", C.LM_API_KEY)
+        base_url = saved.get("cfg_llm_endpoint") or default_llm_base_url(provider)
+        api_key, withheld = resolve_llm_api_key(provider, base_url, saved.get("cfg_openai_key"))
         model = saved.get("cfg_llm_model") or os.getenv("LMSTUDIO_MODEL", C.LM_MODEL)
+    if withheld:
+        logger.warning(
+            "The %s environment API key was not used: the configured base URL is not the origin it was "
+            "provisioned for. Save a key for that URL in settings.",
+            provider,
+        )
 
     language = saved.get("cfg_llm_language") or os.getenv("LMSTUDIO_LANGUAGE", C.LM_LANGUAGE)
     from app.llm.context_window import normalize_context_window
@@ -269,6 +465,10 @@ def _run_llm_stage(
 
     _update_manual_stage(repo, job_id, "LLM report", message="Generating the saved threat narrative")
     provider, base_url, api_key, model, language, context_window, unlimited_context = _load_llm_settings()
+    withheld = _withheld_env_key_warning(provider, base_url, api_key)
+    if withheld and withheld not in result.warnings:
+        logger.warning("Job %s: %s", job_id, withheld)
+        result.warnings.append(withheld)
     if provider in (llm_providers.PROVIDER_OPENAI, llm_providers.PROVIDER_ANTHROPIC) and not api_key:
         result.warnings.append(WARNING_LLM_NOT_CONFIGURED)
         _update_manual_stage(repo, job_id, "LLM report", completed=True)
@@ -520,11 +720,60 @@ def _run_llm_report_job(job: Job, options_dict: dict, repo: CaseRepository) -> N
     artifacts["pipeline_warnings"] = list(result.warnings)
     analysis.session_artifacts = artifacts
     repo.save_analysis(analysis)
-    repo.complete_job(job.id, json.dumps(result.to_dict()).encode("utf-8"))
+    if not repo.complete_job(job.id, json.dumps(result.to_dict()).encode("utf-8")):
+        logger.warning("Report job %s finished after it was already closed; keeping the earlier outcome", job.id)
 
 
-def _worker_run(job_id: str, db_path: str, pcap_path: str, options_dict: dict) -> None:
-    """Top-level worker function (must be picklable for ProcessPoolExecutor)."""
+class _JobHeartbeat:
+    """Refresh a job's heartbeat from a timer thread for the whole run.
+
+    Pipeline stages only touch the heartbeat between steps; OSINT lookups and
+    LLM synthesis can legitimately run for many minutes without one. A timer
+    keeps a live job fresh regardless of what stage it is in, which is what
+    lets recovery treat a stale heartbeat as a dead worker.
+    """
+
+    def __init__(self, repo: CaseRepository, job_id: str, interval: float | None = None) -> None:
+        self._repo = repo
+        self._job_id = job_id
+        self._interval = HEARTBEAT_INTERVAL_SECONDS if interval is None else interval
+        self._stop = threading.Event()
+        self._thread = threading.Thread(target=self._run, name=f"job-heartbeat-{job_id}", daemon=True)
+
+    def _run(self) -> None:
+        while not self._stop.wait(self._interval):
+            try:
+                if not self._repo.touch_job_heartbeat(self._job_id):
+                    return  # job is terminal or gone; nothing left to keep alive
+            except Exception:
+                logger.warning("Job %s: heartbeat write failed", self._job_id, exc_info=True)
+
+    def __enter__(self) -> _JobHeartbeat:
+        self._thread.start()
+        return self
+
+    def __exit__(self, *exc_info: object) -> None:
+        self._stop.set()
+        self._thread.join(timeout=5)
+
+
+def _worker_run(
+    job_id: str,
+    db_path: str,
+    pcap_path: str,
+    options_dict: dict,
+    owner_token: str | None = None,
+) -> None:
+    """Top-level worker function (must be picklable for ProcessPoolExecutor).
+
+    Args:
+        job_id: Persisted job to run.
+        db_path: SQLite database path (a fresh repository is opened here).
+        pcap_path: Capture to analyse.
+        options_dict: Raw job options.
+        owner_token: Identity of the dispatching server process, recorded on
+            the job so restart recovery knows whose job this is.
+    """
     from app.utils.logger import get_logger
 
     get_logger("app")  # spawn-platform children inherit no handlers
@@ -548,7 +797,7 @@ def _worker_run(job_id: str, db_path: str, pcap_path: str, options_dict: dict) -
     # CAS flip closes the residual race: a cancel/delete can still land
     # between the guard above and this write. Losing the UPDATE means the
     # job is no longer queued — skip instead of resurrecting it.
-    if not repo.start_job_if_queued(job_id):
+    if not repo.start_job_if_queued(job_id, owner_token=owner_token):
         logger.info("Job %s no longer queued at start; skipping", job_id)
         return
 
@@ -563,38 +812,40 @@ def _worker_run(job_id: str, db_path: str, pcap_path: str, options_dict: dict) -
     progress = CallbackProgress(callback=_on_event, total_phases=10)
     options = PipelineOptions(**{k: v for k, v in options_dict.items() if k in PipelineOptions.__dataclass_fields__})
 
-    try:
-        if options_dict.get("_job_type") == "llm_report":
-            _run_llm_report_job(job, options_dict, repo)
-            return
+    # Terminal writes below are compare-and-set: if recovery (or a cancel)
+    # already closed this job, the late outcome is dropped instead of
+    # overwriting it.
+    with _JobHeartbeat(repo, job_id):
+        try:
+            if options_dict.get("_job_type") == "llm_report":
+                _run_llm_report_job(job, options_dict, repo)
+                return
 
-        result = run_pipeline(
-            pcap_path=pcap_path,
-            case_id=job.case_id,
-            options=options,
-            progress=progress,
-            heartbeat=lambda: repo.touch_job_heartbeat(job_id),
-        )
+            result = run_pipeline(
+                pcap_path=pcap_path,
+                case_id=job.case_id,
+                options=options,
+                progress=progress,
+                heartbeat=lambda: repo.touch_job_heartbeat(job_id),
+            )
 
-        opts = options_dict  # raw dict: includes keys PipelineOptions doesn't model (e.g. do_yara)
-        yara_results = _run_yara_stage(result, opts, job_id, repo)
-        osint_data = _run_osint_stage(result, opts, job_id, repo)
-        _run_llm_stage(result, opts, job_id, repo, osint_data, yara_results)
+            opts = options_dict  # raw dict: includes keys PipelineOptions doesn't model (e.g. do_yara)
+            yara_results = _run_yara_stage(result, opts, job_id, repo)
+            osint_data = _run_osint_stage(result, opts, job_id, repo)
+            _run_llm_stage(result, opts, job_id, repo, osint_data, yara_results)
 
-        _persist_analysis(result, job, pcap_path, osint_data, yara_results, repo)
-        if result.analysis_id is None:
-            raise EvidencePersistenceError("Evidence persistence did not complete; the job cannot be marked done.")
+            _persist_analysis(result, job, pcap_path, osint_data, yara_results, repo)
+            if result.analysis_id is None:
+                raise EvidencePersistenceError("Evidence persistence did not complete; the job cannot be marked done.")
 
-        result_blob = json.dumps(result.to_dict()).encode("utf-8")
-        repo.complete_job(job_id, result_blob)
-    except Exception as exc:
-        logger.exception("Job %s failed: %s", job_id, exc)
-        repo.update_job_status(
-            job_id,
-            JS.FAILED,
-            error_code="evidence_persistence_failed" if isinstance(exc, EvidencePersistenceError) else "pipeline_error",
-            error_detail=str(exc)[:500],
-        )
+            result_blob = json.dumps(result.to_dict()).encode("utf-8")
+            if not repo.complete_job(job_id, result_blob):
+                logger.warning("Job %s finished after it was already closed; keeping the earlier outcome", job_id)
+        except Exception as exc:
+            logger.exception("Job %s failed: %s", job_id, exc)
+            code = "evidence_persistence_failed" if isinstance(exc, EvidencePersistenceError) else "pipeline_error"
+            if not repo.fail_job_if_active(job_id, code, str(exc)[:500]):
+                logger.warning("Job %s failed after it was already closed; keeping the earlier outcome", job_id)
 
 
 class InProcessJobQueue(JobQueue):
@@ -603,7 +854,10 @@ class InProcessJobQueue(JobQueue):
     def __init__(self, repo: CaseRepository, max_workers: int = 2, queue_depth: int = 100) -> None:
         self._repo = repo
         self._queue_depth = queue_depth
+        self._max_workers = max_workers
         self._executor = ProcessPoolExecutor(max_workers=max_workers)
+        self._executor_lock = threading.Lock()
+        self._redispatching = False
 
     def enqueue(self, submission: JobSubmission) -> str:
         active = self._repo.count_active_jobs()
@@ -614,6 +868,7 @@ class InProcessJobQueue(JobQueue):
             case_id=submission.case_id,
             pcap_path=submission.pcap_path,
             options_json=json.dumps(submission.options),
+            owner_token=process_owner_token(),
         )
         job_id = self._repo.create_job(job)
 
@@ -624,33 +879,277 @@ class InProcessJobQueue(JobQueue):
         """Schedule an already persisted job; atomic worker claim prevents duplicates."""
         job = self._repo.get_job(job_id)
         if job is not None and job.status.value == "queued":
-            if json.loads(job.options_json or "{}").get("_agent_id"):
+            options = _job_options(job)
+            if options.get("_agent_id"):
                 from app.agents.spool import dispatch
 
                 dispatch(job)
                 return
-            self._executor.submit(
-                _worker_run, job_id, str(self._repo._db_path), job.pcap_path, json.loads(job.options_json or "{}")
+            args = (_worker_run, job_id, str(self._repo._db_path), job.pcap_path, options, process_owner_token())
+            if self._submit(args, job_id):
+                self._redispatch_after_rebuild(job_id)
+
+    def _submit(self, args: tuple, job_id: str) -> bool:
+        """Submit to the worker pool, rebuilding it once if it is broken.
+
+        The rebuild and the submission happen under one lock, so a second thread
+        can never submit to an executor the first one just shut down.
+
+        Returns:
+            True when the pool had to be rebuilt for this submission.
+        """
+        with self._executor_lock:
+            try:
+                self._executor.submit(*args)
+                return False
+            except BrokenProcessPool:
+                # A worker that was killed (e.g. out of memory) poisons the whole
+                # pool; without a rebuild every later submission would fail.
+                logger.warning("Worker pool was broken; rebuilding it before dispatching job %s", job_id)
+                self._executor.shutdown(wait=False)
+                self._executor = ProcessPoolExecutor(max_workers=self._max_workers)
+                self._executor.submit(*args)
+                return True
+
+    def _redispatch_after_rebuild(self, job_id: str) -> None:
+        """Hand this process's still-queued jobs to the rebuilt pool.
+
+        Jobs that were waiting inside the dead pool were dropped with it and
+        would otherwise stay ``queued`` until the next restart. A job that is
+        submitted twice is harmless: the worker's start is a compare-and-set.
+        """
+        with self._executor_lock:
+            if self._redispatching:
+                return  # A nested rebuild is already covered by the pass in progress.
+            self._redispatching = True
+        try:
+            redispatched, failed = redispatch_orphaned_queued_jobs(
+                self._repo,
+                lambda: self,
+                owner_token=process_owner_token(),
+                current_owner_only=True,
+                skip_job_ids=frozenset({job_id}),
             )
+            if redispatched or failed:
+                logger.warning(
+                    "Worker pool rebuild: re-dispatched %d queued job(s), failed %d without input", redispatched, failed
+                )
+        except Exception:
+            logger.exception("Could not re-dispatch queued jobs after the worker pool was rebuilt")
+        finally:
+            with self._executor_lock:
+                self._redispatching = False
 
     def shutdown(self, wait: bool = True) -> None:
         self._executor.shutdown(wait=wait)
 
 
-def recover_stale_running_jobs(repo: CaseRepository, stale_after_seconds: int = 120) -> int:
-    """Mark any RUNNING jobs with stale heartbeats as FAILED. Call at API startup."""
-    stale = repo.find_stale_running_jobs(stale_after_seconds=stale_after_seconds)
-    for job in stale:
-        if json.loads(job.options_json or "{}").get("_agent_id"):
+def recover_stale_running_jobs(
+    repo: CaseRepository,
+    stale_after_seconds: int = STALE_JOB_SECONDS,
+    *,
+    owner_token: str | None = None,
+    confirm_stale: bool = False,
+) -> int:
+    """Fail RUNNING jobs whose worker is provably gone. Safe to call at boot and periodically.
+
+    A job is failed with ``interrupted_restart`` when either:
+
+    * it is owned by an earlier incarnation of this same service (same role
+      and host, a different boot) — its worker pool died with that process; or
+    * its heartbeat is older than ``stale_after_seconds``. Workers refresh the
+      heartbeat on a timer, so this means the worker process itself is gone.
+
+    Jobs held by another live service (the UI and API share one database) keep
+    a fresh heartbeat and are left alone. Agent jobs are owned by the offline
+    launcher and are never touched here.
+
+    Args:
+        repo: Shared case repository.
+        stale_after_seconds: Heartbeat age that counts as dead.
+        owner_token: This process's token; enables the previous-boot rule.
+        confirm_stale: Used by the periodic sweep. A stale heartbeat only fails the
+            job when the previous sweep also saw it stale with the same heartbeat
+            value, so a host suspend or clock jump cannot fail a healthy job whose
+            worker has simply not ticked yet. The previous-boot rule stays immediate.
+
+    Returns:
+        Number of jobs moved to FAILED by this call.
+    """
+    me = parse_owner_token(owner_token)
+    cutoff = datetime.now() - timedelta(seconds=stale_after_seconds)
+    stale_ids = {job.id for job in repo.find_stale_running_jobs(stale_after_seconds=stale_after_seconds)}
+    database = str(repo._db_path)
+    previously = {key: value for key, value in _stale_observed.items() if key[0] == database}
+    if confirm_stale:
+        # Only consecutive observations count: forget everything from this database
+        # and re-record below what is still stale on this sweep.
+        for key in previously:
+            _stale_observed.pop(key, None)
+    recovered = 0
+    for job in repo.list_jobs(statuses=[JobStatus.RUNNING], limit=1000):
+        if _job_options(job).get("_agent_id"):
             continue  # Its offline worker and persisted spool survive API restarts.
-        repo.update_job_status(
-            job.id,
-            JobStatus.FAILED,
-            error_code="interrupted_restart",
-            error_detail="API restarted with this job in flight; resubmit the PCAP to retry.",
-        )
-        logger.warning("Recovered stale running job %s -> failed", job.id)
-    return len(stale)
+        owner = parse_owner_token(job.owner_token)
+        detail = "The service restarted with this job in flight; resubmit the PCAP to retry."
+        if me is not None and owner is not None and _is_previous_boot_of(owner, me):
+            failed = repo.fail_job_if_active(
+                job.id,
+                ERROR_INTERRUPTED_RESTART,
+                detail,
+                from_status=JobStatus.RUNNING,
+                owner_token=job.owner_token,
+            )
+        elif job.id in stale_ids:
+            if confirm_stale:
+                observed = (database, job.id)
+                heartbeat = job.heartbeat_at.isoformat() if job.heartbeat_at else None
+                if observed not in previously or previously[observed] != heartbeat:
+                    _stale_observed[observed] = heartbeat
+                    continue  # first sighting, or the worker ticked in between
+            failed = repo.fail_job_if_active(
+                job.id, ERROR_INTERRUPTED_RESTART, detail, from_status=JobStatus.RUNNING, stale_before=cutoff
+            )
+        else:
+            continue
+        if failed:
+            recovered += 1
+            logger.warning("Recovered interrupted running job %s -> failed", job.id)
+    return recovered
+
+
+def _job_input_available(repo: CaseRepository, job: Job, options: dict[str, Any]) -> bool:
+    """Whether a queued job still has what it needs to run."""
+    if options.get("_job_type") == "llm_report":
+        analysis_id = options.get("_analysis_id")
+        return bool(analysis_id) and repo.analysis_exists(str(analysis_id))
+    try:
+        return bool(job.pcap_path) and os.path.isfile(job.pcap_path)
+    except OSError:
+        return False
+
+
+def redispatch_orphaned_queued_jobs(
+    repo: CaseRepository,
+    get_queue: Callable[[], JobQueue],
+    *,
+    owner_token: str | None = None,
+    current_owner_only: bool = False,
+    skip_job_ids: frozenset[str] = frozenset(),
+) -> tuple[int, int]:
+    """Re-dispatch QUEUED jobs that lost their dispatcher in a restart. Call at boot.
+
+    The in-process worker pool is not durable: jobs still waiting in it when
+    the process died stay ``queued`` in the database with nothing left to run
+    them. This adopts the rows that belonged to an earlier incarnation of this
+    service (and legacy rows with no recorded owner), re-dispatches those whose
+    input still exists, and fails the rest with ``input_missing_after_restart``.
+
+    Rows queued by another service, by a live sibling process, or by the agent
+    launcher are left alone. Adoption is a compare-and-set on the owner column
+    and the worker's start is a compare-and-set on the status, so two processes
+    booting together cannot run the same job twice.
+
+    Args:
+        repo: Shared case repository.
+        get_queue: Lazy queue accessor; only called when something needs dispatch.
+        owner_token: This process's token (defaults to ``process_owner_token()``).
+        current_owner_only: Instead of adopting earlier incarnations' rows, re-dispatch
+            only the rows this very process queued. Used after a worker-pool rebuild,
+            when the jobs waiting in the dead pool were dropped with it.
+        skip_job_ids: Jobs the caller has already dispatched itself.
+
+    Returns:
+        ``(redispatched, failed_missing_input)`` counts.
+    """
+    token = owner_token or process_owner_token()
+    me = parse_owner_token(token)
+    redispatched = failed = 0
+    # Oldest first so recovered work keeps its submission order.
+    for job in reversed(repo.list_jobs(statuses=[JobStatus.QUEUED], limit=1000)):
+        options = _job_options(job)
+        if options.get("_agent_id") or job.id in skip_job_ids:
+            continue
+        owner = parse_owner_token(job.owner_token)
+        if current_owner_only:
+            if job.owner_token != token:
+                continue  # only this process's pool was rebuilt
+        elif job.owner_token and (owner is None or me is None or not _is_previous_boot_of(owner, me)):
+            continue  # this boot's own work, another service's, or a live sibling's
+        if not _job_input_available(repo, job, options):
+            if repo.fail_job_if_active(
+                job.id,
+                ERROR_INPUT_MISSING,
+                "The service restarted before this job started and its input is no longer available; "
+                "resubmit the PCAP to retry.",
+                from_status=JobStatus.QUEUED,
+            ):
+                failed += 1
+                logger.warning("Queued job %s lost its input across a restart -> failed", job.id)
+            continue
+        if not current_owner_only and not repo.claim_queued_job(job.id, token, expected_owner=job.owner_token):
+            continue  # another booting process adopted it first
+        try:
+            get_queue().dispatch(job.id)
+        except Exception:
+            logger.exception("Could not re-dispatch queued job %s after restart", job.id)
+            continue
+        redispatched += 1
+        logger.info("Re-dispatched queued job %s after restart", job.id)
+    return redispatched, failed
+
+
+def recover_jobs_at_boot(
+    repo: CaseRepository,
+    get_queue: Callable[[], JobQueue],
+    *,
+    role: str,
+    stale_after_seconds: int = STALE_JOB_SECONDS,
+) -> dict[str, int]:
+    """Boot-time job recovery for a server process.
+
+    Args:
+        repo: Shared case repository.
+        get_queue: Lazy queue accessor (the pool is only created if needed).
+        role: Service name for job ownership, e.g. ``"web"`` or ``"api"``.
+        stale_after_seconds: Heartbeat age that counts as dead.
+
+    Returns:
+        Counters: ``failed_running``, ``redispatched``, ``failed_missing_input``.
+    """
+    set_process_role(role)
+    token = process_owner_token()
+    failed_running = recover_stale_running_jobs(repo, stale_after_seconds, owner_token=token)
+    redispatched, failed_inputs = redispatch_orphaned_queued_jobs(repo, get_queue, owner_token=token)
+    stats = {"failed_running": failed_running, "redispatched": redispatched, "failed_missing_input": failed_inputs}
+    if any(stats.values()):
+        logger.warning("Job recovery at startup: %s", stats)
+    return stats
+
+
+async def job_sweep_loop(
+    repo: CaseRepository,
+    *,
+    interval_seconds: float = JOB_SWEEP_INTERVAL_SECONDS,
+    stale_after_seconds: int = STALE_JOB_SECONDS,
+) -> None:
+    """Periodically fail RUNNING jobs whose worker died while the service stayed up.
+
+    The boot sweep alone misses a job interrupted moments before a fast
+    restart (its heartbeat still looks fresh) and any worker killed mid-run.
+    """
+    while True:
+        await asyncio.sleep(interval_seconds)
+        try:
+            await asyncio.to_thread(
+                recover_stale_running_jobs,
+                repo,
+                stale_after_seconds,
+                owner_token=process_owner_token(),
+                confirm_stale=True,
+            )
+        except Exception:
+            logger.exception("Periodic job sweep failed")
 
 
 def cancel_queued_job(repo: CaseRepository, job_id: str) -> bool:

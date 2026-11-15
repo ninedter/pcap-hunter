@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import sys
 from datetime import datetime, timezone
 
 
@@ -112,14 +113,69 @@ def get_logger(name: str) -> logging.Logger:
     return logger
 
 
+def streamlit_session_state():
+    """Return ``st.session_state`` when Streamlit is already loaded, else ``None``.
+
+    Engine code (pipeline stages, binary discovery, OSINT) runs both inside the
+    Streamlit UI and inside headless API / agent workers. This helper never
+    imports Streamlit itself: if the hosting process has not imported it, there is
+    no session to consult, and importing it here would drag the whole package into
+    headless workers (or raise where it is not installed).
+
+    Returns:
+        The session-state mapping, or ``None`` when Streamlit is not loaded or
+        unusable.
+    """
+    st = sys.modules.get("streamlit")
+    if st is None:
+        return None
+    try:
+        return st.session_state
+    except Exception:
+        return None
+
+
+def streamlit_script_context_active() -> bool:
+    """Report whether the calling thread runs inside a live Streamlit script run.
+
+    ``st.session_state`` silently degrades to an empty process-global dict when
+    there is no ScriptRunContext (bare mode, API workers, pool threads), so a
+    ``.get()`` there returns the default rather than the user's setting. Callers
+    that must distinguish "setting is off" from "no session here" use this.
+
+    Returns:
+        True only when Streamlit is loaded and the current thread has a script context.
+    """
+    if sys.modules.get("streamlit") is None:
+        return False
+    try:
+        from streamlit.runtime.scriptrunner import get_script_run_ctx
+
+        return get_script_run_ctx(suppress_warning=True) is not None
+    except Exception:
+        return False
+
+
 def log_runtime_error(msg: str):
-    """Log a runtime error to the session state."""
-    # Lazy import: this module is also used by the headless API process, which
-    # must not drag streamlit in just to get get_logger().
-    import streamlit as st
+    """Record a runtime error in the log and, when a UI session exists, its session state.
 
-    if "runtime_logs" not in st.session_state:
-        st.session_state["runtime_logs"] = []
+    Always emits through ``logging`` so headless runs (API / agent workers) keep the
+    message. The Streamlit ``runtime_logs`` list is appended to only when Streamlit
+    is already loaded in this process — this function never imports it, and never
+    raises: it is called from error paths inside pipeline stages.
 
-    timestamp = datetime.now().strftime("%H:%M:%S")
-    st.session_state["runtime_logs"].append(f"[{timestamp}] {msg}")
+    Args:
+        msg: Human-readable error text.
+    """
+    logging.getLogger("app.runtime").error("%s", msg)
+
+    state = streamlit_session_state()
+    if state is None:
+        return
+    try:
+        if "runtime_logs" not in state:
+            state["runtime_logs"] = []
+        timestamp = datetime.now().strftime("%H:%M:%S")
+        state["runtime_logs"].append(f"[{timestamp}] {msg}")
+    except Exception:
+        pass  # session state unavailable from this thread — the log record above stands

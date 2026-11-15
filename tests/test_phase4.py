@@ -193,7 +193,9 @@ class TestATTACKMapper:
 
     def test_configured_c2_suspect_port_is_mapped_with_flow_evidence(self):
         mapping = ATTACKMapper().map_analysis(
-            features={"flows": [{"dst": "203.0.113.5", "dport": "31337", "count": 5, "bytes": 5000}]}
+            # 50 packets: sustained use. A handful of packets (was count=5) no longer
+            # supports a C2 hypothesis - see tests/test_attack_mapping_direction.py.
+            features={"flows": [{"dst": "203.0.113.5", "dport": "31337", "count": 50, "bytes": 5000}]}
         )
 
         port_match = next(tech for tech in mapping.techniques if tech.technique_id == "T1571")

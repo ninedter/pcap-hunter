@@ -48,19 +48,54 @@ SHODAN_KEY = os.getenv("SHODAN_KEY", "")
 ALLOWED_PCAP_DIRS = [DATA_DIR, pathlib.Path("pcaps").resolve(), pathlib.Path("/data").resolve()]
 
 # Analysis defaults
+# Packet-parse cap. PipelineOptions.pyshark_packet_limit=None resolves to this value;
+# 0 (or any value <= 0) is the explicit "no limit" request.
 DEFAULT_PYSHARK_LIMIT = 200000
 PRECNT_DEFAULT = True
+
+# Zeek log handling. Analyzers (DNS / TLS / domain merge) receive up to
+# ZEEK_ANALYSIS_MAX_ROWS rows per log; only the first ZEEK_DISPLAY_ROWS rows are kept
+# for display / persistence. Zeek logs are chronological, so any truncation drops the
+# END of the capture — it is always reported as a capture-metrics limitation.
+ZEEK_ANALYSIS_MAX_ROWS = 200_000  # 0 = no cap (memory grows with the log)
+ZEEK_DISPLAY_ROWS = 2000
+# Logs collected from the Zeek output dir when present. The first four are the
+# long-standing set; the rest are optional extras exposed under their own names.
+ZEEK_LOG_NAMES = (
+    "conn.log",
+    "dns.log",
+    "http.log",
+    "ssl.log",
+    "files.log",
+    "notice.log",
+    "weird.log",
+    "x509.log",
+)
 
 # OSINT Top-N default (0 = all public IPs)
 OSINT_TOP_IPS_DEFAULT = 50
 OSINT_CACHE_TTL_HOURS = 24  # OSINT response cache TTL
+# Domains queried per OSINT run (0 = all). Domains flagged by DNS analysis go first.
+OSINT_MAX_DOMAINS_DEFAULT = 100
+# Rate-limit / transient-failure handling, applied per provider.
+OSINT_MAX_RETRIES = 2  # extra attempts after a 429 / 5xx answer
+OSINT_BACKOFF_BASE_SECONDS = 1.0  # exponential: base * 2**attempt
+OSINT_RETRY_AFTER_MAX_SECONDS = 30.0  # longest Retry-After we will sleep for
+OSINT_BREAKER_THRESHOLD = 3  # consecutive throttled/5xx indicators before a provider is skipped
+# Total seconds one provider may make an enrichment run wait in retry backoff. A provider
+# that alternates successes with throttling never reaches the consecutive-failure
+# threshold; once this budget is used up it is skipped for the rest of the run.
+OSINT_PROVIDER_SLEEP_BUDGET_SECONDS = 120.0
+OSINT_SLEEP_SLICE_SECONDS = 0.5  # backoff sleeps are sliced so a skip request is noticed
 
 # Parallel pipeline
+# NOTE: informational only — see "Informational constants" at the bottom of this file.
 PARALLEL_PARSE_ENABLED = True  # Run PyShark + Zeek in parallel
 MAX_PARALLEL_WORKERS = 3  # Max worker threads for pipeline stages
 
 # Subprocess wall-clock timeouts (seconds). A malformed PCAP must never hang the pipeline.
 ZEEK_TIMEOUT_SECONDS = 600
+PYSHARK_TIMEOUT_SECONDS = 900  # tshark field pass; sized for a 200K-packet parse on slow disks
 PCAP_COUNT_TIMEOUT_SECONDS = 120
 CARVE_TIMEOUT_SECONDS = 300
 TLS_EXTRACT_TIMEOUT_SECONDS = 300
@@ -80,7 +115,9 @@ BATCH_MAX_FILE_SIZE_BYTES = 1024 * 1024 * 1024  # 1 GB per file
 BATCH_MAX_TOTAL_SIZE_BYTES = 5 * 1024 * 1024 * 1024  # 5 GB total
 
 # ---- Detection Thresholds ----
-# All detection thresholds centralized here for easy analyst tuning.
+# Intended as the single place for analyst tuning. NOTE: most of the constants in
+# this block are currently informational only (the detector modules hard-code their
+# own live values) — see "Informational constants" at the bottom of this file.
 
 # DNS Analysis
 DGA_ENTROPY_THRESHOLD = 4.0  # Shannon entropy above this → DGA suspect
@@ -127,3 +164,48 @@ FEATURE_YARA_ENABLED = True
 FEATURE_PDF_ENABLED = True
 FEATURE_OSINT_ENABLED = True
 FEATURE_ZEEK_ENABLED = True
+
+# ---- Informational constants (declared, but NOT read by any code path) ----
+# The names below document intended defaults, but nothing in ``app/`` reads them
+# today. The live values are hard-coded in the modules listed, so editing a constant
+# here does NOT change detector or pipeline behaviour. They are kept (not deleted)
+# because docs and external tooling reference them; wire them in the owning module
+# before relying on them.
+#
+#   DGA_ENTROPY_THRESHOLD, FAST_FLUX_IP_THRESHOLD,
+#   NXDOMAIN_RATIO_THRESHOLD, DNS_TUNNEL_SUBDOMAIN_LEN
+#       -> live values: app/pipeline/dns_analysis.py (it defines its own
+#          NXDOMAIN_RATIO_THRESHOLD and *_SCORE_THRESHOLD constants)
+#   BEACON_SCORE_THRESHOLD, BEACON_MIN_PACKETS, BEACON_TOP_N
+#       -> live values: app/pipeline/beacon.py; top_n is passed by app/pipeline/runner.py
+#   FLOW_ASYMMETRY_RATIO, FLOW_ASYMMETRY_MIN_BYTES
+#       -> live values: app/analysis/flow_analysis.py
+#   IOC_PRIORITY_CRITICAL, IOC_PRIORITY_HIGH, IOC_PRIORITY_MEDIUM
+#       -> live values: app/analysis/ioc_scorer.py
+#   FEATURE_YARA_ENABLED, FEATURE_PDF_ENABLED, FEATURE_OSINT_ENABLED, FEATURE_ZEEK_ENABLED
+#       -> stages are gated by PipelineOptions / UI toggles, not by these flags
+#   PARALLEL_PARSE_ENABLED, MAX_PARALLEL_WORKERS
+#       -> app/pipeline/runner.py always parallelises and sizes its own pools
+#
+# C2_SUSPECT_PORTS is the exception in the thresholds block: it IS read
+# (app/threat_intel/attack_mapping.py).
+INFORMATIONAL_ONLY_CONSTANTS = (
+    "DGA_ENTROPY_THRESHOLD",
+    "FAST_FLUX_IP_THRESHOLD",
+    "NXDOMAIN_RATIO_THRESHOLD",
+    "DNS_TUNNEL_SUBDOMAIN_LEN",
+    "BEACON_SCORE_THRESHOLD",
+    "BEACON_MIN_PACKETS",
+    "BEACON_TOP_N",
+    "FLOW_ASYMMETRY_RATIO",
+    "FLOW_ASYMMETRY_MIN_BYTES",
+    "IOC_PRIORITY_CRITICAL",
+    "IOC_PRIORITY_HIGH",
+    "IOC_PRIORITY_MEDIUM",
+    "FEATURE_YARA_ENABLED",
+    "FEATURE_PDF_ENABLED",
+    "FEATURE_OSINT_ENABLED",
+    "FEATURE_ZEEK_ENABLED",
+    "PARALLEL_PARSE_ENABLED",
+    "MAX_PARALLEL_WORKERS",
+)

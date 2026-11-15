@@ -7,8 +7,10 @@ Public surface (importable):
     run_pipeline()    — end-to-end execution
 
 Both the Streamlit UI (via StreamlitProgressAdapter) and the API worker
-(via CallbackProgress) drive this function. The function does NOT import
-streamlit and is safe to call from any process.
+(via CallbackProgress) drive this function. Neither this module nor the stages
+it imports load streamlit at import time (``app.pipeline.state`` resolves it
+lazily), so the runner is safe to call from any process — including ones where
+streamlit is not installed (guarded by tests/test_pipeline_headless_import.py).
 
 Caller responsibilities:
     * Create the Case row before calling (run_pipeline does not write to the DB).
@@ -23,6 +25,7 @@ failures (corrupt PCAP, disk full) raise ``RuntimeError``.
 from __future__ import annotations
 
 import logging
+import math
 import os
 import pathlib
 import re
@@ -44,7 +47,14 @@ from app.pipeline.pcap_count import count_packets_fast
 from app.pipeline.progress import Progress
 from app.pipeline.pyshark_pass import parse_pcap_pyshark
 from app.pipeline.tls_certs import analyze_certificates
-from app.pipeline.zeek import load_zeek_any, merge_zeek_dns, run_zeek
+from app.pipeline.zeek import (
+    ATTR_BAD_LINES,
+    ATTR_TOTAL_ROWS,
+    ATTR_TRUNCATED,
+    load_zeek_any,
+    merge_zeek_dns,
+    run_zeek,
+)
 from app.threat_intel.attack_mapping import ATTACKMapper
 from app.utils.string_utils import uniq_sorted
 
@@ -57,6 +67,11 @@ WARNING_PYSHARK_FAILED = "pyshark_failed"
 WARNING_PYSHARK_NO_DATA = "pyshark_no_data"
 WARNING_ZEEK_FAILED = "zeek_failed"
 WARNING_ZEEK_NO_LOGS = "zeek_no_logs"
+# Partial-coverage warnings: the stage ran, but did not see everything.
+WARNING_PYSHARK_LINES_SKIPPED = "pyshark_lines_skipped"  # malformed tshark lines dropped
+WARNING_PYSHARK_TIMEOUT = "pyshark_timeout"  # PYSHARK_TIMEOUT_SECONDS hit; flows are partial
+WARNING_ZEEK_ROWS_CAPPED = "zeek_rows_capped"  # a log exceeded ZEEK_ANALYSIS_MAX_ROWS
+WARNING_ZEEK_BAD_LINES = "zeek_bad_lines"  # malformed Zeek log lines skipped
 WARNING_DNS_ANALYSIS_FAILED = "dns_analysis_failed"
 WARNING_TLS_CERTS_FAILED = "tls_certs_failed"
 WARNING_BEACON_FAILED = "beacon_failed"
@@ -108,7 +123,9 @@ class PipelineOptions:
     do_carve: bool = True
     do_yara: bool = True
     pre_count: bool = True
-    pyshark_packet_limit: int | None = None  # None = use config default; int = hard cap on parsed packets
+    # None = use C.DEFAULT_PYSHARK_LIMIT; positive int = hard cap on parsed packets;
+    # 0 (or negative) = explicitly unlimited.
+    pyshark_packet_limit: int | None = None
     osint_top_n: int = 50
 
 
@@ -158,6 +175,62 @@ class PipelineResult:
         }
 
 
+def resolve_packet_limit(value: int | None) -> int:
+    """Resolve ``PipelineOptions.pyshark_packet_limit`` to the value the parser gets.
+
+    Args:
+        value: The option as supplied by the caller.
+
+    Returns:
+        ``C.DEFAULT_PYSHARK_LIMIT`` for ``None`` (or an unusable value), ``0`` —
+        meaning unlimited — for zero/negative values, otherwise the value itself.
+    """
+    if value is None or isinstance(value, bool):
+        return int(C.DEFAULT_PYSHARK_LIMIT)
+    try:
+        limit = int(value)
+    except (TypeError, ValueError):
+        return int(C.DEFAULT_PYSHARK_LIMIT)
+    return limit if limit > 0 else 0
+
+
+# Zeek logs whose full tables an analyzer reads: ``analyze_dns`` and ``merge_zeek_dns``
+# read dns.log, ``analyze_certificates`` reads ssl.log. Every other log is only stored
+# and displayed, so it is loaded at display size and never held in memory in full.
+ZEEK_ANALYZED_LOGS = frozenset({"dns.log", "ssl.log"})
+
+
+def _zeek_row_accounting(full: pd.DataFrame, display: pd.DataFrame, *, analyzed_log: bool = True) -> dict:
+    """Describe how much of one Zeek log was loaded, analyzed and kept for display.
+
+    Args:
+        full: The table as loaded (``df.attrs`` carries the in-file row counts).
+        display: The stored/displayed sample of it.
+        analyzed_log: False for a log no analyzer consumes. Such a log is loaded at
+            display size only; that is sampling for display, not truncated analysis,
+            so it is reported against the rows in the file and never as a row-cap hit.
+
+    Returns:
+        ``total_rows`` (rows in the file), ``loaded_rows`` (rows read into memory),
+        ``analyzed_rows`` (rows available to analyzers, or the rows in the file for a
+        display-only log), ``displayed_rows``, ``bad_lines`` and the truncation flags.
+    """
+    loaded = len(full)
+    total = full.attrs.get(ATTR_TOTAL_ROWS)
+    total = int(total) if isinstance(total, int) and total >= loaded else loaded
+    bad_lines = int(full.attrs.get(ATTR_BAD_LINES) or 0)
+    analyzed = loaded if analyzed_log else max(loaded, total - bad_lines)
+    return {
+        "total_rows": total,
+        "loaded_rows": loaded,
+        "analyzed_rows": analyzed,
+        "displayed_rows": len(display),
+        "bad_lines": bad_lines,
+        "analysis_truncated": bool(full.attrs.get(ATTR_TRUNCATED)) if analyzed_log else False,
+        "display_truncated": len(display) < analyzed,
+    }
+
+
 def run_pipeline(
     pcap_path: str,
     case_id: str,
@@ -197,8 +270,15 @@ def run_pipeline(
         "flows": [],
         "artifacts": {"ips": [], "domains": [], "urls": [], "hashes": [], "ja3": []},
     }
+    # zeek_tables holds the leading ZEEK_DISPLAY_ROWS rows of each log — what is
+    # returned, shown and persisted. zeek_full holds what the analyzers read (every
+    # row up to ZEEK_ANALYSIS_MAX_ROWS, for the logs in ZEEK_ANALYZED_LOGS only) and
+    # is released as soon as the DNS/TLS analyzers have finished.
     zeek_tables: dict = {}
+    zeek_full: dict = {}
+    zeek_coverage: dict[str, dict] = {}
     zeek_log_paths: dict[str, str] = {}
+    packet_limit = resolve_packet_limit(options.pyshark_packet_limit)
     total_pkts: int | None = None
     dns_result: dict = {}
     tls_result: dict = {}
@@ -237,13 +317,22 @@ def run_pipeline(
         try:
             features = parse_pcap_pyshark(
                 pcap_path,
-                limit_packets=options.pyshark_packet_limit,
+                limit_packets=packet_limit,
                 phase=h,
                 total_packets=total_pkts,
                 progress_every=250,
             )
             if not features.get("flows") and not any(features.get("artifacts", {}).values()):
                 warnings.append(WARNING_PYSHARK_NO_DATA)
+            parse_stats = features.get("parse_stats") if isinstance(features.get("parse_stats"), dict) else {}
+            if parse_stats.get("timed_out"):
+                logger.warning("Packet parse for %s timed out; flows are partial", filename)
+                warnings.append(WARNING_PYSHARK_TIMEOUT)
+            if parse_stats.get("skipped_lines"):
+                logger.warning(
+                    "Packet parse for %s skipped %s malformed line(s)", filename, parse_stats.get("skipped_lines")
+                )
+                warnings.append(WARNING_PYSHARK_LINES_SKIPPED)
             stages_run.append("pyshark_pass")
             h.done("Packet parsing complete.")
         except Exception as exc:
@@ -261,12 +350,30 @@ def run_pipeline(
             warnings.append(WARNING_ZEEK_FAILED)
         if logs:
             zeek_log_paths.update(logs)
+            row_cap = C.ZEEK_ANALYSIS_MAX_ROWS if C.ZEEK_ANALYSIS_MAX_ROWS > 0 else None
+            display_rows = max(0, C.ZEEK_DISPLAY_ROWS)
             for name, log_path in logs.items():
+                analyzed_log = name in ZEEK_ANALYZED_LOGS
                 try:
-                    df = load_zeek_any(log_path)
-                except Exception:
+                    # A log no analyzer reads is loaded at display size (the loader
+                    # still counts every row in the file for the coverage report).
+                    df = load_zeek_any(log_path, max_rows=row_cap if analyzed_log else max(1, display_rows))
+                except Exception as exc:
+                    logger.warning("Could not load Zeek log %s: %s", name, exc)
                     df = pd.DataFrame()
-                zeek_tables[name] = df.head(2000)
+                if not isinstance(df, pd.DataFrame):
+                    df = pd.DataFrame()
+                # Analyzers get every loaded row; only the stored/displayed copy is sampled.
+                # The sample is an independent copy so releasing the full table frees it.
+                zeek_tables[name] = df.head(display_rows).copy()
+                if analyzed_log:
+                    zeek_full[name] = df
+                zeek_coverage[name] = _zeek_row_accounting(df, zeek_tables[name], analyzed_log=analyzed_log)
+                del df
+            if any(entry["analysis_truncated"] for entry in zeek_coverage.values()):
+                warnings.append(WARNING_ZEEK_ROWS_CAPPED)
+            if any(entry["bad_lines"] for entry in zeek_coverage.values()):
+                warnings.append(WARNING_ZEEK_BAD_LINES)
             stages_run.append("zeek")
             h.done("Zeek logs loaded.")
         else:
@@ -296,12 +403,17 @@ def run_pipeline(
     # Merge Zeek DNS queries into artifacts (only meaningful when both stages ran)
     if options.do_pyshark and options.do_zeek and zeek_tables:
         try:
-            features = merge_zeek_dns(zeek_tables, features)
+            features = merge_zeek_dns(zeek_full, features)
         except Exception as exc:
             logger.warning("merge_zeek_dns failed: %s", exc)
 
+    # Row accounting rides on `features` so it is persisted with the analysis and
+    # every later rebuild of the capture metrics can still report partial coverage.
+    if zeek_coverage and isinstance(features, dict):
+        features.setdefault("coverage", {})["zeek"] = zeek_coverage
+
     # --- Stages 4-7: post-parse analysis fan-out ---
-    # DNS + TLS read zeek_tables; beacon reads features["flows"]; carve reads only the
+    # DNS + TLS read the full Zeek tables (zeek_full); beacon reads features["flows"]; carve reads only the
     # pcap. They are mutually independent, so run them concurrently. Phase handles are
     # created on the main thread (Streamlit ScriptRunContext requirement) — workers only
     # call set()/done(). Workers never mutate shared state: each writes its own key in
@@ -311,7 +423,7 @@ def run_pipeline(
 
     def _run_dns(h) -> None:
         try:
-            outcomes["dns_analysis"] = {"result": analyze_dns(zeek_tables, phase=h) or {}}
+            outcomes["dns_analysis"] = {"result": analyze_dns(zeek_full, phase=h) or {}}
             h.done("DNS analysis complete.")
         except Exception as exc:
             logger.error("DNS analysis failed: %s", exc)
@@ -321,7 +433,7 @@ def run_pipeline(
     def _run_tls(h) -> None:
         try:
             outcomes["tls_certs"] = {
-                "result": analyze_certificates(pcap_path=pcap_path, zeek_tables=zeek_tables, phase=h) or {}
+                "result": analyze_certificates(pcap_path=pcap_path, zeek_tables=zeek_full, phase=h) or {}
             }
             h.done("TLS analysis complete.")
         except Exception as exc:
@@ -341,6 +453,11 @@ def run_pipeline(
             for rec in records:
                 rec.pop("pkt_times", None)
                 rec.pop("pkt_lens", None)
+                # Pandas fills absent metrics with NaN, which strict JSON (the agent
+                # result spool, the database) rejects. "Not measured" is None.
+                for key, value in rec.items():
+                    if isinstance(value, float) and not math.isfinite(value):
+                        rec[key] = None
             outcomes["beacon"] = {"result": records}
             h.done("Beaconing step complete.")
         except Exception as exc:
@@ -373,9 +490,15 @@ def run_pipeline(
     if jobs:
         with ThreadPoolExecutor(max_workers=len(jobs), thread_name_prefix="analysis") as pool:
             futures = [pool.submit(fn, h) for fn, h in jobs]
-            for fut in as_completed(futures):
-                fut.result()
+            try:
+                for fut in as_completed(futures):
+                    fut.result()
+            finally:
+                # The analyzers are the last readers of the full tables; drop them
+                # before ATT&CK mapping, metrics and the caller's OSINT/LLM stages.
+                zeek_full = {}
         _emit_heartbeat()
+    zeek_full = {}
 
     # Assemble results in canonical order so stages_run/warnings stay deterministic.
     for name in canonical:
@@ -416,6 +539,7 @@ def run_pipeline(
             "dns_analysis": dns_result,
             "tls_analysis": tls_result,
             "zeek_tables": zeek_tables,
+            "zeek_coverage": zeek_coverage,
             "pipeline_warnings": warnings,
         }
     )

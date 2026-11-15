@@ -6,6 +6,8 @@ import shutil
 import sys
 from pathlib import Path
 
+from app.utils.logger import streamlit_session_state
+
 
 @functools.lru_cache(maxsize=32)
 def _which_cached(name: str) -> str | None:
@@ -62,20 +64,21 @@ def _unix_common_paths(name: str) -> list[str]:
 def find_bin(name: str, env_key: str = "", cfg_key: str = "") -> str | None:
     """
     Find a binary by name, checking (in order):
-        1. Streamlit session state config (if cfg_key provided)
+        1. Streamlit session state config (if cfg_key provided and Streamlit is loaded)
         2. Environment variable (if env_key provided)
         3. $PATH (via shutil.which — handles Windows PATHEXT automatically)
         4. Common install locations for the current OS
     """
     # 1. Config
+    # Only consulted when Streamlit is already loaded: headless API / agent workers
+    # must neither import it nor fail when it is not installed.
     if cfg_key:
         try:
-            import streamlit as st
-
-            val = st.session_state.get(cfg_key)
+            state = streamlit_session_state()
+            val = state.get(cfg_key) if state is not None else None
             if val and Path(val).is_file():
                 return val
-        except ImportError:
+        except Exception:
             pass
 
     # 2. Env var

@@ -5,8 +5,11 @@ from __future__ import annotations
 import json
 import logging
 from dataclasses import dataclass, field
+from pathlib import PurePath
 
 from app import config as C
+from app.analysis.flow_analysis import DIRECTION_OUTBOUND, classify_direction
+from app.pipeline.tls_certs import certificate_alerts_from_analysis
 
 logger = logging.getLogger(__name__)
 
@@ -25,6 +28,16 @@ VALID_DISPOSITIONS = {"unreviewed", "confirmed", "dismissed"}
 
 # Average packet size estimate (bytes) when only packet count is available
 AVG_PACKET_SIZE_ESTIMATE = 800
+
+# A C2-suspect port needs sustained use before it supports a technique
+# hypothesis: a single SYN (scan, mistyped service, backscatter) does not.
+SUSPECT_PORT_MIN_PACKETS = 10
+SUSPECT_PORT_MIN_FLOWS = 3
+WELL_KNOWN_PORT_MAX = 1023
+# Confidence for a suspect port, by how much else points the same way
+SUSPECT_PORT_CONFIDENCE_ALONE = 0.4  # the port number is the only signal in the capture
+SUSPECT_PORT_CONFIDENCE_CORROBORATED = 0.55  # other techniques were mapped from other evidence
+SUSPECT_PORT_CONFIDENCE_BEACONING = 0.7  # the same destination also beacons
 
 
 @dataclass
@@ -112,6 +125,18 @@ class AttackMapping:
             attack_version=str(data.get("attack_version", ATTACK_VERSION)),
             mapping_schema_version=int(data.get("mapping_schema_version", MAPPING_SCHEMA_VERSION)),
         )
+
+
+def _yara_file_name(result: dict) -> str:
+    """Display name of a scanned file (results carry ``file_path``, older callers ``file_name``)."""
+    return str(result.get("file_name") or PurePath(str(result.get("file_path") or "")).name or "unknown")
+
+
+def _describe_cert_alert(alert: dict) -> str:
+    """Certificate label for evidence text, with the server endpoint when known."""
+    cert = str(alert.get("cert") or "unknown")
+    dst_ip = alert.get("dst_ip")
+    return f"{cert} (server {dst_ip})" if dst_ip else cert
 
 
 # Kill chain phases in order of advancement
@@ -419,7 +444,15 @@ class ATTACKMapper:
         # Check for large data transfers
         if features:
             techniques.extend(self._check_data_transfer(features))
-            techniques.extend(self._check_suspicious_ports(features))
+            # Evaluated last: its confidence depends on what else was found.
+            beacon_dsts = {
+                str(b.get("dst"))
+                for b in (beacon_results or [])
+                if isinstance(b, dict) and b.get("dst") and (b.get("score") or 0) >= 0.5
+            }
+            techniques.extend(
+                self._check_suspicious_ports(features, corroborated=bool(techniques), beacon_dsts=beacon_dsts)
+            )
 
         # Deduplicate techniques
         techniques = self._deduplicate_techniques(techniques)
@@ -524,12 +557,11 @@ class ATTACKMapper:
     def _check_tls(self, tls_analysis: dict) -> list[TechniqueMatch]:
         """Check TLS certificate analysis for anomalies."""
         techniques = []
-        alerts = tls_analysis.get("alerts", [])
-        # The TLS stage uses ``alerts`` for aggregate counters while older
-        # callers may provide a list of detailed alert objects.  Only the
-        # latter can support a certificate-level ATT&CK hypothesis.
-        if isinstance(alerts, dict):
-            alerts = tls_analysis.get("certificate_alerts", [])
+        # The TLS stage uses ``alerts`` for aggregate counters and publishes the
+        # per-certificate list under ``certificate_alerts``; the helper resolves
+        # every saved shape. Only certificate-level alerts can support a
+        # certificate-level ATT&CK hypothesis.
+        alerts = certificate_alerts_from_analysis(tls_analysis)[:MAX_TLS_ALERTS]
 
         for alert in alerts:
             if not isinstance(alert, dict):
@@ -538,7 +570,7 @@ class ATTACKMapper:
 
             if alert_type == "self_signed":
                 rule = self.detection_rules["self_signed_cert"]
-                cert = alert.get("cert", "unknown")
+                cert = _describe_cert_alert(alert)
                 for tech in rule["techniques"]:
                     techniques.append(
                         TechniqueMatch(
@@ -552,7 +584,7 @@ class ATTACKMapper:
 
             elif alert_type == "expired":
                 rule = self.detection_rules["expired_cert"]
-                cert = alert.get("cert", "unknown")
+                cert = _describe_cert_alert(alert)
                 for tech in rule["techniques"]:
                     techniques.append(
                         TechniqueMatch(
@@ -575,7 +607,7 @@ class ATTACKMapper:
         if by_severity.get("critical", 0) > 0:
             rule = self.detection_rules["yara_critical"]
             results = yara_results.get("results", [])
-            critical_files = [r.get("file_name", "") for r in results if r.get("severity") == "critical"]
+            critical_files = [_yara_file_name(r) for r in results if r.get("severity") == "critical"]
             for tech in rule["techniques"]:
                 techniques.append(
                     TechniqueMatch(
@@ -591,7 +623,7 @@ class ATTACKMapper:
         if by_severity.get("high", 0) > 0:
             rule = self.detection_rules["yara_high"]
             results = yara_results.get("results", [])
-            high_files = [r.get("file_name", "") for r in results if r.get("severity") == "high"]
+            high_files = [_yara_file_name(r) for r in results if r.get("severity") == "high"]
             for tech in rule["techniques"]:
                 techniques.append(
                     TechniqueMatch(
@@ -659,22 +691,34 @@ class ATTACKMapper:
         return techniques
 
     def _check_data_transfer(self, features: dict) -> list[TechniqueMatch]:
-        """Check for large data transfers indicating exfiltration."""
+        """Check for large outbound data transfers indicating exfiltration.
+
+        Flows are directional (``bytes`` counts what ``src`` sent to ``dst``), so
+        only flows from an internal source to a public destination are summed.
+        An internal client *downloading* 10 MB is a public->internal flow and is
+        not exfiltration.
+        """
         techniques = []
         flows = features.get("flows", [])
         rule = self.detection_rules["large_outbound"]
         threshold = rule["threshold"]
 
-        # Calculate total outbound bytes per destination
+        # Total bytes sent out per public destination, and by which internal hosts
         outbound_by_dst: dict[str, int] = {}
+        sources_by_dst: dict[str, set[str]] = {}
         for flow in flows:
-            dst = flow.get("dst", "")
-            bytes_count = flow.get("bytes", 0) or flow.get("count", 0) * AVG_PACKET_SIZE_ESTIMATE
-            if dst:
-                outbound_by_dst[dst] = outbound_by_dst.get(dst, 0) + bytes_count
+            src = str(flow.get("src") or "")
+            dst = str(flow.get("dst") or "")
+            if not src or not dst or classify_direction(src, dst) != DIRECTION_OUTBOUND:
+                continue
+            bytes_count = flow.get("bytes", 0) or (flow.get("count", 0) or 0) * AVG_PACKET_SIZE_ESTIMATE
+            outbound_by_dst[dst] = outbound_by_dst.get(dst, 0) + bytes_count
+            sources_by_dst.setdefault(dst, set()).add(src)
 
         for dst, total_bytes in outbound_by_dst.items():
             if total_bytes >= threshold:
+                sources = sorted(sources_by_dst[dst])
+                origin = sources[0] if len(sources) == 1 else f"{len(sources)} internal hosts"
                 for tech in rule["techniques"]:
                     techniques.append(
                         TechniqueMatch(
@@ -682,35 +726,81 @@ class ATTACKMapper:
                             technique_name=tech["name"],
                             tactic=tech["tactic"],
                             confidence=min(0.5 + (total_bytes / threshold) * 0.1, 0.9),
-                            evidence=[f"Large data transfer to {dst}: {total_bytes / 1_000_000:.1f} MB"],
+                            evidence=[
+                                f"Large outbound data transfer to {dst} from {origin}: {total_bytes / 1_000_000:.1f} MB"
+                            ],
                         )
                     )
 
         return techniques
 
-    def _check_suspicious_ports(self, features: dict) -> list[TechniqueMatch]:
-        """Map configured C2-suspect ports without treating every high port as C2."""
-        matches: list[TechniqueMatch] = []
-        seen: set[tuple[str, int]] = set()
+    def _check_suspicious_ports(
+        self,
+        features: dict,
+        corroborated: bool = False,
+        beacon_dsts: set[str] | None = None,
+    ) -> list[TechniqueMatch]:
+        """Map configured C2-suspect ports without treating every high port as C2.
+
+        A port number alone is weak evidence, so the destination must see
+        sustained traffic (``SUSPECT_PORT_MIN_PACKETS`` packets or
+        ``SUSPECT_PORT_MIN_FLOWS`` separate flows) and the confidence reflects
+        whether anything else in the capture points the same way.
+
+        Args:
+            features: Flow and artifact features.
+            corroborated: True when other techniques were mapped from other evidence.
+            beacon_dsts: Destinations that also show beaconing.
+
+        Returns:
+            Technique matches, at most one set per (destination, port).
+        """
+        beacon_dsts = beacon_dsts or set()
         rule = self.detection_rules["non_standard_port"]
-        for flow in (features.get("flows") or [])[:MAX_FLOWS]:
+
+        usage: dict[tuple[str, int], list[int]] = {}  # (dst, port) -> [packets, flows]
+        for flow in features.get("flows") or []:
             try:
                 port = int(flow.get("dport"))
             except (TypeError, ValueError):
                 continue
-            dst = str(flow.get("dst") or "unknown")
-            key = (dst, port)
-            if port not in C.C2_SUSPECT_PORTS or key in seen:
+            if port not in C.C2_SUSPECT_PORTS:
                 continue
-            seen.add(key)
+            # Reply traffic from a well-known service: the "destination port" is
+            # the client's ephemeral port, which merely collided with the list.
+            try:
+                if 0 < int(flow.get("sport")) <= WELL_KNOWN_PORT_MAX:
+                    continue
+            except (TypeError, ValueError):
+                pass
+            stats = usage.setdefault((str(flow.get("dst") or "unknown"), port), [0, 0])
+            try:
+                stats[0] += int(flow.get("count") or 0)
+            except (TypeError, ValueError):
+                pass
+            stats[1] += 1
+
+        matches: list[TechniqueMatch] = []
+        for (dst, port), (packets, flow_count) in usage.items():
+            if packets < SUSPECT_PORT_MIN_PACKETS and flow_count < SUSPECT_PORT_MIN_FLOWS:
+                continue
+            if dst in beacon_dsts:
+                confidence, context = SUSPECT_PORT_CONFIDENCE_BEACONING, "destination also beacons"
+            elif corroborated:
+                confidence, context = SUSPECT_PORT_CONFIDENCE_CORROBORATED, "other techniques also mapped"
+            else:
+                confidence, context = SUSPECT_PORT_CONFIDENCE_ALONE, "no corroborating signal"
             for tech in rule["techniques"]:
                 matches.append(
                     TechniqueMatch(
                         technique_id=tech["id"],
                         technique_name=tech["name"],
                         tactic=tech["tactic"],
-                        confidence=0.7,
-                        evidence=[f"C2-suspect destination port {port} observed to {dst}"],
+                        confidence=confidence,
+                        evidence=[
+                            f"C2-suspect destination port {port} observed to {dst} "
+                            f"({packets} packets in {flow_count} flow(s); {context})"
+                        ],
                     )
                 )
         return matches

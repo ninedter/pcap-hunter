@@ -6,18 +6,58 @@ import threading
 import time
 from typing import Any
 
-import streamlit as st
-
 from app.utils.common import make_slug
 
-try:
-    # Stable location across Streamlit 1.3x–1.5x. Without attaching this
-    # context, widget updates from worker threads are silently dropped
-    # ("missing ScriptRunContext") and progress bars never move.
-    from streamlit.runtime.scriptrunner import add_script_run_ctx, get_script_run_ctx
-except ImportError:  # pragma: no cover — layout changed in some future Streamlit
-    add_script_run_ctx = None  # type: ignore[assignment]
-    get_script_run_ctx = None  # type: ignore[assignment]
+
+class _LazyStreamlit:
+    """Module-like proxy that imports Streamlit on first attribute access.
+
+    Every pipeline stage imports ``PhaseHandle`` from this module, so a
+    module-level ``import streamlit`` made the whole engine depend on the UI
+    framework. Headless API / agent workers must be able to import the stages with
+    Streamlit absent; only code that actually draws widgets or touches
+    ``st.session_state`` triggers the import (and raises ImportError there if
+    Streamlit is missing). Tests can still patch ``app.pipeline.state.st``.
+    """
+
+    _module: Any = None
+
+    def _load(self) -> Any:
+        if self._module is None:
+            import streamlit
+
+            self._module = streamlit
+        return self._module
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._load(), name)
+
+
+st = _LazyStreamlit()
+
+
+def get_script_run_ctx() -> Any:
+    """Return the calling thread's Streamlit ScriptRunContext, or None.
+
+    Resolved lazily (stable location across Streamlit 1.3x–1.6x). Without attaching
+    this context, widget updates from worker threads are silently dropped
+    ("missing ScriptRunContext") and progress bars never move.
+    """
+    try:
+        from streamlit.runtime.scriptrunner import get_script_run_ctx as _get
+    except ImportError:  # pragma: no cover — Streamlit absent or layout changed
+        return None
+    return _get()
+
+
+def add_script_run_ctx(thread: threading.Thread, ctx: Any) -> Any:
+    """Attach ``ctx`` to ``thread`` (no-op when Streamlit is unavailable)."""
+    try:
+        from streamlit.runtime.scriptrunner import add_script_run_ctx as _add
+    except ImportError:  # pragma: no cover — Streamlit absent or layout changed
+        return None
+    return _add(thread, ctx)
+
 
 logger = logging.getLogger(__name__)
 
@@ -275,11 +315,11 @@ class _ThreadSafePhaseHandle:
 
     def __init__(self, inner: PhaseHandle) -> None:
         self._inner = inner
-        self._ctx = get_script_run_ctx() if get_script_run_ctx is not None else None
+        self._ctx = get_script_run_ctx()
 
     def _attach_ctx(self) -> None:
         """Attach the captured ScriptRunContext to the calling thread (idempotent)."""
-        if self._ctx is not None and add_script_run_ctx is not None:
+        if self._ctx is not None:
             add_script_run_ctx(threading.current_thread(), self._ctx)
 
     def set(self, pct: float, msg: str = "") -> None:

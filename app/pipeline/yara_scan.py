@@ -140,6 +140,33 @@ class YARAScanResult:
         }
 
 
+# Carve-item keys copied onto each scan result (result key <- carve key), so
+# downstream consumers can tie a matched file back to where and when it was seen.
+# ``src_ip``/``dst_ip`` are forwarded when the carve stage records them (it takes them
+# from the frame that carried the body).
+_CARVE_CONTEXT_KEYS = {
+    "tcp_stream": "tcp_stream",
+    "observed_time": "time",
+    "content_type": "content_type",
+    "src_ip": "src_ip",
+    "dst_ip": "dst_ip",
+}
+
+
+def _carve_context(item: dict) -> dict[str, Any]:
+    """Extract network context of a carved file for its scan result.
+
+    Args:
+        item: Carved-file dict from ``carve_http_payloads`` (or any dict with ``path``).
+
+    Returns:
+        Dict of the context keys the item actually carries (possibly empty).
+    """
+    return {
+        out_key: item[in_key] for out_key, in_key in _CARVE_CONTEXT_KEYS.items() if item.get(in_key) not in (None, "")
+    }
+
+
 class YARAScanner:
     """YARA rule scanner for malware detection."""
 
@@ -445,7 +472,9 @@ class YARAScanner:
                 results["matched"] += 1
 
             results["by_severity"][scan_result.severity] += 1
-            results["results"].append(scan_result.to_dict())
+            entry = scan_result.to_dict()
+            entry.update(_carve_context(item))
+            results["results"].append(entry)
 
             if phase:
                 pct = 5 + int((i / total) * 90)

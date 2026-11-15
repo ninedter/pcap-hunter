@@ -6,6 +6,7 @@ import ipaddress
 import logging
 import re
 import socket
+import threading
 import urllib.parse
 
 logger = logging.getLogger(__name__)
@@ -13,22 +14,62 @@ logger = logging.getLogger(__name__)
 # Default timeout for individual rDNS lookups (seconds)
 _RDNS_TIMEOUT = 2.0
 
-# Save and restore the default socket timeout so we only modify it
-# inside our own call.
-_orig_timeout = socket.getdefaulttimeout()
+# gethostbyaddr() is a blocking libc call that ignores socket.setdefaulttimeout(),
+# and mutating that process-wide default from worker threads can leave it stuck for
+# unrelated sockets. Lookups therefore run on a small dedicated pool and the caller
+# waits with a real deadline. A lookup that outlives its deadline keeps a pool
+# thread until the resolver gives up; the pool is bounded so a dead resolver can
+# never exhaust threads, and callers still return on time.
+_RDNS_POOL_WORKERS = 16
+_rdns_pool: concurrent.futures.ThreadPoolExecutor | None = None
+_rdns_pool_lock = threading.Lock()
+
+
+def _get_rdns_pool() -> concurrent.futures.ThreadPoolExecutor:
+    """Return the shared reverse-DNS executor, creating it on first use."""
+    global _rdns_pool
+    if _rdns_pool is None:
+        with _rdns_pool_lock:
+            if _rdns_pool is None:
+                _rdns_pool = concurrent.futures.ThreadPoolExecutor(
+                    max_workers=_RDNS_POOL_WORKERS, thread_name_prefix="rdns"
+                )
+    return _rdns_pool
+
+
+def _gethostbyaddr_name(ip: str) -> str | None:
+    """Blocking PTR lookup; returns the cleaned hostname or None."""
+    try:
+        hostname = socket.gethostbyaddr(ip)[0].strip().rstrip(".")
+    except (socket.herror, socket.gaierror, OSError):
+        return None
+    return hostname or None
 
 
 def resolve_ip(ip: str, timeout: float = _RDNS_TIMEOUT) -> str | None:
-    """Resolve IP to domain name (Reverse DNS) with a timeout."""
+    """Resolve IP to domain name (Reverse DNS) with a timeout.
+
+    The lookup is bounded by ``timeout`` wall-clock seconds (including time spent
+    queued behind other lookups) without touching the process-wide socket default
+    timeout.
+
+    Args:
+        ip: IPv4 or IPv6 address string.
+        timeout: Maximum seconds to wait for the answer.
+
+    Returns:
+        The PTR hostname, or None when there is none, on error, or on timeout.
+    """
     try:
-        old = socket.getdefaulttimeout()
-        socket.setdefaulttimeout(timeout)
-        try:
-            hostname = socket.gethostbyaddr(ip)[0].strip().rstrip(".")
-            return hostname or None
-        finally:
-            socket.setdefaulttimeout(old)
-    except (socket.herror, socket.gaierror, OSError, socket.timeout):
+        future = _get_rdns_pool().submit(_gethostbyaddr_name, ip)
+    except RuntimeError:  # interpreter shutting down — pool no longer accepts work
+        return None
+    try:
+        return future.result(timeout=timeout)
+    except concurrent.futures.TimeoutError:
+        future.cancel()  # drops it if still queued; a running lookup finishes on its own
+        return None
+    except Exception:
         return None
 
 
@@ -129,7 +170,7 @@ def get_whois_info(target: str) -> dict | str:
     from app.security.opsec import hardened_session
 
     try:
-        if is_public_ipv4(target):
+        if is_public_ip(target):
             # RDAP Lookup for IPs — URL-encode the target to prevent injection
             safe_target = urllib.parse.quote(target, safe="")
             url = f"https://rdap.arin.net/registry/ip/{safe_target}"
@@ -198,30 +239,56 @@ def is_public_ipv4(s: str) -> bool:
         return False
 
 
+@functools.lru_cache(maxsize=4096)
+def is_public_ip(s: str) -> bool:
+    """Check if string is a valid *public* (globally routable) IPv4 or IPv6 address.
+
+    Family-agnostic counterpart of :func:`is_public_ipv4`, which stays IPv4-only
+    for callers that render or query IPv4-specific data. Use this where dropping
+    IPv6 would silently hide hosts (OSINT enrichment, top-N talkers).
+
+    Args:
+        s: Candidate address string.
+
+    Returns:
+        True for global unicast IPv4/IPv6 addresses; False for private, loopback,
+        link-local, multicast, reserved, documentation ranges, and non-addresses.
+    """
+    try:
+        ip = ipaddress.ip_address(s)
+    except (ValueError, TypeError):
+        return False
+    # IPv4-mapped IPv6 (::ffff:a.b.c.d) is judged by the embedded IPv4 address.
+    mapped = getattr(ip, "ipv4_mapped", None)
+    if mapped is not None:
+        ip = mapped
+    return bool(ip.is_global) and not ip.is_multicast
+
+
 def pick_top_public_ips(features: dict, n: int) -> list[str]:
     """
-    Return top-N public IPv4s by packet volume across flows.
-    If n <= 0, return all public IPv4s from artifacts.
+    Return top-N public IPs (IPv4 and IPv6) by packet volume across flows.
+    If n <= 0, return all public IPs from artifacts.
     """
     if not isinstance(features, dict) or n <= 0:
-        return [ip for ip in (features or {}).get("artifacts", {}).get("ips", []) if is_public_ipv4(ip)]
+        return [ip for ip in (features or {}).get("artifacts", {}).get("ips", []) if is_public_ip(ip)]
 
     flows = (features or {}).get("flows", [])
     if not flows:
-        return [ip for ip in (features or {}).get("artifacts", {}).get("ips", []) if is_public_ipv4(ip)]
+        return [ip for ip in (features or {}).get("artifacts", {}).get("ips", []) if is_public_ip(ip)]
 
     counts = {}
     for f in flows:
         pkts = int(f.get("count") or 0)
         src = f.get("src")
         dst = f.get("dst")
-        if src and is_public_ipv4(src):
+        if src and is_public_ip(src):
             counts[src] = counts.get(src, 0) + pkts
-        if dst and is_public_ipv4(dst):
+        if dst and is_public_ip(dst):
             counts[dst] = counts.get(dst, 0) + pkts
 
     if not counts:
-        return [ip for ip in (features or {}).get("artifacts", {}).get("ips", []) if is_public_ipv4(ip)]
+        return [ip for ip in (features or {}).get("artifacts", {}).get("ips", []) if is_public_ip(ip)]
 
     ranked = sorted(counts.items(), key=lambda kv: kv[1], reverse=True)
     return [ip for ip, _ in ranked[: max(1, n)]]

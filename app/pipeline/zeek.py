@@ -1,15 +1,27 @@
 from __future__ import annotations
 
 import json
+import logging
 import pathlib
 import subprocess
 
 import pandas as pd
 
 from app import config as C
-from app.pipeline.state import PhaseHandle
+from app.pipeline.progress import PhaseHandle
 from app.utils.common import ensure_dir, find_bin
 from app.utils.logger import log_runtime_error
+
+logger = logging.getLogger(__name__)
+
+# The logs every consumer has always been able to rely on; ZEEK_LOG_NAMES in config
+# extends this with optional extras (files / notice / weird / x509).
+CORE_ZEEK_LOGS = ("conn.log", "dns.log", "http.log", "ssl.log")
+
+# DataFrame.attrs keys set by load_zeek_any() describing how complete the load was.
+ATTR_TOTAL_ROWS = "zeek_total_rows"  # data rows present in the log file
+ATTR_BAD_LINES = "zeek_bad_lines"  # malformed lines skipped
+ATTR_TRUNCATED = "zeek_truncated"  # True when max_rows stopped the load early
 
 
 def run_zeek(pcap_path: str, out_dir: str, phase: PhaseHandle | None = None) -> dict[str, str]:
@@ -65,7 +77,7 @@ def run_zeek(pcap_path: str, out_dir: str, phase: PhaseHandle | None = None) -> 
             raise e2
 
     logs = {}
-    for name in ("conn.log", "dns.log", "http.log", "ssl.log"):
+    for name in dict.fromkeys((*CORE_ZEEK_LOGS, *C.ZEEK_LOG_NAMES)):
         p = pathlib.Path(out_dir) / name
         if p.exists():
             logs[name] = str(p)
@@ -74,19 +86,47 @@ def run_zeek(pcap_path: str, out_dir: str, phase: PhaseHandle | None = None) -> 
     return logs
 
 
-def _load_json_lines(path: str) -> pd.DataFrame | None:
-    lines = []
-    with open(path, "r", encoding="utf-8") as f:
+def _load_json_lines(path: str, max_rows: int | None = None) -> tuple[list[dict], int, int]:
+    """Parse a Zeek JSON-lines log, tolerating individual malformed lines.
+
+    Args:
+        path: Log file path.
+        max_rows: Stop materialising records after this many (remaining lines are
+            still counted so the caller can report what was left out). None = all.
+
+    Returns:
+        ``(records, total_rows, bad_lines)`` where ``total_rows`` counts every
+        non-comment, non-blank data line, including skipped and uncollected ones.
+    """
+    records: list[dict] = []
+    total = 0
+    bad = 0
+    with open(path, "r", encoding="utf-8", errors="replace") as f:
         for ln in f:
             s = ln.strip()
-            if s and not s.startswith("#"):
-                lines.append(json.loads(s))
-    return pd.DataFrame(lines) if lines else None
+            if not s or s.startswith("#"):
+                continue
+            total += 1
+            if max_rows is not None and len(records) >= max_rows:
+                continue  # over the cap: count only
+            try:
+                obj = json.loads(s)
+            except ValueError:
+                bad += 1
+                continue
+            if not isinstance(obj, dict):
+                bad += 1
+                continue
+            records.append(obj)
+    return records, total, bad
 
 
-def _load_ascii(path: str) -> pd.DataFrame:
+def _load_ascii(path: str, max_rows: int | None = None) -> pd.DataFrame:
+    """Parse a Zeek TSV (ASCII) log; rows whose column count is wrong are skipped and counted."""
     cols = None
     records = []
+    total = 0
+    bad = 0
     with open(path, "r", encoding="utf-8", errors="ignore") as f:
         for ln in f:
             if not ln.strip():
@@ -96,20 +136,78 @@ def _load_ascii(path: str) -> pd.DataFrame:
                 continue
             if ln.startswith("#"):
                 continue
+            total += 1
+            if max_rows is not None and len(records) >= max_rows:
+                continue  # over the cap: count only
             parts = ln.rstrip("\n").split("\t")
             if cols and len(parts) == len(cols):
                 records.append(dict(zip(cols, parts)))
-    return pd.DataFrame(records)
+            else:
+                bad += 1
+    df = pd.DataFrame(records)
+    _stamp(df, total, bad, max_rows)
+    return df
 
 
-def load_zeek_any(path: str) -> pd.DataFrame:
+def _stamp(df: pd.DataFrame, total: int, bad: int, max_rows: int | None) -> None:
+    """Record load-completeness metadata on ``df.attrs``."""
+    df.attrs[ATTR_TOTAL_ROWS] = total
+    df.attrs[ATTR_BAD_LINES] = bad
+    df.attrs[ATTR_TRUNCATED] = bool(max_rows is not None and total - bad > len(df))
+
+
+def _looks_like_json_log(path: str) -> bool:
+    """Tell JSON-lines logs from Zeek TSV logs.
+
+    TSV logs always open with ``#separator`` / ``#fields`` header lines; JSON logs
+    have no header. Deciding on the header (not on whether the first record parses)
+    keeps a JSON log with a corrupt first line on the JSON path.
+    """
     try:
-        df = _load_json_lines(path)
-        if df is not None:
-            return df
-    except Exception:
-        pass
-    return _load_ascii(path)
+        with open(path, "r", encoding="utf-8", errors="replace") as f:
+            for ln in f:
+                s = ln.strip()
+                if s:
+                    return not s.startswith("#")
+    except OSError:
+        return False
+    return False
+
+
+def load_zeek_any(path: str, max_rows: int | None = None) -> pd.DataFrame:
+    """Load a Zeek log (JSON-lines or TSV) into a DataFrame.
+
+    A malformed line no longer discards the whole log: it is skipped, counted, and
+    reported in a warning, and every other record is kept.
+
+    Args:
+        path: Log file path.
+        max_rows: Optional memory guard — keep at most this many records. None
+            (default) loads everything, as before.
+
+    Returns:
+        DataFrame of records. ``df.attrs`` carries ``zeek_total_rows``,
+        ``zeek_bad_lines`` and ``zeek_truncated`` so callers can report partial
+        coverage.
+    """
+    if max_rows is not None and max_rows <= 0:
+        max_rows = None
+
+    if _looks_like_json_log(path):
+        records, total, bad = _load_json_lines(path, max_rows)
+        df = pd.DataFrame(records)
+        _stamp(df, total, bad, max_rows)
+    else:
+        df = _load_ascii(path, max_rows)
+        bad = int(df.attrs.get(ATTR_BAD_LINES, 0))
+        total = int(df.attrs.get(ATTR_TOTAL_ROWS, 0))
+
+    name = pathlib.Path(path).name
+    if bad:
+        logger.warning("Zeek log %s: skipped %d malformed line(s) of %d; kept the rest", name, bad, total)
+    if df.attrs.get(ATTR_TRUNCATED):
+        logger.warning("Zeek log %s: loaded %d of %d rows (row cap %s)", name, len(df), total, max_rows)
+    return df
 
 
 def merge_zeek_dns(zeek_tables: dict, features: dict) -> dict:

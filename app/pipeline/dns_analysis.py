@@ -57,16 +57,102 @@ def validate_domain(domain: str) -> bool:
     return True
 
 
-# Known legitimate TLDs that often have high entropy subdomains
+# Known legitimate suffixes (CDNs, cloud providers) that often have high entropy
+# subdomains and rotate many addresses with low TTLs by design.
 ENTROPY_WHITELIST_TLDS = {
     "cloudfront.net",
     "amazonaws.com",
     "akamaiedge.net",
     "akadns.net",
+    "akamai.net",
+    "akamaihd.net",
+    "edgekey.net",
+    "edgesuite.net",
     "googleusercontent.com",
+    "googlevideo.com",
+    "gstatic.com",
     "1e100.net",
     "cloudflare.com",
+    "cloudflare.net",
+    "fastly.net",
+    "fastlylb.net",
+    "azureedge.net",
+    "azurefd.net",
+    "trafficmanager.net",
+    "msedge.net",
+    "windows.net",
+    "fbcdn.net",
+    "llnwd.net",
+    "cdn77.org",
 }
+
+# Multi-label public suffixes. No public-suffix-list dependency is available, so
+# this embeds the common country-code second-level registries; anything else is
+# treated as a single-label TLD (registrable domain = last two labels).
+# fmt: off
+MULTI_PART_SUFFIXES = frozenset(
+    {
+        # United Kingdom
+        "co.uk", "org.uk", "ac.uk", "gov.uk", "me.uk", "ltd.uk", "plc.uk", "net.uk", "sch.uk", "nhs.uk",
+        # Australia / New Zealand
+        "com.au", "net.au", "org.au", "edu.au", "gov.au", "id.au", "asn.au",
+        "co.nz", "net.nz", "org.nz", "govt.nz", "ac.nz", "school.nz",
+        # Japan / Korea / China / Taiwan / Hong Kong
+        "co.jp", "ne.jp", "or.jp", "ac.jp", "go.jp", "ad.jp", "ed.jp", "gr.jp", "lg.jp",
+        "co.kr", "or.kr", "ne.kr", "go.kr", "ac.kr", "re.kr",
+        "com.cn", "net.cn", "org.cn", "gov.cn", "edu.cn", "ac.cn",
+        "com.tw", "net.tw", "org.tw", "edu.tw", "gov.tw", "idv.tw",
+        "com.hk", "net.hk", "org.hk", "edu.hk", "gov.hk", "idv.hk",
+        # South / South-East Asia
+        "co.in", "net.in", "org.in", "gen.in", "firm.in", "ind.in", "ac.in", "edu.in", "gov.in", "res.in",
+        "com.sg", "net.sg", "org.sg", "edu.sg", "gov.sg",
+        "com.my", "net.my", "org.my", "edu.my", "gov.my",
+        "co.id", "or.id", "ac.id", "go.id", "web.id",
+        "co.th", "or.th", "ac.th", "go.th", "in.th",
+        "com.ph", "net.ph", "org.ph", "edu.ph", "gov.ph",
+        "com.vn", "net.vn", "org.vn", "edu.vn", "gov.vn",
+        "com.pk", "net.pk", "org.pk", "edu.pk", "gov.pk",
+        "com.bd", "net.bd", "org.bd",
+        # Americas
+        "com.br", "net.br", "org.br", "gov.br", "edu.br",
+        "com.mx", "net.mx", "org.mx", "gob.mx", "edu.mx",
+        "com.ar", "net.ar", "org.ar", "gob.ar", "edu.ar",
+        "com.co", "net.co", "org.co", "edu.co", "gov.co",
+        "com.pe", "com.ve", "com.ec", "com.uy", "com.py", "com.bo", "com.do", "com.gt", "com.pa",
+        # Europe / Middle East / Africa
+        "com.tr", "net.tr", "org.tr", "gov.tr", "edu.tr", "gen.tr", "web.tr",
+        "co.za", "net.za", "org.za", "gov.za", "ac.za", "web.za",
+        "co.il", "org.il", "net.il", "ac.il", "gov.il",
+        "com.sa", "net.sa", "org.sa", "edu.sa", "gov.sa",
+        "com.eg", "net.eg", "org.eg", "edu.eg", "gov.eg",
+        "com.ng", "org.ng", "gov.ng", "edu.ng",
+        "co.ke", "or.ke", "go.ke", "ac.ke",
+        "com.ua", "net.ua", "org.ua", "gov.ua", "edu.ua",
+        "com.pl", "net.pl", "org.pl", "edu.pl", "gov.pl",
+        "com.ru", "net.ru", "org.ru",
+        "com.es", "org.es", "nom.es", "gob.es", "edu.es",
+        "com.pt", "org.pt", "gov.pt", "edu.pt",
+        "com.gr", "net.gr", "org.gr", "edu.gr", "gov.gr",
+        "co.at", "or.at", "ac.at", "gv.at",
+        "co.hu", "com.ro", "co.rs", "com.cy", "com.mt",
+        "co.ae", "net.ae", "org.ae", "gov.ae", "ac.ae",
+        "com.qa", "com.kw", "com.bh", "com.om", "com.jo", "com.lb",
+        "co.ir", "ac.ir", "gov.ir",
+    }
+)
+# fmt: on
+
+# Most frequent English letter pairs. Pronounceable names (dictionary words and
+# brand names alike) are built largely from these; uniformly random strings hit
+# them only ~18% of the time (the set covers 120 of the 676 possible pairs).
+COMMON_BIGRAMS = frozenset(
+    (
+        "th he in er an re on at en nd ti es or te of ed is it al ar st to nt ng se ha as ou io le "
+        "ve co me de hi ri ro ic ne ea ra ce li ch ll be ma si om ur ca el ta la ns di fo ho pe ec "
+        "pr no ct us ac ot il tr ly nc et ut ss so rs un lo wa ge ie wh ee wi em ad ol rt po we na "
+        "ul ni ts mo ow pa im mi ai sh ir su id os iv ia am fi ci vi pl ig tu ev ld ry mp fe bl ab"
+    ).split()
+)
 
 # Common benign long domain patterns (pre-compiled for performance)
 BENIGN_PATTERNS = [
@@ -88,6 +174,14 @@ FAST_FLUX_CONFIRMED_THRESHOLD = 0.5
 FAST_FLUX_TOP_DOMAINS = 50
 NXDOMAIN_RATIO_THRESHOLD = 0.3
 QUERY_VELOCITY_THRESHOLD = 50  # queries per second
+# A rate is only meaningful over a sustained window: 10 lookups in 0.1 s is one
+# page load, not 100 qps. Shorter bursts are rated as if spread over this window.
+QUERY_VELOCITY_MIN_WINDOW_SECONDS = 5.0
+# Labels shorter than this carry too little signal to score for randomness.
+DGA_MIN_LABEL_LENGTH = 6
+# Random-looking subdomain labels are routinely benign (tenant ids, tracking
+# tokens), so they count for less than a random-looking registrable label.
+DGA_SUBDOMAIN_WEIGHT = 0.7
 
 # --- Result Limits ---
 MAX_DGA_RESULTS = 50
@@ -123,6 +217,10 @@ class DGAResult:
     length: int
     is_dga: bool
     reason: str
+    # Label the metrics above were computed on, and its entropy as a fraction of
+    # the maximum possible for a string of that length (0-1).
+    analyzed_label: str = ""
+    normalized_entropy: float = 0.0
 
 
 @dataclass
@@ -139,6 +237,8 @@ class TunnelingResult:
     score: float  # 0-1, higher = more likely tunneling
     is_tunneling: bool
     reason: str
+    first_seen: float | None = None  # epoch seconds of the first/last matching query
+    last_seen: float | None = None
 
 
 @dataclass
@@ -184,6 +284,63 @@ def calculate_digit_ratio(s: str) -> float:
     return digit_count / len(s)
 
 
+def normalized_entropy(s: str) -> float:
+    """Shannon entropy as a fraction of the maximum possible for the string's length.
+
+    Raw entropy is bounded by ``log2(len(s))``, so a fixed bit threshold can never
+    fire on short labels; the normalised form is comparable across lengths.
+
+    Args:
+        s: String to measure.
+
+    Returns:
+        Value in ``[0, 1]``; 0.0 for strings shorter than two characters.
+    """
+    if not s or len(s) < 2:
+        return 0.0
+    return min(calculate_entropy(s) / math.log2(len(s)), 1.0)
+
+
+def split_registrable_domain(domain: str) -> tuple[str, str, str]:
+    """Split a name into subdomain, registrable label and public suffix.
+
+    The single source of truth for "which part is the registered domain": DGA
+    scoring, tunneling grouping and the per-domain record index all use it, so
+    they can never disagree about where a name's base domain starts.
+
+    Multi-label suffixes come from the embedded ``MULTI_PART_SUFFIXES`` set;
+    every other name is treated as having a single-label TLD.
+
+    Args:
+        domain: Domain name (any case, trailing dot tolerated).
+
+    Returns:
+        ``(subdomain, name, suffix)``. Single-label input yields ``("", domain, "")``;
+        a bare public suffix such as ``co.uk`` yields ``("", "co", "uk")``.
+    """
+    parts = domain.lower().strip(".").split(".")
+    if len(parts) < 2:
+        return "", domain, ""
+
+    suffix_labels = 2 if len(parts) >= 3 and ".".join(parts[-2:]) in MULTI_PART_SUFFIXES else 1
+    name_idx = len(parts) - suffix_labels - 1
+    return ".".join(parts[:name_idx]), parts[name_idx], ".".join(parts[name_idx + 1 :])
+
+
+def registrable_domain(domain: str) -> str:
+    """Return the registrable (base) domain of a name, lower-cased.
+
+    Args:
+        domain: Domain name.
+
+    Returns:
+        ``name.suffix`` (e.g. ``example.co.uk`` for ``x.example.co.uk``), or the
+        lower-cased input when it has no dot.
+    """
+    _, name, suffix = split_registrable_domain(domain)
+    return f"{name}.{suffix}".lower() if suffix else name.lower().strip(".")
+
+
 def extract_domain_parts(domain: str) -> tuple[str, str, str]:
     """
     Extract subdomain, domain, and TLD from a domain name.
@@ -191,19 +348,7 @@ def extract_domain_parts(domain: str) -> tuple[str, str, str]:
     Returns:
         (subdomain, domain, tld)
     """
-    parts = domain.lower().strip(".").split(".")
-    if len(parts) < 2:
-        return "", domain, ""
-    if len(parts) == 2:
-        return "", parts[0], parts[1]
-
-    # Handle multi-part TLDs (e.g., co.uk, com.br)
-    if len(parts[-2]) <= 3 and len(parts[-1]) <= 3:
-        if len(parts) == 3:
-            return "", parts[0], f"{parts[-2]}.{parts[-1]}"
-        return ".".join(parts[:-3]), parts[-3], f"{parts[-2]}.{parts[-1]}"
-
-    return ".".join(parts[:-2]), parts[-2], parts[-1]
+    return split_registrable_domain(domain)
 
 
 def is_whitelisted_domain(domain: str) -> bool:
@@ -218,75 +363,185 @@ def is_whitelisted_domain(domain: str) -> bool:
     return False
 
 
+_VOWELS = frozenset("aeiou")
+_ALPHA_RUN_PATTERN = re.compile(r"[a-z]+")
+_HEX_LABEL_PATTERN = re.compile(r"^[0-9a-f]+$")
+
+
+def _common_bigram_ratio(label: str) -> float | None:
+    """Fraction of adjacent letter pairs that are common English bigrams.
+
+    Returns:
+        Ratio in ``[0, 1]``, or None when the label has fewer than four letter
+        pairs (too little evidence either way).
+    """
+    pairs = 0
+    common = 0
+    for run in _ALPHA_RUN_PATTERN.findall(label.lower()):
+        for i in range(len(run) - 1):
+            pairs += 1
+            if run[i : i + 2] in COMMON_BIGRAMS:
+                common += 1
+    if pairs < 4:
+        return None
+    return common / pairs
+
+
+def _max_consonant_run(label: str) -> int:
+    """Length of the longest run of consecutive consonant letters ("y" counts as a vowel)."""
+    longest = current = 0
+    for ch in label.lower():
+        if ch.isalpha() and ch not in _VOWELS and ch != "y":
+            current += 1
+            longest = max(longest, current)
+        else:
+            current = 0
+    return longest
+
+
+def _score_label_randomness(label: str) -> tuple[float, list[str]]:
+    """Score how machine-generated a single DNS label looks.
+
+    Combines pronounceability (common letter pairs, vowel balance, consonant
+    runs) with digit mixing and length-normalised entropy. No single feature can
+    reach the confirmation threshold on its own, which keeps ordinary brand names
+    with one odd property (``cloudflare`` has near-maximal entropy) unflagged.
+
+    Args:
+        label: One DNS label, without dots.
+
+    Returns:
+        ``(score, reasons)`` with score in ``[0, 1]``.
+    """
+    compact = label.lower().replace("-", "").replace("_", "")
+    length = len(compact)
+    if length < DGA_MIN_LABEL_LENGTH:
+        return 0.0, []
+
+    letters = sum(1 for c in compact if c.isalpha())
+    digit_ratio = calculate_digit_ratio(compact)
+    consonant_ratio = calculate_consonant_ratio(compact)
+    norm_entropy = normalized_entropy(compact)
+    bigram_ratio = _common_bigram_ratio(label)
+    consonant_run = _max_consonant_run(compact)
+
+    score = 0.0
+    reasons: list[str] = []
+
+    # Unpronounceable: almost no familiar letter pairs
+    if bigram_ratio is not None:
+        if bigram_ratio < 0.25:
+            score += 0.35
+            reasons.append(f"few common letter pairs ({bigram_ratio:.0%})")
+        elif bigram_ratio < 0.4:
+            score += 0.15
+
+    if letters >= 5:
+        # Vowel starvation
+        if consonant_ratio > 0.8:
+            score += 0.2
+            reasons.append(f"high consonant ratio ({consonant_ratio:.2f})")
+        elif consonant_ratio > 0.7:
+            score += 0.1
+
+        # Compound words reach five ("crowdstrike", "strengths"); six is rare.
+        if consonant_run >= 6:
+            score += 0.15
+            reasons.append(f"consonant run of {consonant_run}")
+        elif consonant_run == 5:
+            score += 0.05
+
+        if consonant_ratio == 1.0 and letters > 5:
+            score += 0.1
+            reasons.append("no vowels")
+
+    # Letters and digits interleaved (pure numbers are not DGA-like)
+    if letters >= 3:
+        if digit_ratio > 0.3:
+            score += 0.25
+            reasons.append(f"high digit ratio ({digit_ratio:.2f})")
+        elif digit_ratio > 0.15:
+            score += 0.1
+
+    # Long hexadecimal strings (hash-derived DGAs)
+    if length >= 12 and letters and digit_ratio > 0 and _HEX_LABEL_PATTERN.match(compact):
+        score += 0.2
+        reasons.append("hexadecimal-looking")
+
+    # Near-uniform character distribution, only meaningful on longer labels
+    if length >= 10 and norm_entropy > 0.9:
+        score += 0.1
+        reasons.append(f"high entropy ({norm_entropy:.0%} of maximum)")
+
+    if length > 15:
+        score += 0.1
+        reasons.append(f"long name ({length} chars)")
+
+    # Short labels are dominated by abbreviations ("sndcdn", "nflximg") that look
+    # random by every measure above; discount them rather than trust the signal.
+    if length < 8:
+        score *= 0.45
+    elif length < 10:
+        score *= 0.8
+
+    return round(min(score, 1.0), 4), reasons
+
+
+def _is_identifier_label(label: str) -> bool:
+    """True for subdomain labels that look like machine ids rather than names.
+
+    Hex ids, numbered hosts and tenant/tracking tokens (``a1b2c3d4e5f6``,
+    ``edge-12ab``, ``r3---sn-ab5l6nzr``) are everyday CDN and SaaS hostnames.
+    Any digit in a subdomain label is treated as an id marker; a random-looking
+    *registrable* label is still scored in full.
+    """
+    return any(c.isdigit() for c in label) or label.startswith("_")
+
+
 def detect_dga(domain: str) -> DGAResult:
     """
     Detect if a domain is likely generated by a DGA.
 
-    Uses multiple heuristics:
-    - Shannon entropy of the domain name
-    - Consonant to vowel ratio
-    - Digit ratio
-    - Length analysis
+    Scores the registrable label (``xkqjzvbnmwpl`` in ``www.xkqjzvbnmwpl.com``)
+    and, at reduced weight, the longest non-identifier subdomain label, then
+    reports whichever looks more machine-generated. Heuristics per label:
+    - Pronounceability (common letter pairs, consonant ratio and runs)
+    - Digit mixing
+    - Shannon entropy normalised by ``log2(length)``
+    - Length
 
     Args:
         domain: Domain name to analyze
 
     Returns:
-        DGAResult with detection details
+        DGAResult with detection details. ``entropy``/``consonant_ratio``/
+        ``digit_ratio``/``length`` describe ``analyzed_label``.
     """
-    subdomain, name, tld = extract_domain_parts(domain)
+    subdomain, name, _suffix = split_registrable_domain(domain)
 
-    # Analyze the main domain name (not subdomain or TLD)
-    analyze_part = name if not subdomain else subdomain.split(".")[-1]
+    analyze_part = name
+    score, reasons = _score_label_randomness(name)
+
+    sub_labels = [label for label in subdomain.split(".") if label and not _is_identifier_label(label)]
+    if sub_labels:
+        longest = max(sub_labels, key=len)
+        sub_score, sub_reasons = _score_label_randomness(longest)
+        sub_score = round(sub_score * DGA_SUBDOMAIN_WEIGHT, 4)
+        if sub_score > score:
+            analyze_part, score = longest, sub_score
+            reasons = [*sub_reasons, "subdomain label"]
 
     entropy = calculate_entropy(analyze_part)
     consonant_ratio = calculate_consonant_ratio(analyze_part)
     digit_ratio = calculate_digit_ratio(analyze_part)
     length = len(analyze_part)
 
-    # Scoring weights
-    score = 0.0
-    reasons = []
-
-    # High entropy (random-looking)
-    if entropy > 4.0:
-        score += 0.3
-        reasons.append(f"high entropy ({entropy:.2f})")
-    elif entropy > 3.5:
-        score += 0.15
-
-    # Unusual consonant ratio
-    if consonant_ratio > 0.75:
-        score += 0.2
-        reasons.append(f"high consonant ratio ({consonant_ratio:.2f})")
-    elif consonant_ratio < 0.35 and length > 8:
-        score += 0.1
-
-    # High digit ratio
-    if digit_ratio > 0.3:
-        score += 0.25
-        reasons.append(f"high digit ratio ({digit_ratio:.2f})")
-    elif digit_ratio > 0.15:
-        score += 0.1
-
-    # Unusual length
-    if length > 15:
-        score += 0.15
-        reasons.append(f"long name ({length} chars)")
-    elif length > 12:
-        score += 0.05
-
-    # No vowels at all
-    if consonant_ratio == 1.0 and length > 5:
-        score += 0.15
-        reasons.append("no vowels")
-
     # Whitelist check
     if is_whitelisted_domain(domain):
         score *= 0.3
         reasons.append("whitelisted domain type")
 
-    is_dga = score >= 0.5
+    is_dga = score >= DGA_CONFIRMED_THRESHOLD
 
     return DGAResult(
         domain=domain,
@@ -297,6 +552,8 @@ def detect_dga(domain: str) -> DGAResult:
         length=length,
         is_dga=is_dga,
         reason="; ".join(reasons) if reasons else "normal",
+        analyzed_label=analyze_part,
+        normalized_entropy=normalized_entropy(analyze_part),
     )
 
 
@@ -324,15 +581,13 @@ def detect_tunneling(
     Returns:
         TunnelingResult with detection details
     """
-    domain_lower = domain.lower()
-    if pre_filtered is not None:
-        # Use pre-filtered records (already scoped to base domain)
-        relevant = [
-            r for r in pre_filtered if r.query.lower().endswith(domain_lower) or r.query.lower() == domain_lower
-        ]
-    else:
-        # Fallback: scan all records (backward compatible)
-        relevant = [r for r in dns_records if r.query.lower().endswith(domain_lower) or r.query.lower() == domain_lower]
+    domain_lower = domain.lower().strip(".")
+    dotted_suffix = f".{domain_lower}"
+    # Use pre-filtered records (already scoped to base domain) when given, else
+    # scan all records (backward compatible). Match on a label boundary so
+    # "notexample.com" is not counted under "example.com".
+    candidates = pre_filtered if pre_filtered is not None else dns_records
+    relevant = [r for r in candidates if (q := r.query.lower().strip(".")) == domain_lower or q.endswith(dotted_suffix)]
 
     if not relevant:
         return TunnelingResult(
@@ -351,8 +606,8 @@ def detect_tunneling(
     # Extract subdomains
     subdomains = []
     for r in relevant:
-        query = r.query.lower()
-        if query != domain_lower and query.endswith(f".{domain_lower}"):
+        query = r.query.lower().strip(".")
+        if query != domain_lower and query.endswith(dotted_suffix):
             subdomain = query[: -(len(domain_lower) + 1)]
             subdomains.append(subdomain)
 
@@ -401,7 +656,7 @@ def detect_tunneling(
         score += 0.1
         reasons.append(f"{len(relevant)} queries")
 
-    is_tunneling = score >= 0.5
+    is_tunneling = score >= TUNNELING_CONFIRMED_THRESHOLD
 
     return TunnelingResult(
         domain=domain,
@@ -414,6 +669,8 @@ def detect_tunneling(
         score=min(score, 1.0),
         is_tunneling=is_tunneling,
         reason="; ".join(reasons) if reasons else "normal",
+        first_seen=min(r.ts for r in relevant),
+        last_seen=max(r.ts for r in relevant),
     )
 
 
@@ -459,29 +716,33 @@ def detect_fast_flux(
             reason="no A/AAAA records",
         )
 
-    # Collect unique IPs and TTLs
-    all_ips = []
-    all_ttls = []
-    timestamps = []
+    # Collect the address set of each response, in time order
+    all_ips: set[str] = set()
+    all_ttls: list[int] = []
+    timestamps: list[float] = []
+    response_sets: list[frozenset[str]] = []
 
-    for r in relevant:
+    for r in sorted(relevant, key=lambda rec: rec.ts):
         timestamps.append(r.ts)
-        for answer in r.answers:
-            # Filter for IP-like answers (A/AAAA records)
-            if IP_LIKE_PATTERN.match(answer) or ":" in answer:
-                all_ips.append(answer)
+        # Filter for IP-like answers (A/AAAA records)
+        ips = frozenset(a for a in r.answers if IP_LIKE_PATTERN.match(a) or ":" in a)
+        if ips:
+            response_sets.append(ips)
+            all_ips |= ips
         all_ttls.extend(r.ttls)
 
-    unique_ips = len(set(all_ips))
+    unique_ips = len(all_ips)
     time_window = max(timestamps) - min(timestamps) if len(timestamps) > 1 else 0
 
-    # Calculate IP changes (sequential unique IPs)
+    # An IP change is a response that introduces at least one address no earlier
+    # response carried. Reordering inside a round-robin answer, or the same pool
+    # coming back again, is not a change.
     ip_changes = 0
-    prev_ip = None
-    for ip in all_ips:
-        if prev_ip and ip != prev_ip:
+    seen_ips: set[str] = set()
+    for idx, ips in enumerate(response_sets):
+        if idx > 0 and not ips <= seen_ips:
             ip_changes += 1
-        prev_ip = ip
+        seen_ips |= ips
 
     min_ttl = min(all_ttls) if all_ttls else 0
     avg_ttl = sum(all_ttls) / len(all_ttls) if all_ttls else 0
@@ -515,7 +776,12 @@ def detect_fast_flux(
         elif changes_per_minute > 0.5:
             score += 0.1
 
-    is_fast_flux = score >= 0.5
+    # CDNs and cloud load balancers rotate large low-TTL pools by design
+    if is_whitelisted_domain(domain):
+        score *= 0.3
+        reasons.append("whitelisted domain type")
+
+    is_fast_flux = score >= FAST_FLUX_CONFIRMED_THRESHOLD
 
     return FastFluxResult(
         domain=domain,
@@ -585,13 +851,16 @@ def analyze_query_velocity(records: list[DNSRecord]) -> list[dict[str, Any]]:
     """
     Detect high DNS query rates per source IP.
 
-    Sustained high query rates may indicate DNS tunneling or enumeration.
+    Sustained high query rates may indicate DNS tunneling or enumeration. The
+    rate is measured over at least ``QUERY_VELOCITY_MIN_WINDOW_SECONDS`` so that
+    short bursts are not reported as sustained rates.
 
     Args:
         records: List of DNS records
 
     Returns:
-        List of sources with high query velocity
+        List of sources with high query velocity. ``duration_sec`` is the observed
+        span, ``window_sec`` the span the rate was computed over.
     """
     if not records:
         return []
@@ -611,7 +880,10 @@ def analyze_query_velocity(records: list[DNSRecord]) -> list[dict[str, Any]]:
         if duration <= 0:
             continue
 
-        qps = len(timestamps) / duration
+        # Rate over at least the minimum window, so a sub-second burst of a
+        # dozen lookups is not extrapolated into a three-digit qps.
+        window = max(duration, QUERY_VELOCITY_MIN_WINDOW_SECONDS)
+        qps = len(timestamps) / window
 
         # Score based on query velocity
         score = 0.0
@@ -629,6 +901,7 @@ def analyze_query_velocity(records: list[DNSRecord]) -> list[dict[str, Any]]:
                 "src": src,
                 "queries": len(timestamps),
                 "duration_sec": round(duration, 1),
+                "window_sec": round(window, 1),
                 "qps": round(qps, 1),
                 "score": score,
                 "is_suspicious": qps > QUERY_VELOCITY_THRESHOLD,
@@ -744,10 +1017,9 @@ def analyze_dns(
     # Group by base domain
     domain_groups: dict[str, list[str]] = defaultdict(list)
     for domain in all_domains:
-        _, name, tld = extract_domain_parts(domain)
+        _, name, tld = split_registrable_domain(domain)
         if name and tld:
-            base = f"{name}.{tld}"
-            domain_groups[base].append(domain)
+            domain_groups[registrable_domain(domain)].append(domain)
 
     # Analyze each domain
     dga_results = []
@@ -770,16 +1042,17 @@ def analyze_dns(
 
     # Pre-index DNS records by base domain to avoid O(N*M) scans
     domain_records_index: dict[str, list[DNSRecord]] = defaultdict(list)
+    # (same registrable-domain helper as the grouping above, so the two agree).
+    first_seen_by_query: dict[str, float] = {}
     for r in records:
-        parts = r.query.lower().rsplit(".", 2)
-        if len(parts) >= 2:
-            base = ".".join(parts[-2:])
-            domain_records_index[base].append(r)
+        domain_records_index[registrable_domain(r.query)].append(r)
+        if r.query not in first_seen_by_query or r.ts < first_seen_by_query[r.query]:
+            first_seen_by_query[r.query] = r.ts
 
     # Tunneling detection (per base domain)
     for base_domain, subdomains in domain_groups.items():
         if len(subdomains) > TUNNELING_MIN_SUBDOMAINS:
-            pre_filtered = domain_records_index.get(base_domain.lower(), [])
+            pre_filtered = domain_records_index.get(base_domain, [])
             tunnel = detect_tunneling(records, base_domain, pre_filtered=pre_filtered)
             if tunnel.score > TUNNELING_SCORE_THRESHOLD:
                 tunneling_results.append(tunnel)
@@ -792,9 +1065,7 @@ def analyze_dns(
     top_domains = [d for d, _ in domain_counts.most_common(FAST_FLUX_TOP_DOMAINS)]
 
     for domain in top_domains:
-        parts = domain.lower().rsplit(".", 2)
-        base_key = ".".join(parts[-2:]) if len(parts) >= 2 else domain.lower()
-        pre_filtered = domain_records_index.get(base_key, [])
+        pre_filtered = domain_records_index.get(registrable_domain(domain), [])
         ff = detect_fast_flux(records, domain, pre_filtered=pre_filtered)
         if ff.score > FAST_FLUX_SCORE_THRESHOLD:
             fast_flux_results.append(ff)
@@ -819,8 +1090,13 @@ def analyze_dns(
     query_velocity = analyze_query_velocity(records)
 
     # Build result
+    record_times = [r.ts for r in records if r.ts]
     result = {
         "total_records": len(records),
+        # Observed capture span of the DNS records (epoch seconds), so consumers
+        # can place findings in time without inventing timestamps.
+        "first_record_ts": min(record_times) if record_times else None,
+        "last_record_ts": max(record_times) if record_times else None,
         "unique_domains": len(all_domains),
         "unique_dns_servers": len(dns_servers),
         "dns_servers": dns_servers[:10],  # Top 10
@@ -839,6 +1115,9 @@ def analyze_dns(
                 "length": r.length,
                 "is_dga": r.is_dga,
                 "reason": r.reason,
+                "analyzed_label": r.analyzed_label,
+                "normalized_entropy": r.normalized_entropy,
+                "first_seen": first_seen_by_query.get(r.domain),
             }
             for r in dga_results[:MAX_DGA_RESULTS]
         ],
@@ -854,6 +1133,8 @@ def analyze_dns(
                 "score": r.score,
                 "is_tunneling": r.is_tunneling,
                 "reason": r.reason,
+                "first_seen": r.first_seen,
+                "last_seen": r.last_seen,
             }
             for r in tunneling_results[:MAX_TUNNELING_RESULTS]
         ],
@@ -868,6 +1149,7 @@ def analyze_dns(
                 "score": r.score,
                 "is_fast_flux": r.is_fast_flux,
                 "reason": r.reason,
+                "first_seen": first_seen_by_query.get(r.domain),
             }
             for r in fast_flux_results[:MAX_FAST_FLUX_RESULTS]
         ],

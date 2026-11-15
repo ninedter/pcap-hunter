@@ -73,10 +73,26 @@ class ConfigManager:
         self.config_path = Path(config_path or Path.home() / ".pcap_hunter_config.json")
         self.config_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         self.key_path = Path(os.getenv("PCAP_HUNTER_CONFIG_KEY_FILE") or str(self.config_path) + ".key")
-        self._lock = FileLock(str(self.config_path) + ".lock", timeout=30, mode=0o600)
+        self._file_lock: FileLock | None = None
+        self._file_lock_pid = -1
         self.defaults = DEFAULT_CONFIG.copy()
         with self._lock:
             self._fernet = Fernet(self._master_key())
+
+    @property
+    def _lock(self) -> FileLock:
+        """Return this process's lock on the config file.
+
+        filelock refuses to acquire a lock object that was created in another
+        process, and the analysis workers are forked from a parent that has
+        usually loaded the configuration already. Building the lock per process
+        keeps a forked worker able to read saved settings and API keys.
+        """
+        pid = os.getpid()
+        if self._file_lock is None or self._file_lock_pid != pid:
+            self._file_lock = FileLock(str(self.config_path) + ".lock", timeout=30, mode=0o600)
+            self._file_lock_pid = pid
+        return self._file_lock
 
     def _master_key(self) -> bytes:
         injected = os.getenv("PCAP_HUNTER_CONFIG_KEY")

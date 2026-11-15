@@ -83,7 +83,7 @@ from app.ui.layout import (
 from app.ui.mitre_page import build_attack_mapping, render_mitre_page
 from app.ui.upload import UploadValidationError, save_uploaded_pcaps
 from app.utils.common import ensure_dir, find_bin, is_public_ipv4, make_slug, uniq_sorted
-from app.utils.network_utils import pick_top_public_ips
+from app.utils.network_utils import is_public_ip, pick_top_public_ips
 
 logger = logging.getLogger(__name__)
 
@@ -200,17 +200,17 @@ def _run_single_pcap_pipeline(
             }
         )
         arts = dict(feats.get("artifacts", {}))
-        arts["ips"] = [ip for ip in arts.get("ips", []) if is_public_ipv4(ip)]
+        arts["ips"] = [ip for ip in arts.get("ips", []) if is_public_ip(ip)]
         if osint_top_n > 0:
             arts["ips"] = pick_top_public_ips(feats, osint_top_n)
-        osint_data = osint_enrich(arts, osint_keys, phase=p)
+        osint_data = osint_enrich(arts, osint_keys, phase=p, dns_analysis=result.dns_analysis or None)
         osint_data = osint_data if isinstance(osint_data, dict) else {"ips": {}, "domains": {}, "ja3": {}}
         p.done("OSINT complete.")
 
         # Bulk rDNS for all public IPs (cached, fast)
         from app.utils.network_utils import bulk_resolve_ips
 
-        all_public = [ip for ip in features.get("artifacts", {}).get("ips", []) if is_public_ipv4(ip)]
+        all_public = [ip for ip in features.get("artifacts", {}).get("ips", []) if is_public_ip(ip)]
         rdns_map = bulk_resolve_ips(all_public, max_workers=C.RDNS_MAX_WORKERS)
         for ip, hostname in rdns_map.items():
             if ip in osint_data.get("ips", {}) and "ptr" not in osint_data["ips"][ip]:
@@ -499,7 +499,8 @@ with tab_upload:
             st.error("Please upload a PCAP or provide a valid path.")
             st.stop()
         try:
-            limit_packets = int(st.session_state.get("cfg_limit_packets", C.DEFAULT_PYSHARK_LIMIT)) or None
+            # 0 means "no limit"; None would resolve to the configured default in the runner.
+            limit_packets = int(st.session_state.get("cfg_limit_packets", C.DEFAULT_PYSHARK_LIMIT))
         except (ValueError, TypeError):
             limit_packets = C.DEFAULT_PYSHARK_LIMIT
         try:
@@ -592,7 +593,8 @@ with tab_progress:
         provider_label = llm_providers.provider_label(llm_provider)
 
         try:
-            limit_packets = int(st.session_state.get("cfg_limit_packets", C.DEFAULT_PYSHARK_LIMIT)) or None
+            # 0 means "no limit"; None would resolve to the configured default in the runner.
+            limit_packets = int(st.session_state.get("cfg_limit_packets", C.DEFAULT_PYSHARK_LIMIT))
         except (ValueError, TypeError):
             limit_packets = C.DEFAULT_PYSHARK_LIMIT
         do_pyshark = bool(st.session_state.get("cfg_do_pyshark", True))
@@ -727,7 +729,7 @@ with tab_progress:
             from app.utils.network_utils import bulk_resolve_ips
 
             merged_feats = st.session_state.get("features") or {}
-            _pub = [ip for ip in merged_feats.get("artifacts", {}).get("ips", []) if is_public_ipv4(ip)]
+            _pub = [ip for ip in merged_feats.get("artifacts", {}).get("ips", []) if is_public_ip(ip)]
             st.session_state["rdns_map"] = bulk_resolve_ips(_pub, max_workers=C.RDNS_MAX_WORKERS)
 
             # Extract JA3 from every successful run's own zeek logs (each run

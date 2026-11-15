@@ -68,6 +68,16 @@ def carve_http_payloads(pcap_path: str, out_dir: str, phase=None) -> list[dict]:
         "http.content_length",
         "-e",
         "http.file_data",
+        # Endpoints go last so the five leading columns keep their positions.
+        # They let YARA matches on carved files be attributed to a host.
+        "-e",
+        "ip.src",
+        "-e",
+        "ip.dst",
+        "-e",
+        "ipv6.src",
+        "-e",
+        "ipv6.dst",
     ]
     try:
         # Stream stdout line by line instead of buffering every carved body in
@@ -104,6 +114,10 @@ def carve_http_payloads(pcap_path: str, out_dir: str, phase=None) -> list[dict]:
             if len(parts) < 5:
                 continue
             ts, stream_id, ctype, clen, body = parts[:5]
+            extra = parts[5:9] + [""] * 4
+            # Tunnelled frames list several addresses comma-joined; the first is the outer header.
+            src_ip = (extra[0] or extra[2]).split(",")[0].strip()
+            dst_ip = (extra[1] or extra[3]).split(",")[0].strip()
             data_bytes = _decode_tshark_file_data(body)
             h = hashlib.sha256(data_bytes).hexdigest()
             fname = f"stream{stream_id}_{h[:10]}.bin"
@@ -121,6 +135,8 @@ def carve_http_payloads(pcap_path: str, out_dir: str, phase=None) -> list[dict]:
                     "content_length": clen,
                     "sha256": h,
                     "path": str(fpath),
+                    "src_ip": src_ip,
+                    "dst_ip": dst_ip,
                 }
             )
             processed += 1

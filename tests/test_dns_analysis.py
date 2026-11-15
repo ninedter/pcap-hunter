@@ -377,10 +377,12 @@ class TestQueryVelocity:
         assert len(result) == 0  # Below threshold
 
     def test_high_velocity(self):
-        # 200 queries over 2 seconds = 100 qps
+        # 1000 queries over 10 seconds = 100 qps, sustained. (Was 200 queries in
+        # 2 s; rates are now measured over a minimum 5 s window, so a 2 s burst
+        # of 200 lookups rates as 40 qps - elevated, not suspicious.)
         records = [
             DNSRecord(ts=i * 0.01, src="10.0.0.1", dst="8.8.8.8", query=f"q{i}.example.com", qtype="A")
-            for i in range(200)
+            for i in range(1000)
         ]
         result = analyze_query_velocity(records)
         assert len(result) >= 1
